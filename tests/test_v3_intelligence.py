@@ -267,6 +267,45 @@ def test_map_detection_finds_axis_candidate_without_naming(service, tmp_path):
     assert all("boost" not in json.dumps(row).lower() for row in rows)
 
 
+def test_calibration_objects_remain_unknown_without_source_evidence(service, tmp_path):
+    data = bytearray(_bin(62))
+    data[512:544] = bytes(range(32))
+    path = tmp_path / "calibration_candidate.bin"
+    path.write_bytes(bytes(data))
+    file_id = service.repo.import_file(path, "unknown")
+
+    result = service.build_calibration_objects(file_id)
+    objects = service.repo.calibration_objects_for_file(file_id)
+
+    assert result["status"] == "candidates_only"
+    assert all(item["status"] == "candidate" for item in objects)
+    assert all(item["data_type"] == "UNKNOWN" for item in objects)
+    assert all(item["endian"] == "UNKNOWN" for item in objects)
+    assert all(item["calibration_family"] == "UNKNOWN" for item in objects)
+
+
+def test_calibration_identity_groups_structure_but_stays_candidate(service, tmp_path):
+    data = bytearray(_bin(63))
+    data[512:544] = bytes(range(32))
+    first = tmp_path / "identity_a.bin"
+    second = tmp_path / "identity_b.bin"
+    first.write_bytes(bytes(data))
+    second.write_bytes(bytes(data))
+    first_id = service.repo.import_file(first, "unknown")
+    second_id = service.repo.import_file(second, "unknown")
+    service.repo.update_metadata(first_id, {"ecu_family": "TEST_ECU", "software_number": "SW_A"})
+    service.repo.update_metadata(second_id, {"ecu_family": "TEST_ECU", "software_number": "SW_B"})
+    service.build_calibration_objects(first_id)
+    service.build_calibration_objects(second_id)
+
+    result = service.build_calibration_identities([first_id, second_id])
+    identities = service.repo.calibration_identities()
+
+    assert result["identities"] >= 1
+    assert any(item["status"] == "CANDIDATE" and len(item["members"]) >= 2
+               for item in identities)
+
+
 # ---------------------------------------------------------------- Malformed OLS
 def test_malformed_ols_is_rejected_without_invention(service, tmp_path):
     bad = tmp_path / "bad.ols"

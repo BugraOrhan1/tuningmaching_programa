@@ -564,7 +564,7 @@ class MainWindow(QMainWindow):
                          f"0x{member['end_offset']:x}  {member['region_class']}  "
                          f"{member.get('software_number') or 'unknown'}")
         if pattern['alignments']:
-            lines.append('', 'Cross-software aligneringen:')
+            lines.extend(['', 'Cross-software aligneringen:'])
             for alignment in pattern['alignments'][:20]:
                 lines.append(f"  {alignment['source_software'] or '?'} 0x{(alignment['source_start'] or 0):x} "
                              f"→ {alignment['target_software'] or '?'} "
@@ -617,13 +617,13 @@ class MainWindow(QMainWindow):
             lines.append('  - ' + json.dumps(entry, ensure_ascii=False))
         related = detail['related_regions']
         if related:
-            lines.append('', f"Gerelateerde regio's (zelfde signature): {len(related)}")
+            lines.extend(['', f"Gerelateerde regio's (zelfde signature): {len(related)}"])
             for item in related[:10]:
                 lines.append(f"  regio {item['id']} pair {item['pair_id']} "
                              f"0x{item['start_offset']:x} ({item['region_class']})")
         if detail['patterns']:
-            lines.append('', 'In patronen: ' + ', '.join(
-                f"#{p['id']} ({p['status']})" for p in detail['patterns']))
+            lines.extend(['', 'In patronen: ' + ', '.join(
+                f"#{p['id']} ({p['status']})" for p in detail['patterns'])])
         self.region_detail.setPlainText('\n'.join(lines))
 
     def build_new_bin(self):
@@ -650,19 +650,19 @@ class MainWindow(QMainWindow):
                          f"{match['confirmed_projects']} projecten)")
         if not report['tuning_dna_matches']:
             lines.append('  INSUFFICIENT EVIDENCE: geen patronen boven de drempel')
-        lines.append('', 'STRUCTURELE REGIO-KANDIDATEN (geen mapnamen):')
+        lines.extend(['', 'STRUCTURELE REGIO-KANDIDATEN (geen mapnamen):'])
         for structure in report['map_structures'][:15]:
             lines.append(f"  0x{structure['start_offset']:x}: {structure['map_type']} "
                          f"(confidence {structure['map_confidence']})")
-        lines.append('', 'GERELATEERDE ORIGINALS (structureel en compatibiliteit zijn apart):')
+        lines.extend(['', 'GERELATEERDE ORIGINALS (structureel en compatibiliteit zijn apart):'])
         for original in report['related_originals'][:8]:
             lines.append(f"  {original['filename']}: structureel {original['structural_similarity']}%  "
                          f"compatibiliteit {original['software_compatibility']} "
                          f"({original['compatibility_status']})")
-        lines.append('', f"Score-componenten: {json.dumps(report['score_components'])}",
+        lines.extend(['', f"Score-componenten: {json.dumps(report['score_components'])}",
                      f"Gewichten: {json.dumps(report['score_weights'])}",
                      f"Overall confidence: {report['overall_confidence']}%",
-                     f"Evidence: {json.dumps(report['evidence_summary'], ensure_ascii=False)}")
+                 f"Evidence: {json.dumps(report['evidence_summary'], ensure_ascii=False)}"])
         self.new_bin_output.setPlainText('\n'.join(lines))
 
     def build_ols_explorer(self):
@@ -683,11 +683,11 @@ class MainWindow(QMainWindow):
                              f"(confidence {node['role_confidence']})")
             elif node['type'] == 'file':
                 lines.append(f"      └── Binary → Files #{node['id']} ({node.get('sha256', '')[:16]}…)")
-        lines.append('', f"Bewezen relaties: {graph['proven_relations']}  ·  "
-                      f"Recordtypes: {json.dumps([(r['record_type'], r['count']) for r in graph['record_types']])}")
+        lines.extend(['', f"Bewezen relaties: {graph['proven_relations']}  ·  "
+                      f"Recordtypes: {json.dumps([(r['record_type'], r['count']) for r in graph['record_types']])}"])
         for unknown in graph['unknown_relationships']:
             lines.append(f"  UNKNOWN RELATIONSHIP: {unknown['version']} — {unknown['reason']}")
-        lines.append('', graph['note'])
+        lines.extend(['', graph['note']])
         self.ols_graph_output.setPlainText('\n'.join(lines))
 
     def build_search(self):

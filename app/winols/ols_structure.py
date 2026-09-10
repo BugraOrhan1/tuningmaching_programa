@@ -192,9 +192,13 @@ def _find_first_binary(data: bytes, records: list[dict], boundary: int) -> dict 
         if start is None or boundary - start < 1024:
             continue
         blob = data[start:boundary]
+        digest = hashes(blob)
         return {"start": start, "end": boundary, "length": len(blob), "data": blob,
-                "sha256": hashes(blob)["sha256"], "filename": record["value"],
+            "payload_offset": start, "payload_length": len(blob), "end_boundary": boundary,
+            "source_offset": start, "source_length": len(blob),
+            "sha256": digest["sha256"], "md5": digest["md5"], "filename": record["value"],
                 "extraction_method": "explicit_import_header", "confidence": 100.0,
+            "boundary_status": "COMPLETE BINARY",
                 "evidence": [f"import-header met bestandsnaam op offset {record['offset']}",
                              f"binary begint op eerste niet-header byte {start}"],
                 "complete": True}
@@ -285,11 +289,16 @@ def parse_ols_structure(data: bytes) -> dict:
         available = len(data) - position
         complete = available >= stride
         blob = data[position:position + (stride if complete else available)]
+        digest = hashes(blob)
         binaries.append({"start": position, "end": position + len(blob), "length": len(blob),
-                         "data": blob, "sha256": hashes(blob)["sha256"], "filename": None,
+                 "payload_offset": position, "payload_length": len(blob),
+                 "end_boundary": position + len(blob), "source_offset": position,
+                 "source_length": len(blob), "data": blob, "sha256": digest["sha256"],
+                 "md5": digest["md5"], "filename": None,
                          "identity_header": identity,
                          "extraction_method": "repeating_identity_header",
-                         "confidence": 90.0 if complete else 70.0,
+                 "confidence": 90.0 if complete else 70.0,
+                 "boundary_status": "COMPLETE BINARY" if complete else "PARTIAL BINARY",
                          "evidence": [f"identiteitsheader op {len(page_starts)} posities met vaste "
                                       f"afstand {stride} bytes, direct na nul-padding",
                                       f"binary [{position}, {position + len(blob)})"],
@@ -308,8 +317,10 @@ def parse_ols_structure(data: bytes) -> dict:
         explicit = binary["filename"] is not None and binary["filename"] == version["source_filename"]
         version_binaries.append({
             **version,
-            "binary": {key: binary[key] for key in ("start", "end", "length", "sha256", "complete",
-                                                    "extraction_method", "confidence", "evidence")},
+            "binary": {key: binary[key] for key in ("start", "end", "length", "payload_offset",
+                                                    "payload_length", "end_boundary", "source_offset",
+                                                    "source_length", "sha256", "md5", "complete",
+                                                    "boundary_status", "extraction_method", "confidence", "evidence")},
             "relation_type": "version_to_binary_explicit" if explicit else "version_to_binary_order_inferred",
             "role_confidence": version["confidence"],
             "relation_confidence": 100.0 if explicit else 75.0,
@@ -324,9 +335,10 @@ def parse_ols_structure(data: bytes) -> dict:
         version_binaries.append({"version_index": None, "name": None, "path": None,
                                  "source_filename": None, "role": "unknown", "confidence": 0.0,
                                  "reason": "geen versierecord gevonden",
-                                 "binary": {key: binary[key] for key in
-                                            ("start", "end", "length", "sha256", "complete",
-                                             "extraction_method", "confidence", "evidence")},
+                                  "binary": {key: binary[key] for key in
+                                      ("start", "end", "length", "payload_offset", "payload_length",
+                                       "end_boundary", "source_offset", "source_length", "sha256", "md5",
+                                       "complete", "boundary_status", "extraction_method", "confidence", "evidence")},
                                  "relation_type": "binary_without_version",
                                  "relation_evidence": "binary aanwezig maar geen koppelende versierecord"})
     for item in version_binaries:
@@ -344,8 +356,10 @@ def parse_ols_structure(data: bytes) -> dict:
         },
         "versions": [{key: version[key] for key in ("version_index", "name", "path", "source_filename",
                                                     "role", "confidence", "reason")} for version in versions],
-        "binaries": [{key: binary[key] for key in ("start", "end", "length", "sha256", "complete",
-                                                   "extraction_method", "confidence", "evidence",
+        "binaries": [{key: binary[key] for key in ("start", "end", "length", "payload_offset",
+                               "payload_length", "end_boundary", "source_offset",
+                               "source_length", "sha256", "md5", "complete",
+                               "boundary_status", "extraction_method", "confidence", "evidence",
                                                    "filename", "identity_header") if key in binary}
                      for binary in binaries],
         "version_binaries": version_binaries,

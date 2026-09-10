@@ -57,7 +57,8 @@ class RepositoryV3Mixin:
 
     def all_candidate_regions(self, confirmed_only: bool = True) -> list[dict]:
         query = ("SELECT r.* FROM tuning_regions r JOIN file_pairs p ON p.id=r.pair_id"
-                 + (" WHERE p.confirmed=1" if confirmed_only else "")
+                 + (" WHERE p.confirmed=1 AND r.status <> 'rejected'" if confirmed_only
+                    else " WHERE r.status <> 'rejected'")
                  + " ORDER BY r.pair_id, r.seq")
         rows = self.db.rows(query)
         for row in rows:
@@ -87,7 +88,9 @@ class RepositoryV3Mixin:
                           VALUES (?,?,?,?,?)
                           ON CONFLICT(pattern_key) DO UPDATE SET payload=excluded.payload,
                           frequency=excluded.frequency, confidence=excluded.confidence,
-                          status=excluded.status, updated_at=CURRENT_TIMESTAMP""",
+                          status=CASE WHEN tuning_patterns.status IN ('verified','rejected')
+                                      THEN tuning_patterns.status ELSE excluded.status END,
+                          updated_at=CURRENT_TIMESTAMP""",
                        (pattern_key, json.dumps(payload, ensure_ascii=False), frequency,
                         confidence, status))
             return db.execute("SELECT id FROM tuning_patterns WHERE pattern_key=?",
@@ -107,6 +110,8 @@ class RepositoryV3Mixin:
         if status:
             query += " WHERE status=?"
             args = (status,)
+        else:
+            query += " WHERE status <> 'rejected'"
         query += " ORDER BY frequency DESC, confidence DESC, id"
         rows = self.db.rows(query, args)
         for row in rows:
@@ -115,7 +120,7 @@ class RepositoryV3Mixin:
                 """SELECT m.*, r.start_offset, r.end_offset, r.length, r.region_class,
                           r.stage, r.software_number, r.ecu_family, r.structural_signature
                    FROM tuning_pattern_members m JOIN tuning_regions r ON r.id=m.region_id
-                   WHERE m.pattern_id=?""", (row["id"],))
+                   WHERE m.pattern_id=? AND r.status <> 'rejected'""", (row["id"],))
             row["alignments"] = self.db.rows(
                 "SELECT * FROM software_alignments WHERE pattern_id=?", (row["id"],))
         return rows
@@ -174,6 +179,48 @@ class RepositoryV3Mixin:
         for row in rows:
             row["dimensions"] = json.loads(row["dimensions"]) if row["dimensions"] else None
             row["payload"] = json.loads(row["payload"])
+        return rows
+
+    def replace_calibration_objects(self, file_id: int, objects: list[dict]) -> None:
+        """Replace derived calibration candidates while preserving source files."""
+        with self.db.connect() as db:
+            db.execute("DELETE FROM calibration_objects WHERE file_id=?", (file_id,))
+            db.executemany("""INSERT INTO calibration_objects
+                (file_id,map_region_id,object_key,ecu_family,hardware,software_family,
+                 calibration_family,dimensions,data_type,element_size,endian,row_count,
+                 column_count,axis_count,axis_signature,surrounding_signature,
+                 internal_pattern_signature,neighboring_regions,value_statistics,entropy,
+                 context_hashes,relative_layout,structural_signature,detection_confidence,
+                 evidence,status)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                [(file_id, item.get("map_region_id"), item["object_key"], item.get("ecu_family"),
+                  item.get("hardware"), item.get("software_family"), item.get("calibration_family"),
+                  json.dumps(item.get("dimensions")), item.get("data_type", "UNKNOWN"),
+                  item.get("element_size"), item.get("endian", "UNKNOWN"), item.get("row_count"),
+                  item.get("column_count"), item.get("axis_count", 0), item.get("axis_signature", "UNKNOWN"),
+                  item.get("surrounding_signature", "UNKNOWN"), item.get("internal_pattern_signature", "UNKNOWN"),
+                  json.dumps(item.get("neighboring_regions", [])), json.dumps(item.get("value_statistics", {})),
+                  item.get("entropy"), json.dumps(item.get("context_hashes", {})),
+                  json.dumps(item.get("relative_layout", {})), item["structural_signature"],
+                  item.get("detection_confidence", 0.0), json.dumps(item.get("evidence", []), ensure_ascii=False),
+                  item.get("status", "candidate")) for item in objects])
+
+    def calibration_objects_for_file(self, file_id: int) -> list[dict]:
+        rows = self.db.rows("SELECT * FROM calibration_objects WHERE file_id=? ORDER BY id", (file_id,))
+        for row in rows:
+            for field in ("dimensions", "neighboring_regions", "value_statistics", "context_hashes",
+                          "relative_layout", "evidence"):
+                row[field] = json.loads(row[field]) if row[field] else None
+        return rows
+
+    def calibration_identities(self) -> list[dict]:
+        rows = self.db.rows("SELECT * FROM calibration_identities ORDER BY confidence DESC, id")
+        for row in rows:
+            for field in ("software_variants", "supporting_evidence", "contradicting_evidence"):
+                row[field] = json.loads(row[field]) if row[field] else []
+            row["members"] = self.db.rows(
+                "SELECT * FROM calibration_identity_members WHERE identity_id=? ORDER BY id",
+                (row["id"],))
         return rows
 
     # ---------- evidence ----------

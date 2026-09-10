@@ -247,14 +247,21 @@ class Repository(RepositoryV3Mixin):
         for binary in structure["binaries"]:
             with self.db.connect() as db:
                 db.execute("""INSERT INTO ols_binaries
-                    (project_id, internal_id, offset, length, sha256, content_available,
-                     source_reference, confidence, status, evidence)
-                    VALUES (?,?,?,?,?,?,?,?,?,?)""",
-                           (project_id, f"binary@{binary['start']}", binary["start"], binary["length"],
-                            binary["sha256"], 1, binary.get("filename") or binary.get("identity_header"),
-                            binary["confidence"],
-                            "extracted" if binary["complete"] else "extracted_incomplete",
-                            json.dumps(binary["evidence"], ensure_ascii=False)))
+                      (project_id, internal_id, offset, length, payload_offset, payload_length,
+                    end_boundary, source_offset, source_length, sha256, md5, content_available,
+                    source_reference, confidence, status, boundary_status, evidence)
+                      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                          (project_id, f"binary@{binary['start']}", binary["start"], binary["length"],
+                        binary.get("payload_offset", binary["start"]),
+                        binary.get("payload_length", binary["length"]),
+                        binary.get("end_boundary", binary["end"]),
+                        binary.get("source_offset", binary["start"]),
+                        binary.get("source_length", binary["length"]), binary["sha256"],
+                        binary.get("md5"), 1,
+                        binary.get("filename") or binary.get("identity_header"), binary["confidence"],
+                        "extracted" if binary["complete"] else "extracted_incomplete",
+                        binary.get("boundary_status", "COMPLETE BINARY" if binary["complete"] else "PARTIAL BINARY"),
+                        json.dumps(binary["evidence"], ensure_ascii=False)))
 
     def upsert_ols_file(self, source_path: str, filename: str, data: bytes, kind: str,
                         detection_method: str, confidence: float, evidence: list,
@@ -414,6 +421,13 @@ class Repository(RepositoryV3Mixin):
                            match_score: float, applied: int, skipped: int, payload: dict,
                            output_path: str, sha: dict, size: int) -> int:
         with self.db.connect() as db:
+            existing = db.execute("""SELECT id FROM tune_candidates
+                WHERE target_file_id=? AND sha256=? AND status='candidate'
+                AND (pair_id=? OR (pair_id IS NULL AND ? IS NULL))
+                ORDER BY id LIMIT 1""",
+                                 (target_file_id, sha["sha256"], pair_id, pair_id)).fetchone()
+            if existing:
+                return existing[0]
             cursor = db.execute("""INSERT INTO tune_candidates
                 (target_file_id, pair_id, threshold, match_score, applied_regions, skipped_regions,
                  payload, output_path, sha256, size)
@@ -715,26 +729,50 @@ class Repository(RepositoryV3Mixin):
         return {"updated": updated, "review": review, "skipped": skipped,
                 "note": "Alleen eenduidige evidence is automatisch toegepast; reviewgevallen blijven unknown."}
 
-    def import_folder(self, folder: str, kind: str = "auto", progress=None) -> dict:
+    def import_folder(self, folder: str, kind: str = "auto", progress=None,
+                      resume: bool = False) -> dict:
         source = Path(folder).resolve()
         if not source.is_dir():
             raise ValueError("Importmap bestaat niet")
-        paths = [p for p in source.rglob('*') if p.is_file() and p.suffix.lower() in {'.bin', '.ori', '.ols'}
-                 and not p.resolve().is_relative_to(self.root.resolve())]
-        result = {"processed": 0, "projects": 0, "errors": []}
-        for index, path in enumerate(paths):
-            try:
-                if path.suffix.lower() == '.ols':
-                    self.import_project(path)
-                    result["projects"] += 1
-                else:
-                    self.import_file(path, kind)
-                    result["processed"] += 1
-            except (OSError, ValueError) as exc:
-                result["errors"].append({"path": str(path), "error": str(exc)})
-                LOG.exception("Import failed: %s", path)
-            if progress:
-                progress(f"Import {index+1}/{len(paths)}: {path.name}")
+        paths = sorted((p for p in source.rglob('*')
+                        if p.is_file() and p.suffix.lower() in {'.bin', '.ori', '.ols'}
+                        and not p.resolve().is_relative_to(self.root.resolve())),
+                       key=lambda path: str(path).casefold())
+        run = self.resume_run("folder_import") if resume else None
+        run_id = run["id"] if run else self.start_run(
+            "folder_import", {"folder": str(source), "kind": kind,
+                               "paths": [str(path) for path in paths]})
+        start_index = int(run["checkpoint"].get("next_index", 0)) if run else 0
+        result = dict(run["stats"] if run else {})
+        result.setdefault("processed", 0)
+        result.setdefault("projects", 0)
+        result.setdefault("errors", [])
+        result["skipped"] = start_index
+        try:
+            for index, path in enumerate(paths):
+                if index < start_index:
+                    continue
+                try:
+                    if path.suffix.lower() == '.ols':
+                        self.import_project(path)
+                        result["projects"] += 1
+                    else:
+                        self.import_file(path, kind)
+                        result["processed"] += 1
+                except (OSError, ValueError) as exc:
+                    result["errors"].append({"path": str(path), "error": str(exc)})
+                    LOG.exception("Import failed: %s", path)
+                self.checkpoint_run(run_id, {"next_index": index + 1,
+                                             "last_path": str(path)}, result)
+                if progress:
+                    progress(f"Import {index+1}/{len(paths)}: {path.name}")
+        except Exception:
+            self.checkpoint_run(run_id, {"next_index": index,
+                                         "last_path": str(paths[index]) if paths else None}, result)
+            self.finish_run(run_id, "interrupted", result)
+            raise
+        self.finish_run(run_id, "done", result)
+        result["run_id"] = run_id
         return result
 
     def update_metadata(self, file_id: int, values: dict) -> None:

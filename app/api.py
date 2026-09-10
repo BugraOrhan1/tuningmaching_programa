@@ -287,6 +287,22 @@ def create_api(service: Service, token: str) -> FastAPI:
     def map_structures_get(file_id: int):
         return service.repo.map_regions_for_file(file_id)
 
+    @api.post('/files/{file_id}/calibration-objects')
+    def calibration_objects(file_id: int):
+        return service.build_calibration_objects(file_id)
+
+    @api.get('/files/{file_id}/calibration-objects')
+    def calibration_objects_get(file_id: int):
+        return service.repo.calibration_objects_for_file(file_id)
+
+    @api.post('/calibration-identities/rebuild')
+    def calibration_identities_rebuild():
+        return service.build_calibration_identities()
+
+    @api.get('/calibration-identities')
+    def calibration_identities():
+        return service.repo.calibration_identities()
+
     @api.get('/files/{file_id}/new-bin-report')
     def new_bin_report(file_id: int, threshold: float = 70.0):
         return service.new_bin_report(file_id, threshold)

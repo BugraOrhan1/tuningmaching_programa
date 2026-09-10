@@ -60,9 +60,12 @@ CREATE TABLE IF NOT EXISTS ols_record_references (
  created_at TEXT DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS ols_binaries (
  id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL REFERENCES winols_projects(id) ON DELETE CASCADE,
- version_id TEXT, internal_id TEXT, offset INTEGER, length INTEGER, sha256 TEXT,
+ version_id TEXT, internal_id TEXT, offset INTEGER, length INTEGER, payload_offset INTEGER,
+ payload_length INTEGER, end_boundary INTEGER, source_offset INTEGER, source_length INTEGER,
+ sha256 TEXT, md5 TEXT,
  content_available INTEGER NOT NULL DEFAULT 0, source_reference TEXT,
  confidence REAL NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'unknown',
+ boundary_status TEXT NOT NULL DEFAULT 'UNKNOWN',
  evidence TEXT NOT NULL DEFAULT '[]', created_at TEXT DEFAULT CURRENT_TIMESTAMP);
 CREATE INDEX IF NOT EXISTS ols_binaries_project ON ols_binaries(project_id);
 CREATE TABLE IF NOT EXISTS ols_version_relations (
@@ -158,7 +161,7 @@ CREATE TABLE IF NOT EXISTS tune_candidates (
 CREATE INDEX IF NOT EXISTS tune_candidates_target ON tune_candidates(target_file_id);
 """
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 6
 
 
 class Database:
@@ -170,7 +173,11 @@ class Database:
             db.executescript(SCHEMA)
             db.executescript(V3_SCHEMA)
             # additieve kolommigrale veiligheid voor reeds aangemaakte V3-tabellen
-            expected = {"tuning_regions": {"original_region_context_hash"}}
+            expected = {
+                "tuning_regions": {"original_region_context_hash"},
+                "ols_binaries": {"payload_offset", "payload_length", "end_boundary",
+                                 "source_offset", "source_length", "md5", "boundary_status"},
+            }
             for table, columns in expected.items():
                 present = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
                 for column in columns - present:
@@ -252,6 +259,37 @@ CREATE TABLE IF NOT EXISTS map_regions (
  status TEXT NOT NULL DEFAULT 'candidate', created_at TEXT DEFAULT CURRENT_TIMESTAMP,
  UNIQUE(file_id, start_offset, end_offset));
 CREATE INDEX IF NOT EXISTS map_regions_file ON map_regions(file_id);
+CREATE TABLE IF NOT EXISTS calibration_objects (
+ id INTEGER PRIMARY KEY, file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+ map_region_id INTEGER REFERENCES map_regions(id) ON DELETE SET NULL,
+ object_key TEXT NOT NULL, ecu_family TEXT, hardware TEXT, software_family TEXT,
+ calibration_family TEXT, dimensions TEXT, data_type TEXT, element_size INTEGER,
+ endian TEXT, row_count INTEGER, column_count INTEGER, axis_count INTEGER,
+ axis_signature TEXT, surrounding_signature TEXT, internal_pattern_signature TEXT,
+ neighboring_regions TEXT NOT NULL DEFAULT '[]', value_statistics TEXT NOT NULL DEFAULT '{}',
+ entropy REAL, context_hashes TEXT NOT NULL DEFAULT '{}', relative_layout TEXT NOT NULL DEFAULT '{}',
+ structural_signature TEXT NOT NULL, detection_confidence REAL NOT NULL DEFAULT 0.0,
+ evidence TEXT NOT NULL DEFAULT '[]', status TEXT NOT NULL DEFAULT 'candidate',
+ created_at TEXT DEFAULT CURRENT_TIMESTAMP, updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+ UNIQUE(file_id, object_key));
+CREATE INDEX IF NOT EXISTS calibration_objects_file ON calibration_objects(file_id);
+CREATE INDEX IF NOT EXISTS calibration_objects_signature ON calibration_objects(structural_signature);
+CREATE TABLE IF NOT EXISTS calibration_identities (
+ id INTEGER PRIMARY KEY, identity_key TEXT NOT NULL UNIQUE, ecu_family TEXT,
+ structural_signature TEXT NOT NULL, software_variants TEXT NOT NULL DEFAULT '[]',
+ project_count INTEGER NOT NULL DEFAULT 0, region_count INTEGER NOT NULL DEFAULT 0,
+ supporting_evidence TEXT NOT NULL DEFAULT '[]', contradicting_evidence TEXT NOT NULL DEFAULT '[]',
+ confidence REAL NOT NULL DEFAULT 0.0, status TEXT NOT NULL DEFAULT 'CANDIDATE',
+ created_at TEXT DEFAULT CURRENT_TIMESTAMP, updated_at TEXT DEFAULT CURRENT_TIMESTAMP);
+CREATE INDEX IF NOT EXISTS calibration_identities_signature ON calibration_identities(structural_signature);
+CREATE TABLE IF NOT EXISTS calibration_identity_members (
+ id INTEGER PRIMARY KEY, identity_id INTEGER NOT NULL REFERENCES calibration_identities(id) ON DELETE CASCADE,
+ calibration_object_id INTEGER NOT NULL REFERENCES calibration_objects(id) ON DELETE CASCADE,
+ file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+ source_start INTEGER, source_end INTEGER, software TEXT,
+ relation_confidence REAL NOT NULL DEFAULT 0.0, evidence TEXT NOT NULL DEFAULT '[]',
+ status TEXT NOT NULL DEFAULT 'CANDIDATE', UNIQUE(identity_id, calibration_object_id));
+CREATE INDEX IF NOT EXISTS calibration_identity_members_identity ON calibration_identity_members(identity_id);
 CREATE TABLE IF NOT EXISTS evidence (
  id INTEGER PRIMARY KEY, subject_type TEXT NOT NULL, subject_id TEXT NOT NULL,
  evidence_type TEXT NOT NULL, value TEXT NOT NULL,

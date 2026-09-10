@@ -7,6 +7,7 @@ evidence + confidence; zonder bewijs blijft het UNKNOWN (zie EVIDENCE_MODEL.md).
 from __future__ import annotations
 
 import bisect
+import hashlib
 import json
 import math
 
@@ -73,6 +74,11 @@ class ServiceV3Mixin:
                     stats["regions"] += len(report["blocks"])
                 except (OSError, ValueError):
                     stats["errors"] += 1
+                except Exception:
+                    stats["errors"] += 1
+                    self.repo.checkpoint_run(run_id, {"last_pair_id": pair["id"]}, stats)
+                    self.repo.finish_run(run_id, "interrupted", stats)
+                    raise
                 if progress:
                     progress(f"Regio's {stats['pairs']}/{len(pairs)}")
             self.repo.checkpoint_run(run_id, {"last_pair_id": batch[-1]["id"]}, stats)
@@ -404,6 +410,25 @@ class ServiceV3Mixin:
             differences = np.diff(sequence.astype(np.int64))
             return bool((differences >= 0).all() and (differences > 0).any())
 
+        def axis_features(values: np.ndarray, element_size: int) -> dict:
+            numeric = values.astype(np.int64)
+            differences = np.diff(numeric)
+            return {
+                "monotonicity": "non_decreasing" if monotone(values) else "unknown",
+                "element_count": int(len(values)),
+                "step_min": int(differences.min()) if len(differences) else None,
+                "step_max": int(differences.max()) if len(differences) else None,
+                "step_repetition": round(float(np.mean(differences == differences[0])), 3)
+                if len(differences) else 0.0,
+                "element_size": element_size,
+                "signed_candidate": False,
+                "unsigned_candidate": True,
+                "endian_candidate": "little" if element_size == 2 else "byte",
+                "unit": "UNKNOWN",
+                "factor": "UNKNOWN",
+                "offset": "UNKNOWN",
+            }
+
         for window in (8, 16, 32):
             for position in range(0, len(scan) - window * 2, step):
                 segment = scan[position:position + window * 2]
@@ -421,7 +446,8 @@ class ServiceV3Mixin:
                                     "map_confidence": round(min(90.0, 60.0 + window * 0.75), 2),
                                     "dimensions": [window], "element_size": 2,
                                     "payload": {"ordering": "observed_high_byte_second",
-                                                "criteria": "monotone reeks over 8+ elementen"},
+                                                "criteria": "monotone reeks over 8+ elementen",
+                                                "axis_features": axis_features(values, 2)},
                                     "status": "candidate"})
                                 break
                         else:
@@ -430,7 +456,8 @@ class ServiceV3Mixin:
                                 "map_type": "axis_candidate",
                                 "map_confidence": round(min(90.0, 60.0 + window * 0.75), 2),
                                 "dimensions": [window * 2], "element_size": 1,
-                                "payload": {"criteria": "monotone reeks over 8+ elementen"},
+                                "payload": {"criteria": "monotone reeks over 8+ elementen",
+                                            "axis_features": axis_features(values, 1)},
                                 "status": "candidate"})
                             break
                 if len(structures) >= 200:
@@ -473,6 +500,104 @@ class ServiceV3Mixin:
                 "note": "Structuurkandidaten zonder functie of naam; tabelassen zijn "
                         "niet geverifieerd."}
 
+    def build_calibration_objects(self, file_id: int, max_scan: int = 1 << 20) -> dict:
+        """Persist structural calibration candidates without assigning semantics."""
+        self.detect_map_structures(file_id, max_scan=max_scan)
+        file_row = self.repo.file(file_id)
+        regions = self.repo.map_regions_for_file(file_id)
+        objects = []
+        for region in regions:
+            dimensions = region.get("dimensions")
+            payload = region.get("payload") or {}
+            signature_input = {
+                "map_type": region["map_type"], "dimensions": dimensions,
+                "element_size": region.get("element_size"),
+                "criteria": payload.get("criteria", "UNKNOWN"),
+            }
+            structural_signature = hashlib.sha256(
+                json.dumps(signature_input, sort_keys=True).encode("utf-8")).hexdigest()
+            axis_candidate = region["map_type"] == "axis_candidate"
+            objects.append({
+                "map_region_id": region["id"],
+                "object_key": f"region:{region['start_offset']}:{region['end_offset']}",
+                "ecu_family": file_row.get("ecu_family") or "UNKNOWN",
+                "hardware": file_row.get("hardware_number") or "UNKNOWN",
+                "software_family": file_row.get("software_number") or "UNKNOWN",
+                "calibration_family": file_row.get("calibration_number") or "UNKNOWN",
+                "dimensions": dimensions,
+                "data_type": "UNKNOWN",
+                "element_size": region.get("element_size"),
+                "endian": "UNKNOWN",
+                "row_count": dimensions[0] if dimensions and len(dimensions) > 1 else None,
+                "column_count": dimensions[1] if dimensions and len(dimensions) > 1 else (dimensions[0] if dimensions else None),
+                "axis_count": 1 if axis_candidate else 0,
+                "axis_signature": payload.get("criteria", "UNKNOWN") if axis_candidate else "UNKNOWN",
+                "surrounding_signature": "UNKNOWN",
+                "internal_pattern_signature": structural_signature,
+                "neighboring_regions": [],
+                "value_statistics": {},
+                "entropy": None,
+                "context_hashes": {},
+                "relative_layout": {"start_offset": region["start_offset"], "end_offset": region["end_offset"]},
+                "structural_signature": structural_signature,
+                "detection_confidence": region["map_confidence"],
+                "evidence": ["map_region structure candidate", payload.get("criteria", "UNKNOWN")],
+                "status": "candidate",
+            })
+        self.repo.replace_calibration_objects(file_id, objects)
+        return {"file_id": file_id, "objects": len(objects),
+                "status": "candidates_only", "note": "Geen mapnaam, factor, unit of functie bewezen."}
+
+    def build_calibration_identities(self, file_ids: list[int] | None = None) -> dict:
+        """Group identical structural candidates as unverified identities."""
+        if file_ids is None:
+            rows = self.repo.db.rows("SELECT * FROM calibration_objects ORDER BY id")
+        else:
+            unique_ids = list(dict.fromkeys(file_ids))
+            if not unique_ids:
+                return {"identities": 0, "members": 0, "status": "candidates_only"}
+            marks = ",".join("?" for _ in unique_ids)
+            rows = self.repo.db.rows(
+                f"SELECT * FROM calibration_objects WHERE file_id IN ({marks}) ORDER BY id",
+                tuple(unique_ids))
+        groups: dict[tuple[str, str], list[dict]] = {}
+        for row in rows:
+            groups.setdefault((row.get("ecu_family") or "UNKNOWN", row["structural_signature"]), []).append(row)
+        with self.repo.db.connect() as db:
+            db.execute("DELETE FROM calibration_identity_members")
+            db.execute("DELETE FROM calibration_identities")
+            identity_count = 0
+            member_count = 0
+            for (ecu_family, signature), members in sorted(groups.items()):
+                key = f"v1:{ecu_family}:{signature}"
+                source_file_ids = sorted({member["file_id"] for member in members})
+                software = sorted({self.repo.file(member["file_id"]).get("software_number") or "UNKNOWN"
+                                   for member in members})
+                confidence = round(min(95.0, 55.0 + 10.0 * math.log2(1 + len(source_file_ids))), 2)
+                evidence = [f"{len(members)} structurele kandidaat-objecten",
+                            f"{len(source_file_ids)} files met dezelfde signature"]
+                cursor = db.execute("""INSERT INTO calibration_identities
+                    (identity_key,ecu_family,structural_signature,software_variants,project_count,
+                     region_count,supporting_evidence,confidence,status)
+                    VALUES (?,?,?,?,?,?,?,?,?)""",
+                    (key, ecu_family, signature, json.dumps(software), len(source_file_ids),
+                     len(members), json.dumps(evidence, ensure_ascii=False), confidence, "CANDIDATE"))
+                identity_id = cursor.lastrowid
+                identity_count += 1
+                for member in members:
+                    layout = json.loads(member["relative_layout"] or "{}")
+                    db.execute("""INSERT INTO calibration_identity_members
+                        (identity_id,calibration_object_id,file_id,source_start,source_end,software,
+                         relation_confidence,evidence,status)
+                        VALUES (?,?,?,?,?,?,?,?,?)""",
+                        (identity_id, member["id"], member["file_id"], layout.get("start_offset"),
+                         layout.get("end_offset"), self.repo.file(member["file_id"]).get("software_number") or "UNKNOWN",
+                         min(confidence, float(member["detection_confidence"])),
+                         json.dumps(["exact structural signature match"]), "CANDIDATE"))
+                    member_count += 1
+        return {"identities": identity_count, "members": member_count,
+                "status": "candidates_only", "confidence_type": "HEURISTIC CONFIDENCE"}
+
     # ------------------------------------------------------------------
     # FASE 7: New BIN Analysis
     # ------------------------------------------------------------------
@@ -482,22 +607,35 @@ class ServiceV3Mixin:
         analysis = self.analyze(file_row["filepath"])
         best = analysis["matches"][0] if analysis["matches"] else None
         pattern_matches = self.find_pattern_matches(query, threshold)
-        structures = self.detect_map_structures(file_id)
+        self.build_calibration_objects(file_id)
         related_projects = sorted({pair["id"] for match in analysis["matches"]
                                    for pair in match["pairs"]})
+        identification = analysis.get("identification", {})
+        def evidence_confidence(group: str) -> float:
+            return max((item.get("confidence", 0.0)
+                        for item in identification.get(group, []) if item.get("status") != "unknown"),
+                       default=0.0)
+
         components = {
             "binary_similarity": best["match_score"] if best else 0.0,
-            "pattern_confidence": pattern_matches[0]["pattern_confidence"] if pattern_matches else 0.0,
-            "context_alignment": pattern_matches[0]["context_similarity"] if pattern_matches else 0.0,
             "structural_similarity": best.get("structural_similarity", 0.0) if best else 0.0,
+            "ecu_confidence": evidence_confidence("ecu"),
+            "hardware_confidence": evidence_confidence("hardware"),
+            "software_confidence": evidence_confidence("software"),
+            "calibration_confidence": evidence_confidence("calibration"),
+            "calibration_identity_confidence": 0.0,
+            "tuning_pattern_confidence": pattern_matches[0]["pattern_confidence"] if pattern_matches else 0.0,
+            "cross_software_confidence": 0.0,
+            "evidence_strength": min(100.0, len(related_projects) * 10.0 + len(pattern_matches) * 5.0),
+            "contradiction_penalty": 0.0,
+            "context_alignment": pattern_matches[0]["context_similarity"] if pattern_matches else 0.0,
         }
         weights = {name: value for name, value in
-                   {"binary_similarity": 0.4, "pattern_confidence": 0.25,
+                   {"binary_similarity": 0.4, "tuning_pattern_confidence": 0.25,
                     "context_alignment": 0.2, "structural_similarity": 0.15}.items()
                    if components[name] > 0}
         overall = round(sum(components[name] * weights[name] for name in weights)
                         / sum(weights.values()), 2) if weights else 0.0
-        identification = analysis.get("identification", {})
         return {
             "file_id": file_id, "filename": file_row["filename"],
             "identification": identification,
@@ -512,8 +650,11 @@ class ServiceV3Mixin:
                                   for match in analysis["matches"][:10]],
             "tuning_dna_matches": pattern_matches,
             "map_structures": self.repo.map_regions_for_file(file_id)[:100],
+            "calibration_objects": self.repo.calibration_objects_for_file(file_id)[:100],
             "score_components": components,
             "score_weights": weights,
+            "confidence_type": "HEURISTIC CONFIDENCE",
+            "statistically_calibrated": False,
             "overall_confidence": overall,
             "evidence_summary": {
                 "confirmed_pairs": len(related_projects),
@@ -576,10 +717,20 @@ class ServiceV3Mixin:
         for binary in binaries:
             nodes.append({"type": "ols_binary", "id": f"bin:{binary['internal_id']}",
                           "offset": binary["offset"], "length": binary["length"],
-                          "status": binary["status"]})
+                          "status": binary["status"],
+                          "boundary_status": binary.get("boundary_status", "UNKNOWN"),
+                          "payload_offset": binary.get("payload_offset"),
+                          "payload_length": binary.get("payload_length")})
             edges.append({"from": f"project:{project_id}",
                           "to": f"bin:{binary['internal_id']}", "relation": "contains",
                           "confidence": binary["confidence"]})
+        for relation in references:
+            edges.append({"from": f"record:{relation['source_record_id']}",
+                          "to": (f"record:{relation['target_record_id']}"
+                                  if relation["target_record_id"] else "UNKNOWN"),
+                          "relation": relation["relation_type"],
+                          "confidence": relation["confidence"],
+                          "evidence": relation["evidence"]})
         return {"project": {"id": project_id, "filename": project["filename"],
                             "sha256": project["sha256"]},
                 "nodes": nodes, "edges": edges,

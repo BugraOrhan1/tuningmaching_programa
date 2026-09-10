@@ -179,6 +179,8 @@ class Service(ServiceV3Mixin):
                 raise ValueError('Ongeldige Tuning DNA-status')
             query += ' WHERE status=?'
             args = (status,)
+        else:
+            query += " WHERE status <> 'rejected'"
         query += ' ORDER BY confidence DESC, id DESC'
         rows = self.repo.db.rows(query, args)
         for row in rows:
@@ -191,6 +193,8 @@ class Service(ServiceV3Mixin):
         if status is not None:
             query += ' WHERE status=?'
             args = (status,)
+        else:
+            query += " WHERE status <> 'rejected'"
         query += ' ORDER BY frequency DESC, confidence DESC, id DESC'
         rows = self.repo.db.rows(query, args)
         for row in rows:
