@@ -6,3 +6,6 @@ __pycache__/
 reports/
 app.log
 data_backup_*/
+data/originals/
+data/tuned/
+data/unknown/
