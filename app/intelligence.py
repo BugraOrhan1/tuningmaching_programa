@@ -60,7 +60,9 @@ class ServiceV3Mixin:
         run = self.repo.resume_run("pattern_rebuild") if resume else None
         run_id = run["id"] if run else self.repo.start_run("pattern_rebuild", {"batch_size": batch_size})
         last_pair = run["checkpoint"].get("last_pair_id", 0) if run else 0
-        stats = dict(run["stats"]) if run else {"pairs": 0, "regions": 0, "errors": 0}
+        stats = dict(run["stats"]) if run else {}
+        for key in ("pairs", "regions", "errors"):
+            stats.setdefault(key, 0)
         pairs = [p for p in self.repo.pairs() if p["confirmed"] and p["id"] > last_pair]
         for index in range(0, len(pairs), batch_size):
             batch = pairs[index:index + batch_size]
@@ -88,6 +90,10 @@ class ServiceV3Mixin:
             if len(members) >= 3 and len(families) >= 2 and len(tuned_hashes) >= 3:
                 shared_ids.extend(member["id"] for member in members)
         self.repo.mark_shared_regions(shared_ids)
+        shared_set = set(shared_ids)
+        for region in regions:
+            if region["id"] in shared_set:
+                region["region_class"] = "checksum_candidate"
         stats["checksum_candidates"] = len(shared_ids)
 
         tunable = [region for region in regions if region["region_class"] not in

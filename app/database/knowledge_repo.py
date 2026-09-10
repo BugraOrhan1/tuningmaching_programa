@@ -112,8 +112,8 @@ class RepositoryV3Mixin:
         for row in rows:
             row["payload"] = json.loads(row["payload"])
             row["members"] = self.db.rows(
-                """SELECT m.*, r.start_offset, r.end_offset, r.region_class, r.stage,
-                          r.software_number, r.ecu_family
+                """SELECT m.*, r.start_offset, r.end_offset, r.length, r.region_class,
+                          r.stage, r.software_number, r.ecu_family, r.structural_signature
                    FROM tuning_pattern_members m JOIN tuning_regions r ON r.id=m.region_id
                    WHERE m.pattern_id=?""", (row["id"],))
             row["alignments"] = self.db.rows(
