@@ -158,7 +158,7 @@ CREATE TABLE IF NOT EXISTS tune_candidates (
 CREATE INDEX IF NOT EXISTS tune_candidates_target ON tune_candidates(target_file_id);
 """
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 class Database:
@@ -168,6 +168,13 @@ class Database:
         with self.connect() as db:
             db.execute("PRAGMA journal_mode=WAL")
             db.executescript(SCHEMA)
+            db.executescript(V3_SCHEMA)
+            # additieve kolommigrale veiligheid voor reeds aangemaakte V3-tabellen
+            expected = {"tuning_regions": {"original_region_context_hash"}}
+            for table, columns in expected.items():
+                present = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
+                for column in columns - present:
+                    db.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT")
             current = db.execute("PRAGMA user_version").fetchone()[0]
             if current < 2:
                 db.execute("INSERT OR IGNORE INTO schema_migrations(version) VALUES (2)")
@@ -191,3 +198,80 @@ class Database:
     def rows(self, sql: str, args: tuple = ()) -> list[dict]:
         with self.connect() as db:
             return [dict(row) for row in db.execute(sql, args)]
+
+V3_SCHEMA = """
+CREATE TABLE IF NOT EXISTS tuning_regions (
+ id INTEGER PRIMARY KEY, pair_id INTEGER NOT NULL REFERENCES file_pairs(id) ON DELETE CASCADE,
+ seq INTEGER NOT NULL DEFAULT 0,
+ start_offset INTEGER NOT NULL, end_offset INTEGER NOT NULL, length INTEGER NOT NULL,
+ changed_byte_count INTEGER NOT NULL, changed_percentage REAL NOT NULL,
+ original_bytes_hash TEXT NOT NULL, tuned_bytes_hash TEXT NOT NULL,
+ before_context TEXT NOT NULL DEFAULT '', after_context TEXT NOT NULL DEFAULT '',
+ original_context_hash TEXT, original_region_context_hash TEXT, tuned_context_hash TEXT,
+ relative_start REAL NOT NULL, relative_end REAL NOT NULL,
+ structural_signature TEXT NOT NULL, delta_signature TEXT NOT NULL,
+ structure_features TEXT NOT NULL DEFAULT '{}',
+ entropy_before REAL NOT NULL, entropy_after REAL NOT NULL,
+ region_class TEXT NOT NULL DEFAULT 'unknown',
+ cross_pair_shared INTEGER NOT NULL DEFAULT 0,
+ alignment_confidence REAL NOT NULL DEFAULT 100.0,
+ map_confidence REAL NOT NULL DEFAULT 0.0, map_type TEXT NOT NULL DEFAULT 'unknown',
+ stage TEXT, ecu_family TEXT, software_number TEXT, calibration_number TEXT,
+ hardware_number TEXT, project TEXT,
+ evidence TEXT NOT NULL DEFAULT '[]',
+ confidence REAL NOT NULL DEFAULT 0.0, status TEXT NOT NULL DEFAULT 'candidate',
+ created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+ UNIQUE(pair_id, start_offset, end_offset));
+CREATE INDEX IF NOT EXISTS tuning_regions_pair ON tuning_regions(pair_id);
+CREATE INDEX IF NOT EXISTS tuning_regions_signature ON tuning_regions(structural_signature);
+CREATE INDEX IF NOT EXISTS tuning_regions_class ON tuning_regions(region_class, status);
+CREATE TABLE IF NOT EXISTS tuning_pattern_members (
+ id INTEGER PRIMARY KEY, pattern_id INTEGER NOT NULL REFERENCES tuning_patterns(id) ON DELETE CASCADE,
+ region_id INTEGER NOT NULL REFERENCES tuning_regions(id) ON DELETE CASCADE,
+ pair_id INTEGER NOT NULL REFERENCES file_pairs(id) ON DELETE CASCADE,
+ similarity REAL NOT NULL DEFAULT 100.0, created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+ UNIQUE(pattern_id, region_id));
+CREATE INDEX IF NOT EXISTS pattern_members_pattern ON tuning_pattern_members(pattern_id);
+CREATE INDEX IF NOT EXISTS pattern_members_region ON tuning_pattern_members(region_id);
+CREATE TABLE IF NOT EXISTS software_alignments (
+ id INTEGER PRIMARY KEY, pattern_id INTEGER REFERENCES tuning_patterns(id) ON DELETE SET NULL,
+ source_file_id INTEGER REFERENCES files(id), target_file_id INTEGER REFERENCES files(id),
+ source_software TEXT, target_software TEXT,
+ source_start INTEGER, source_end INTEGER, target_start INTEGER, target_end INTEGER,
+ structural_similarity REAL NOT NULL DEFAULT 0.0, alignment_confidence REAL NOT NULL DEFAULT 0.0,
+ evidence_count INTEGER NOT NULL DEFAULT 0, supporting_projects INTEGER NOT NULL DEFAULT 0,
+ supporting_signatures INTEGER NOT NULL DEFAULT 0, contradicting_evidence INTEGER NOT NULL DEFAULT 0,
+ method TEXT NOT NULL DEFAULT 'structural_signature', evidence TEXT NOT NULL DEFAULT '[]',
+ status TEXT NOT NULL DEFAULT 'candidate', created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+CREATE INDEX IF NOT EXISTS software_alignments_pattern ON software_alignments(pattern_id);
+CREATE TABLE IF NOT EXISTS map_regions (
+ id INTEGER PRIMARY KEY, file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+ start_offset INTEGER NOT NULL, end_offset INTEGER NOT NULL,
+ map_type TEXT NOT NULL DEFAULT 'unknown', map_confidence REAL NOT NULL DEFAULT 0.0,
+ dimensions TEXT, element_size INTEGER, payload TEXT NOT NULL DEFAULT '{}',
+ status TEXT NOT NULL DEFAULT 'candidate', created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+ UNIQUE(file_id, start_offset, end_offset));
+CREATE INDEX IF NOT EXISTS map_regions_file ON map_regions(file_id);
+CREATE TABLE IF NOT EXISTS evidence (
+ id INTEGER PRIMARY KEY, subject_type TEXT NOT NULL, subject_id TEXT NOT NULL,
+ evidence_type TEXT NOT NULL, value TEXT NOT NULL,
+ offset INTEGER, confidence REAL NOT NULL DEFAULT 0.0, status TEXT NOT NULL DEFAULT 'observed',
+ source TEXT NOT NULL DEFAULT 'analysis', created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+CREATE INDEX IF NOT EXISTS evidence_subject ON evidence(subject_type, subject_id);
+CREATE TABLE IF NOT EXISTS evidence_relations (
+ id INTEGER PRIMARY KEY, evidence_id INTEGER NOT NULL REFERENCES evidence(id) ON DELETE CASCADE,
+ relation_type TEXT NOT NULL, target_type TEXT NOT NULL, target_id TEXT,
+ confidence REAL NOT NULL DEFAULT 100.0, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+CREATE INDEX IF NOT EXISTS evidence_relations_evidence ON evidence_relations(evidence_id);
+CREATE TABLE IF NOT EXISTS analysis_runs (
+ id INTEGER PRIMARY KEY, run_type TEXT NOT NULL, config TEXT NOT NULL DEFAULT '{}',
+ status TEXT NOT NULL DEFAULT 'running', checkpoint TEXT NOT NULL DEFAULT '{}',
+ stats TEXT NOT NULL DEFAULT '{}', started_at TEXT DEFAULT CURRENT_TIMESTAMP,
+ updated_at TEXT DEFAULT CURRENT_TIMESTAMP);
+CREATE INDEX IF NOT EXISTS analysis_runs_type ON analysis_runs(run_type, status);
+CREATE TABLE IF NOT EXISTS knowledge_reviews (
+ id INTEGER PRIMARY KEY, subject_type TEXT NOT NULL, subject_id TEXT NOT NULL,
+ action TEXT NOT NULL, payload TEXT NOT NULL DEFAULT '{}',
+ reviewer TEXT, note TEXT NOT NULL DEFAULT '', created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+CREATE INDEX IF NOT EXISTS knowledge_reviews_subject ON knowledge_reviews(subject_type, subject_id);
+"""

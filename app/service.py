@@ -11,9 +11,11 @@ from app.analysis.similarity import compare
 from app.analysis.recognition import recognize
 from app.analysis.ecu_fingerprint import ecu_family_fingerprint
 from app.analysis.alignment import align_regions
+from app.intelligence import ServiceV3Mixin
+from app.analysis.tuning_region import build_regions
 
 
-class Service:
+class Service(ServiceV3Mixin):
     def __init__(self, config: dict):
         self.repo = Repository(config)
 
@@ -71,6 +73,9 @@ class Service:
                 cursor = db.execute(f"INSERT INTO diffs (pair_id,{','.join(block)}) VALUES ({','.join('?' for _ in range(len(block)+1))})", (pair_id, *block.values()))
                 db.execute("INSERT INTO diff_features(diff_id,feature_type,feature_data,confidence) VALUES (?,?,?,?)",
                            (cursor.lastrowid, 'relative-region-v1', json.dumps(feature(block, len(a))), 0))
+        metadata = self.repo.file(pair['original_file_id'])
+        regions = build_regions(a, b, blocks, stage=metadata.get('stage'), file_metadata=metadata)
+        self.repo.replace_pair_regions(pair_id, regions)
         return {"pair": pair, "original_sha256": self.repo.file(pair['original_file_id'])['sha256'],
                 "tuned_sha256": self.repo.file(pair['tuned_file_id'])['sha256'],
                 "original_size": len(a), "tuned_size": len(b), "blocks": blocks,
@@ -108,6 +113,8 @@ class Service:
         if not pair['confirmed']:
             raise ValueError('Tuning DNA vereist een bevestigd Original → Tuned-paar')
         report = self.diff(pair_id)
+        stored_regions = self.repo.regions_for_pair(pair_id)
+        metadata = self.repo.file(pair['original_file_id'])
         original = self.repo.data(pair['original_file_id'])
         tuned = self.repo.data(pair['tuned_file_id'])
         regions = []
@@ -125,8 +132,13 @@ class Service:
         payload = {
             'pair_id': pair_id,
             'source': {'original_file_id': pair['original_file_id'], 'tuned_file_id': pair['tuned_file_id'],
-                       'original_sha256': report['original_sha256'], 'tuned_sha256': report['tuned_sha256']},
+                       'original_sha256': report['original_sha256'], 'tuned_sha256': report['tuned_sha256'],
+                       'ecu_family': metadata.get('ecu_family'), 'hardware_number': metadata.get('hardware_number'),
+                       'software_number': metadata.get('software_number'),
+                       'calibration_number': metadata.get('calibration_number'),
+                       'stage': metadata.get('stage'), 'project': metadata.get('project')},
             'regions': regions,
+            'region_ids': [row['id'] for row in stored_regions],
             'note': 'Structurele diff-evidence; geen mapnaam of tuningfunctie gegokt.',
         }
         confidence = round(min(99.0, max(20.0, float(pair['confidence']))), 2)

@@ -16,6 +16,7 @@ from app.analysis.signatures import matches_signature
 from app.winols.ols_reader import read_ols, inspect_ols
 from app.winols.ols_importer import OlsImporter
 from app.winols.ols_structure import parse_ols_structure
+from app.database.knowledge_repo import RepositoryV3Mixin
 
 LOG = logging.getLogger(__name__)
 
@@ -30,7 +31,7 @@ def pair_key(filename: str) -> str:
     return re.sub(r"[^a-z0-9]", "", stem)
 
 
-class Repository:
+class Repository(RepositoryV3Mixin):
     def __init__(self, config: dict):
         self.config = config
         self.root = Path(config["data_dir"])
