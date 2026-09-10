@@ -161,13 +161,15 @@ class MainWindow(QMainWindow):
         self.ols_status = QLabel()
         self.ols_status.setWordWrap(True)
         layout.addWidget(self.ols_status)
-        self.button(layout, '1. WinOLS-project importeren', self.import_project)
-        self.button(layout, '2. Raw BIN/ORI importeren', self.import_folder)
-        self.button(layout, '3. Nieuwe BIN analyseren', self.analyze)
+        self.button(layout, '1. WinOLS-project volledig automatisch verwerken', self.auto_process_project)
+        self.button(layout, '2. Nieuwe BIN automatisch matchen + kandidaat-tune (≥70%)', self.auto_tune_file)
+        self.button(layout, '3. Raw BIN/ORI importeren', self.import_folder)
         self.button(layout, '4. Unknown evidence-classificatie uitvoeren', self.auto_classify)
         self.last_confidence = QLabel('High Confidence Matches: nog geen analyse (drempel ≥ 90; heuristisch)')
         layout.addWidget(self.last_confidence)
-        layout.addWidget(QLabel('Let op: een score boven 70% is alleen analyse-evidence en maakt geen BIN automatisch veilig of gewijzigd.'))
+        layout.addWidget(QLabel('Stap 1 extraheert bewezen binaries naar Files, koppelt Original/Tuned op '
+                                'expliciete WinOLS-versielabels en bouwt kandidaat-Tuning-DNA. Stap 2 maakt bij ≥70% '
+                                'match een KANDIDAAT-bestand (checksums niet gecorrigeerd; altijd zelf controleren).'))
         layout.addStretch()
 
     def build_files(self):
@@ -389,12 +391,15 @@ class MainWindow(QMainWindow):
 
     def build_winols(self):
         layout = self.page('WinOLS', 'Lees en indexeer .ols-projecten zonder ze te wijzigen. Bestaande lokale BIN-referenties worden automatisch als unknown geïndexeerd.')
-        text = QLabel('De app toont in deze pagina OLS-evidence en ontbrekende/externe referenties. Embedded binaries worden pas in Files geplaatst wanneer hun grenzen betrouwbaar zijn vastgesteld; onbekende OLS-bytes worden niet als BIN gegokt.')
+        text = QLabel('Import is volledig automatisch: bewezen versie-binaries worden gextraheerd naar Files, '
+                      'rollen volgen expliciete WinOLS-versielabels (Origineel/Stage) en bij gelijke grootte worden '
+                      'Original → Tuned-paren plus kandidaat-DNA opgebouwd. De bron-OLS blijft altijd ongewijzigd.')
         text.setWordWrap(True)
         layout.addWidget(text)
         self.button(layout, 'WinOLS .ols-project importeren', self.import_project)
         self.project_table = self.table(layout, ['ID', 'Project', 'Voorgesteld', 'Reden', 'Bytes', 'SHA256', 'Geïmporteerd'])
         self.button(layout, 'Geselecteerd project veilig inspecteren', self.inspect_project)
+        self.button(layout, 'Geselecteerd project volledig automatisch verwerken', self.auto_process_selected)
         self.project_output = QPlainTextEdit()
         self.project_output.setReadOnly(True)
         layout.addWidget(self.project_output)
@@ -404,8 +409,46 @@ class MainWindow(QMainWindow):
     def import_project(self):
         path, _ = QFileDialog.getOpenFileName(self, 'WinOLS-project kiezen', '', 'WinOLS project (*.ols)')
         if path:
-            self.run_job(lambda progress: {'project_id': self.repo.import_project(Path(path))},
-                         lambda result: QMessageBox.information(self, 'WinOLS-project', f"Project geïmporteerd met ID {result['project_id']}"))
+            self.run_job(lambda progress: self.service.auto_process_ols(path), self.show_auto_process_result)
+
+    def auto_process_project(self):
+        self.import_project()
+
+    def auto_process_selected(self):
+        project_id = self.selected_id(self.project_table)
+        project = self.repo.project(project_id)
+        self.run_job(lambda progress: self.service.auto_process_ols(project['filepath']),
+                     self.show_auto_process_result)
+
+    def show_auto_process_result(self, result):
+        self.refresh()
+        versions = '\n'.join(
+            f"  v{item['version_index']}: {item.get('name') or 'onbekend'} → {item.get('role')} "
+            f"(bestand ID {item.get('file_id')})" for item in result['versions'])
+        pairs = '\n'.join(f"  {json.dumps(item, ensure_ascii=False)}" for item in result['pairs']) or '  geen'
+        QMessageBox.information(self, 'OLS automatisch verwerkt',
+                                f"Project {result['project_id']} verwerkt.\n\n"
+                                f"Geëxtraheerd naar Files: {result['files_extracted']}\n\n"
+                                f"Versies:\n{versions}\n\nParen:\n{pairs}\n\n"
+                                f"Tuning DNA: {len(result['tuning_dna'])} kandidaten")
+
+    def auto_tune_file(self):
+        path, _ = QFileDialog.getOpenFileName(self, 'Nieuwe BIN kiezen', '', 'Raw BIN (*.bin *.ori)')
+        if not path:
+            return
+        file_id = self.repo.import_file(Path(path), 'unknown')
+        def ready(result):
+            self.refresh()
+            if result['status'] == 'candidate_generated':
+                regions = len(result['applied_regions'])
+                QMessageBox.information(self, 'Kandidaat-tune gemaakt',
+                                        f"Match {result['match_score']:.1f}% (≥ {result['threshold']:.0f}%).\n"
+                                        f"Toegepaste regio's: {regions}\n"
+                                        f"Bestand: {result['output_path']}\n\n"
+                                        "KANDIDAAT: checksums niet gecorrigeerd. Controleer altijd zelf in WinOLS.")
+            else:
+                QMessageBox.information(self, 'Geen kandidaat', json.dumps(result, ensure_ascii=False, indent=2))
+        self.run_job(lambda progress: self.service.generate_tune_candidate(file_id, 70.0), ready)
 
     def inspect_project(self):
         project_id = self.selected_id(self.project_table)
@@ -460,9 +503,11 @@ class MainWindow(QMainWindow):
         files = self.repo.files(self.search.text())
         self.populate(self.file_table, files, ['id', 'filename', 'file_type', 'file_size', 'ecu_family', 'software_number', 'hardware_number', 'stage', 'customer', 'project'])
         if files:
-            self.file_hint.setText('Raw BIN/ORI-bestanden in Files. OLS-containerrecords staan bij WinOLS/OLS Object Review.')
+            self.file_hint.setText('Bestanden in Files: eigen BIN/ORI-imports én automatisch geëxtraheerde '
+                                   'OLS-versie-binaries (bron: ols://…). De bron-OLS blijft altijd ongewijzigd.')
         else:
-            self.file_hint.setText('Files is leeg: er zijn nog geen raw BIN/ORI-bestanden geïndexeerd. Een OLS-container wordt niet automatisch als BIN behandeld; bestaande bronpaden worden alleen geïmporteerd als ze lokaal bestaan.')
+            self.file_hint.setText('Files is leeg: importeer een map met BIN/ORI of verwerk een WinOLS-project — '
+                                   'bewezen versie-binaries uit de OLS verschijnen dan hier automatisch.')
         self.populate(self.pair_table, self.repo.pairs(), ['id', 'pair_name', 'confidence', 'confirmed'])
         dna_rows = self.service.tuning_dna()
         self.populate(self.dna_table, dna_rows, ['id', 'pair_id', 'original_file_id', 'tuned_file_id', 'confidence', 'status', 'updated_at'])

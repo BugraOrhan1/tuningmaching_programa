@@ -117,6 +117,24 @@ def create_api(service: Service, token: str) -> FastAPI:
     def project_records(project_id: int):
         return service.repo.project_records(project_id)
 
+    @api.get('/winols-projects/{project_id}/versions')
+    def project_versions(project_id: int):
+        return service.repo.ols_versions(project_id)
+
+    @api.post('/winols-projects/{project_id}/auto-process')
+    def auto_process(project_id: int):
+        project = service.repo.project(project_id)
+        return service.auto_process_ols(project['filepath'])
+
+    @api.post('/files/{file_id}/generate-candidate')
+    def generate_candidate(file_id: int, body: dict[str, float] | None = None):
+        threshold = float((body or {}).get('threshold', 70.0))
+        return service.generate_tune_candidate(file_id, threshold)
+
+    @api.get('/tune-candidates')
+    def tune_candidates():
+        return service.tune_candidates()
+
     @api.get('/winols-projects/{project_id}/structure-report')
     def project_structure_report(project_id: int):
         return service.repo.project_structure_report(project_id)

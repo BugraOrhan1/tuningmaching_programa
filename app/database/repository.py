@@ -15,6 +15,7 @@ from app.analysis.signatures import discover_candidate_signatures
 from app.analysis.signatures import matches_signature
 from app.winols.ols_reader import read_ols, inspect_ols
 from app.winols.ols_importer import OlsImporter
+from app.winols.ols_structure import parse_ols_structure
 
 LOG = logging.getLogger(__name__)
 
@@ -87,6 +88,8 @@ class Repository:
         path = path.resolve()
         data = read_ols(path, self.config["max_file_mb"])
         details = inspect_ols(data)
+        structure = parse_ols_structure(data)
+        maps_by_offset = {item["offset"]: item for item in structure.get("maps", [])}
         digest = details.pop("hashes")
         target = self.root / "winols_projects" / (digest["sha256"] + ".ols")
         try:
@@ -122,6 +125,12 @@ class Repository:
                      obj["detection_method"], json.dumps(obj.get("evidence", []), ensure_ascii=False)),
                 )
             forensic = details.get("forensic", {})
+            db.execute("DELETE FROM ols_evidence WHERE project_id=?", (project_id,))
+            db.execute("DELETE FROM ols_map_objects WHERE project_id=?", (project_id,))
+            db.execute("DELETE FROM ols_binaries WHERE project_id=?", (project_id,))
+            db.execute("DELETE FROM ols_version_relations WHERE project_id=?", (project_id,))
+            db.execute("DELETE FROM ols_record_references WHERE project_id=?", (project_id,))
+            db.execute("DELETE FROM ols_records WHERE project_id=?", (project_id,))
             record_db_ids = {}
             for record in details.get("records", []):
                 cursor = db.execute(
@@ -137,18 +146,28 @@ class Repository:
                 record_db_ids[record["record_id"]] = db.execute(
                     "SELECT id FROM ols_records WHERE project_id=? AND record_id=?",
                     (project_id, record["record_id"])).fetchone()[0]
-            db.execute("DELETE FROM ols_evidence WHERE project_id=?", (project_id,))
-            db.execute("DELETE FROM ols_map_objects WHERE project_id=?", (project_id,))
-            db.execute("DELETE FROM ols_binaries WHERE project_id=?", (project_id,))
-            db.execute("DELETE FROM ols_version_relations WHERE project_id=?", (project_id,))
-            db.execute("DELETE FROM ols_record_references WHERE project_id=?", (project_id,))
             for record in details.get("records", []):
                 if record["record_type"] == "map_label":
-                    db.execute("""INSERT INTO ols_map_objects
-                        (project_id, record_id, map_name_raw, confidence, status, evidence)
-                        VALUES (?,?,?,?,?,?)""",
-                               (project_id, record_db_ids[record["record_id"]], record["value_raw"],
-                                record["confidence"], "label_only", record["evidence"]))
+                    parsed = maps_by_offset.get(record["offset"])
+                    if parsed:
+                        db.execute("""INSERT INTO ols_map_objects
+                            (project_id, record_id, map_name_raw, address, dimensions, factor,
+                             axis_information, confidence, status, evidence)
+                            VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                                   (project_id, record_db_ids[record["record_id"]], record["value_raw"],
+                                    parsed.get("address"),
+                                    json.dumps(parsed["dimension_candidates"]) if parsed.get("dimension_candidates") else None,
+                                    parsed["factor_candidates"][0] if parsed.get("factor_candidates") else None,
+                                    json.dumps({"address_candidates": parsed.get("address_candidates", []),
+                                                "factor_candidates": parsed.get("factor_candidates", [])}),
+                                    parsed["confidence"], parsed["status"],
+                                    json.dumps(parsed["evidence"], ensure_ascii=False)))
+                    else:
+                        db.execute("""INSERT INTO ols_map_objects
+                            (project_id, record_id, map_name_raw, confidence, status, evidence)
+                            VALUES (?,?,?,?,?,?)""",
+                                   (project_id, record_db_ids[record["record_id"]], record["value_raw"],
+                                    record["confidence"], "label_only", record["evidence"]))
                 if record["record_type"] == "version_or_role_label":
                     db.execute("""INSERT INTO ols_version_relations
                         (project_id, source_record_id, relation_type, confidence, evidence)
@@ -175,7 +194,108 @@ class Repository:
                             json.dumps(item, ensure_ascii=False)))
         self._index_external_ols_references(project_id, details.get("records", []))
         LOG.info("Import WinOLS project=%s sha256=%s id=%s", path, digest["sha256"], project_id)
+        self._store_ols_structure(project_id, data, structure)
         return project_id
+
+    def _store_ols_structure(self, project_id: int, data: bytes, structure: dict) -> None:
+        """Persist proven version binaries, extract them into Files and link evidence."""
+        with self.db.connect() as db:
+            db.execute("DELETE FROM ols_version_binaries WHERE project_id=?", (project_id,))
+        extras = 0
+        for item in structure["version_binaries"]:
+            binary = item.get("binary")
+            version_index = item.get("version_index")
+            display_index = version_index
+            if version_index is None:
+                extras += 1
+                display_index = 100 + extras
+            file_id = None
+            filename = item.get("source_filename") or f"OLS_versie_{display_index}.bin"
+            evidence = []
+            if binary:
+                blob = data[binary["start"]:binary["end"]]
+                role = item.get("role", "unknown")
+                kind = role if role in {"original", "tuned"} else "unknown"
+                suffix = "" if binary["complete"] else "_ONVOLLEDIG"
+                stem = Path(filename).stem or f"OLS_versie_{display_index}"
+                filename = f"{stem}{suffix}.bin"
+                source_path = f"ols://{structure['sha256']}/v{display_index}"
+                evidence = [e for e in [item.get("relation_evidence", ""), *binary.get("evidence", [])] if e]
+                file_id = self.upsert_ols_file(
+                    source_path, filename, blob, kind,
+                    "ols_version_label" if kind != "unknown" else "ols_binary_extract",
+                    float(item.get("role_confidence", item.get("confidence") or 0.0)),
+                    evidence, project_id)
+            with self.db.connect() as db:
+                db.execute("""INSERT INTO ols_version_binaries
+                    (project_id, version_index, version_name, role, role_confidence, role_evidence,
+                     source_path, binary_offset, binary_length, binary_sha256, complete, file_id,
+                     relation_type, relation_confidence, relation_evidence, evidence)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                           (project_id, display_index, item.get("name"), item.get("role", "unknown"),
+                            float(item.get("role_confidence", item.get("confidence") or 0.0)),
+                            item.get("reason", ""),
+                            item.get("path"), binary["start"] if binary else None,
+                            binary["length"] if binary else None,
+                            binary["sha256"] if binary else None,
+                            int(bool(binary and binary["complete"])), file_id,
+                            item.get("relation_type", "target_unknown"),
+                            float(item.get("relation_confidence", item.get("confidence") or 0.0)),
+                            item.get("relation_evidence", ""),
+                            json.dumps(evidence, ensure_ascii=False)))
+        for binary in structure["binaries"]:
+            with self.db.connect() as db:
+                db.execute("""INSERT INTO ols_binaries
+                    (project_id, internal_id, offset, length, sha256, content_available,
+                     source_reference, confidence, status, evidence)
+                    VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                           (project_id, f"binary@{binary['start']}", binary["start"], binary["length"],
+                            binary["sha256"], 1, binary.get("filename") or binary.get("identity_header"),
+                            binary["confidence"],
+                            "extracted" if binary["complete"] else "extracted_incomplete",
+                            json.dumps(binary["evidence"], ensure_ascii=False)))
+
+    def upsert_ols_file(self, source_path: str, filename: str, data: bytes, kind: str,
+                        detection_method: str, confidence: float, evidence: list,
+                        project_id: int | None = None) -> int:
+        """Register an extracted OLS binary in Files without duplicating on reimport.
+
+        An existing row for the same OLS source and hash is reused so a human
+        reclassification always survives a reimport.
+        """
+        digest = hashes(data)
+        existing = self.db.rows("SELECT id FROM files WHERE source_path=? AND sha256=?",
+                                (source_path, digest["sha256"]))
+        if existing:
+            return existing[0]["id"]
+        if kind not in {"original", "tuned", "unknown"}:
+            kind = "unknown"
+        folder = "originals" if kind == "original" else ("tuned" if kind == "tuned" else "unknown")
+        target = self.root / folder / (digest["sha256"] + ".bin")
+        try:
+            with target.open("xb") as stream:
+                stream.write(data)
+        except FileExistsError:
+            if hashes(target.read_bytes())["sha256"] != digest["sha256"]:
+                raise ValueError("Bestaande beheerde kopie heeft onjuiste hash")
+        row = dict(filename=filename, filepath=str(target.resolve()), source_path=source_path,
+                   file_type=kind, file_size=len(data), **digest, **extract_metadata(data))
+        with self.db.connect() as db:
+            db.execute(f"INSERT OR IGNORE INTO files ({','.join(row)}) VALUES ({','.join('?' for _ in row)})",
+                       tuple(row.values()))
+            file_id = db.execute("SELECT id FROM files WHERE source_path=? AND sha256=? AND file_type=?",
+                                 (source_path, digest["sha256"], kind)).fetchone()[0]
+            db.execute("INSERT OR IGNORE INTO fingerprints(file_id,fingerprint_type,fingerprint_data) VALUES (?,?,?)",
+                       (file_id, "blocks-histogram-v1", json.dumps(fingerprint(data, self.config["block_size"]))))
+            if project_id is not None:
+                db.execute("""INSERT INTO ols_evidence
+                    (project_id, evidence_type, subject_type, subject_id, value, offset, confidence, status)
+                    VALUES (?,?,?,?,?,?,?,?)""",
+                           (project_id, "extracted_binary", "file", str(file_id),
+                            json.dumps(evidence, ensure_ascii=False), None, confidence, "extracted"))
+        LOG.info("OLS binary gextraheerd file=%s kind=%s sha256=%s", filename, kind, digest["sha256"])
+        self.recognize_file(file_id, data)
+        return file_id
 
     def _index_external_ols_references(self, project_id: int, records: list[dict]) -> None:
         """Index referenced raw files only when their source path exists.
@@ -251,6 +371,62 @@ class Repository:
             db.execute("UPDATE ols_objects SET role=?, confidence=?, detection_method=? WHERE id=?",
                        (role, 100.0 if role != "unknown" else 0.0, "human_review", object_id))
         return self.db.rows("SELECT o.*, r.note, r.reviewer, r.created_at AS reviewed_at FROM ols_objects o JOIN ols_object_reviews r ON r.object_id=o.id WHERE o.id=?", (object_id,))[0]
+
+    def ols_versions(self, project_id: int) -> list[dict]:
+        """Version records with their proven binary, extracted file and evidence."""
+        self.project(project_id)
+        rows = self.db.rows("SELECT * FROM ols_version_binaries WHERE project_id=? ORDER BY version_index, id",
+                            (project_id,))
+        for row in rows:
+            row["evidence"] = json.loads(row["evidence"])
+        return rows
+
+    def suggest_ols_project_pairs(self, project_id: int) -> list[dict]:
+        """Pair Original → Tuned versions of one OLS project on explicit evidence.
+
+        A pair is created only for equal-size complete binaries. It is
+        auto-confirmed only when both roles come from explicit WinOLS version
+        labels; anything weaker stays unconfirmed for human review.
+        """
+        self.project(project_id)
+        rows = [row for row in self.ols_versions(project_id) if row["file_id"] and row["complete"]]
+        originals = [row for row in rows if row["role"] == "original"]
+        tuned = [row for row in rows if row["role"] == "tuned"]
+        results = []
+        for original in originals:
+            for candidate in tuned:
+                if candidate["binary_length"] != original["binary_length"]:
+                    results.append({"original_file_id": original["file_id"],
+                                    "tuned_file_id": candidate["file_id"],
+                                    "status": "size_mismatch_not_paired",
+                                    "reason": f"Versiegrootte {original['binary_length']} ≠ "
+                                              f"{candidate['binary_length']}; diff is niet betrouwbaar."})
+                    continue
+                explicit = min(original["role_confidence"], candidate["role_confidence"]) >= 95.0
+                pair_id = self.pair(original["file_id"], candidate["file_id"], explicit, 90.0)
+                results.append({"pair_id": pair_id, "original_file_id": original["file_id"],
+                                "tuned_file_id": candidate["file_id"], "confirmed": bool(explicit),
+                                "status": "confirmed" if explicit else "suggested"})
+        return results
+
+    def add_tune_candidate(self, target_file_id: int, pair_id: int | None, threshold: float,
+                           match_score: float, applied: int, skipped: int, payload: dict,
+                           output_path: str, sha: dict, size: int) -> int:
+        with self.db.connect() as db:
+            cursor = db.execute("""INSERT INTO tune_candidates
+                (target_file_id, pair_id, threshold, match_score, applied_regions, skipped_regions,
+                 payload, output_path, sha256, size)
+                VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                               (target_file_id, pair_id, threshold, match_score, applied, skipped,
+                                json.dumps(payload, ensure_ascii=False), output_path,
+                                sha["sha256"], size))
+            return cursor.lastrowid
+
+    def tune_candidates(self) -> list[dict]:
+        rows = self.db.rows("SELECT * FROM tune_candidates ORDER BY id DESC")
+        for row in rows:
+            row["payload"] = json.loads(row["payload"])
+        return rows
 
     def ols_unknown_objects(self, project_id: int | None = None) -> list[dict]:
         if project_id is None:

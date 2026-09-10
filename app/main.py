@@ -32,6 +32,14 @@ def main() -> None:
     ols_review.add_argument('--role', required=True, choices=['original', 'tuned', 'other', 'unknown'])
     ols_review.add_argument('--note', default='')
     sub.add_parser('suggest-pairs')
+    auto_ols = sub.add_parser('auto-ols', help='OLS volledig automatisch verwerken')
+    auto_ols.add_argument('path')
+    auto_process = sub.add_parser('auto-process', help='reeds geïmporteerd project automatisch verwerken')
+    auto_process.add_argument('project_id', type=int)
+    generate_candidate = sub.add_parser('generate-candidate', help='kandidaat-tune bij >= drempel match')
+    generate_candidate.add_argument('file_id', type=int)
+    generate_candidate.add_argument('--threshold', type=float, default=70.0)
+    sub.add_parser('tune-candidates')
     pairing = sub.add_parser('pair')
     pairing.add_argument('original_id', type=int)
     pairing.add_argument('tuned_id', type=int)
@@ -101,6 +109,15 @@ def main() -> None:
             result = service.repo.auto_classify_evidence()
         elif args.command == 'suggest-pairs':
             result = {'suggested': service.repo.suggest_pairs()}
+        elif args.command == 'auto-ols':
+            result = service.auto_process_ols(args.path)
+        elif args.command == 'auto-process':
+            project = service.repo.project(args.project_id)
+            result = service.auto_process_ols(project['filepath'])
+        elif args.command == 'generate-candidate':
+            result = service.generate_tune_candidate(args.file_id, args.threshold)
+        elif args.command == 'tune-candidates':
+            result = service.tune_candidates()
         elif args.command == 'pair':
             result = {'pair_id': service.repo.pair(args.original_id, args.tuned_id, args.confirm)}
         elif args.command == 'analyze':

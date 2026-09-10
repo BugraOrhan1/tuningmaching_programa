@@ -1,5 +1,6 @@
 """Shared application operations for desktop, CLI and local API."""
 import json
+from pathlib import Path
 import hashlib
 from app.database.repository import Repository
 from app.analysis.diff_engine import diff_blocks, hex_rows
@@ -183,3 +184,124 @@ class Service:
         for row in rows:
             row['payload'] = json.loads(row['payload'])
         return rows
+
+    def auto_process_ols(self, path: str) -> dict:
+        """One-call OLS workflow: import, extract, classify, pair and learn.
+
+        Every step stays evidence-based: binaries come from proven record
+        boundaries, roles from explicit WinOLS version labels and Tuning DNA
+        remains candidate knowledge that never modifies a BIN.
+        """
+        project_id = self.repo.import_project(Path(path))
+        versions = self.repo.ols_versions(project_id)
+        pairs = self.repo.suggest_ols_project_pairs(project_id)
+        dna = []
+        for pair in pairs:
+            if pair.get('confirmed') and pair.get('pair_id'):
+                try:
+                    report = self.generate_tuning_dna(pair['pair_id'])
+                    dna.append({'pair_id': pair['pair_id'], 'regions': len(report['regions']),
+                                'confidence': report['confidence']})
+                except (ValueError, OSError) as exc:
+                    pairs[pairs.index(pair)]['dna_error'] = str(exc)
+        files = [row for row in self.repo.files() if str(row.get('source_path', '')).startswith('ols://')]
+        return {
+            'project_id': project_id,
+            'versions': [{'version_index': v['version_index'], 'name': v['version_name'], 'role': v['role'],
+                          'role_confidence': v['role_confidence'], 'complete': bool(v['complete']),
+                          'file_id': v['file_id'], 'sha256': v['binary_sha256'],
+                          'relation_type': v['relation_type']} for v in versions],
+            'files_extracted': len(files),
+            'pairs': pairs,
+            'tuning_dna': dna,
+            'note': 'Binaries zijn gextraheerd op bewezen grenzen; rollen komen uit expliciete '
+                    'WinOLS-versielabels. Geen enkele BIN is gewijzigd.',
+        }
+
+    def generate_tune_candidate(self, target_file_id: int, threshold: float = 70.0) -> dict:
+        """Generate a candidate tune for a matched original when evidence allows.
+
+        The target file is never modified. Changed regions of the best
+        confirmed Original → Tuned pair are copied onto a fresh candidate file
+        only where the target byte-matches the known original almost exactly.
+        The output is an unverified candidate: checksums must be corrected and
+        verified before such a file is ever written to an ECU.
+        """
+        if not 50 <= threshold <= 100:
+            raise ValueError('Drempel moet tussen 50 en 100 liggen')
+        target = self.repo.file(target_file_id)
+        query = self.repo.data(target_file_id)
+        report = self.analyze(target['filepath'])
+        matches = [match for match in report['matches']
+                   if match['match_score'] >= threshold and match['compatibility_status'] != 'incompatible_base']
+        if not matches:
+            best = report['matches'][0] if report['matches'] else None
+            return {'status': 'no_match_above_threshold', 'threshold': threshold,
+                    'target_file_id': target_file_id,
+                    'best_score': best['match_score'] if best else None,
+                    'note': 'Geen bekende original met voldoende bewezen overeenkomst; '
+                            'er wordt niets gegenereerd.'}
+        best = matches[0]
+        confirmed = [pair for pair in best['pairs'] if pair['confirmed']]
+        if not confirmed:
+            return {'status': 'no_confirmed_pair', 'threshold': threshold,
+                    'target_file_id': target_file_id, 'match_score': best['match_score'],
+                    'filename': best['filename'],
+                    'note': 'Match gevonden maar het paar is niet bevestigd; bevestig het paar eerst.'}
+        result = bytearray(query)
+        applied, skipped = [], []
+        for pair in confirmed:
+            known = self.diff(pair['id'])
+            original = self.repo.data(pair['original_file_id'])
+            tuned = self.repo.data(pair['tuned_file_id'])
+            if len(tuned) != len(query) or len(original) != len(query):
+                skipped.append({'pair_id': pair['id'], 'reason': 'bestandsgrootte verschilt van target'})
+                continue
+            for block in known['blocks']:
+                start, end = block['start_offset'], block['end_offset']
+                if end > len(result):
+                    skipped.append({'pair_id': pair['id'], 'start_offset': start, 'end_offset': end,
+                                    'reason': 'regio valt buiten target'})
+                    continue
+                regional = compare(query[start:end], original[start:end], {}, {})['match_score']
+                if regional >= 98.0:
+                    result[start:end] = tuned[start:end]
+                    applied.append({**block, 'region_similarity': round(regional, 3),
+                                    'pair_id': pair['id']})
+                else:
+                    skipped.append({'pair_id': pair['id'], 'start_offset': start, 'end_offset': end,
+                                    'reason': f'target wijkt af van bekende original in deze regio '
+                                              f'(similarity {regional:.2f}%)'})
+        if not applied:
+            return {'status': 'no_regions_applied', 'threshold': threshold, 'skipped': skipped,
+                    'match_score': best['match_score'],
+                    'note': 'Geen enkele regio voldeed aan het regionaal-bewijs; niets gegenereerd.'}
+        output = bytes(result)
+        output_hashes = hashlib.sha256(output).hexdigest()
+        candidate_dir = self.repo.root / 'reports' / 'candidates'
+        candidate_dir.mkdir(parents=True, exist_ok=True)
+        output_path = candidate_dir / (output_hashes + '.bin')
+        try:
+            with output_path.open('xb') as stream:
+                stream.write(output)
+        except FileExistsError:
+            pass  # identieke kandidaat bestaat al; sha256 is de bestandsnaam
+        payload = {'target': {'id': target_file_id, 'filename': target['filename'], 'sha256': target['sha256']},
+                   'match': {'file_id': best['file_id'], 'filename': best['filename'],
+                             'match_score': best['match_score']},
+                   'applied_regions': applied, 'skipped_regions': skipped,
+                   'warnings': ['KANDIDAAT: niet getest en niet gecontroleerd.',
+                                'ECU-checksums zijn NIET gecorrigeerd.',
+                                'Controleer de diff in WinOLS vóór enig gebruik.']}
+        candidate_id = self.repo.add_tune_candidate(
+            target_file_id, confirmed[0]['id'], threshold, best['match_score'],
+            len(applied), len(skipped), payload, str(output_path),
+            {'sha256': output_hashes}, len(output))
+        return {'status': 'candidate_generated', 'candidate_id': candidate_id,
+                'output_path': str(output_path), 'sha256': output_hashes, 'size': len(output),
+                'applied_regions': applied, 'skipped_regions': skipped,
+                'match_score': best['match_score'], 'threshold': threshold,
+                'pair_id': confirmed[0]['id'], 'warnings': payload['warnings']}
+
+    def tune_candidates(self) -> list[dict]:
+        return self.repo.tune_candidates()

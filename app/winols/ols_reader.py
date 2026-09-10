@@ -21,7 +21,7 @@ def _record_type(value: str) -> str:
     lowered = value.lower()
     if value == "WinOLS File":
         return "header"
-    if "mporteerd uit bestand:" in lowered or lowered.startswith("c:\\"):
+    if lowered.endswith((".bin", ".ori")) or "mporteerd uit bestand:" in lowered or lowered.startswith("c:\\"):
         return "binary_reference"
     if _ROLE_TEXT.search(value):
         return "version_or_role_label"
@@ -32,23 +32,30 @@ def _record_type(value: str) -> str:
     return "unknown_ascii_record"
 
 
-def _extract_length_prefixed_records(data: bytes) -> list[dict]:
+def _extract_length_prefixed_records(data: bytes, scan_limit: int = 4 * 1024 * 1024) -> list[dict]:
     records = []
-    for offset in range(0, max(0, len(data) - 4), 4):
+    end = min(len(data) - 4, scan_limit)
+    offset = 0
+    while offset < end:
         length = struct.unpack_from("<I", data, offset)[0]
         if not 1 <= length <= 512 or offset + 4 + length > len(data):
+            offset += 1
             continue
         raw = data[offset + 4:offset + 4 + length]
         if not raw or not all(32 <= byte < 127 or byte in (9, 10, 13) for byte in raw):
+            offset += 1
             continue
         value = raw.decode("ascii", errors="replace").strip()
         if not value:
+            offset += 1
             continue
+        record_type = _record_type(value)
         records.append({"record_id": f"record-{len(records) + 1}", "offset": offset,
                         "length": length, "value_raw": value,
-                        "record_type": _record_type(value),
-                        "confidence": 100.0 if _record_type(value) != "unknown_ascii_record" else 70.0,
+                        "record_type": record_type,
+                        "confidence": 100.0 if record_type != "unknown_ascii_record" else 70.0,
                         "evidence": "little_endian_length_prefix"})
+        offset += 4 + length
     return records
 
 

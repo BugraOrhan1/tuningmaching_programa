@@ -138,6 +138,24 @@ CREATE TABLE IF NOT EXISTS tuning_patterns (
  frequency INTEGER NOT NULL DEFAULT 1, confidence REAL NOT NULL, status TEXT NOT NULL DEFAULT 'candidate',
  created_at TEXT DEFAULT CURRENT_TIMESTAMP, updated_at TEXT DEFAULT CURRENT_TIMESTAMP);
 CREATE INDEX IF NOT EXISTS tuning_patterns_status ON tuning_patterns(status, frequency DESC);
+CREATE TABLE IF NOT EXISTS ols_version_binaries (
+ id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL REFERENCES winols_projects(id) ON DELETE CASCADE,
+ version_index INTEGER, version_name TEXT, role TEXT NOT NULL DEFAULT 'unknown',
+ role_confidence REAL NOT NULL DEFAULT 0, role_evidence TEXT NOT NULL DEFAULT '',
+ source_path TEXT, binary_offset INTEGER, binary_length INTEGER, binary_sha256 TEXT,
+ complete INTEGER NOT NULL DEFAULT 0, file_id INTEGER REFERENCES files(id),
+ relation_type TEXT NOT NULL DEFAULT 'target_unknown', relation_confidence REAL NOT NULL DEFAULT 0,
+ relation_evidence TEXT NOT NULL DEFAULT '', evidence TEXT NOT NULL DEFAULT '[]',
+ created_at TEXT DEFAULT CURRENT_TIMESTAMP, UNIQUE(project_id, version_index));
+CREATE INDEX IF NOT EXISTS ols_version_binaries_project ON ols_version_binaries(project_id);
+CREATE TABLE IF NOT EXISTS tune_candidates (
+ id INTEGER PRIMARY KEY, target_file_id INTEGER NOT NULL REFERENCES files(id),
+ pair_id INTEGER REFERENCES file_pairs(id), threshold REAL NOT NULL,
+ match_score REAL NOT NULL, applied_regions INTEGER NOT NULL DEFAULT 0,
+ skipped_regions INTEGER NOT NULL DEFAULT 0, payload TEXT NOT NULL,
+ output_path TEXT NOT NULL, sha256 TEXT NOT NULL, size INTEGER NOT NULL,
+ status TEXT NOT NULL DEFAULT 'candidate', created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+CREATE INDEX IF NOT EXISTS tune_candidates_target ON tune_candidates(target_file_id);
 """
 
 SCHEMA_VERSION = 3
