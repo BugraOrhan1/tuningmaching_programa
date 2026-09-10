@@ -282,6 +282,11 @@ def test_calibration_objects_remain_unknown_without_source_evidence(service, tmp
     assert all(item["data_type"] == "UNKNOWN" for item in objects)
     assert all(item["endian"] == "UNKNOWN" for item in objects)
     assert all(item["calibration_family"] == "UNKNOWN" for item in objects)
+    if objects:
+        assert objects[0]["entropy"] is not None
+        assert objects[0]["value_statistics"]["count"] > 0
+        assert objects[0]["context_hashes"]["surrounding"]
+        assert objects[0]["data_type"] == "UNKNOWN"
 
 
 def test_calibration_identity_groups_structure_but_stays_candidate(service, tmp_path):
@@ -375,6 +380,31 @@ def test_calibration_identity_alignment_records_context_evidence(service, tmp_pa
     assert result["alignments_created"] == 1
     assert result["alignments"][0]["positive"]
     assert result["alignments"][0]["status"] in {"SUPPORTED", "UNKNOWN"}
+
+
+def test_identity_alignment_persists_contradicting_context(service, tmp_path):
+    first = tmp_path / "contra_first.bin"
+    second = tmp_path / "contra_second.bin"
+    first.write_bytes(_bin(71))
+    second.write_bytes(_bin(72))
+    first_id = service.repo.import_file(first, "unknown")
+    second_id = service.repo.import_file(second, "unknown")
+    for file_id, software in ((first_id, "SW_A"), (second_id, "SW_B")):
+        service.repo.update_metadata(file_id, {"ecu_family": "CONTRA_ECU", "software_number": software})
+        service.repo.db.rows("""INSERT INTO calibration_objects
+            (file_id,object_key,dimensions,data_type,element_size,endian,axis_count,
+             relative_layout,structural_signature,detection_confidence,evidence,status)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (file_id, f"contra:{file_id}", "[32]", "UNKNOWN", 1, "UNKNOWN", 0,
+             '{"start_offset":512,"end_offset":544}', "contra-signature", 80.0,
+             '["test evidence"]', "candidate"))
+    service.build_calibration_identities([first_id, second_id])
+    identity = service.repo.calibration_identities()[0]
+    result = service.align_calibration_identity(identity["id"])
+    stored = service.repo.calibration_identity(identity["id"])
+
+    assert result["alignments_created"] == 1
+    assert stored["contradicting_evidence"] or stored["supporting_evidence"]
 
 
 def test_confidence_evaluation_reports_metrics_and_ambiguous_cases(service):

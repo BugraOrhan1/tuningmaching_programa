@@ -260,7 +260,7 @@ class Repository(RepositoryV3Mixin):
                         binary.get("md5"), 1,
                         binary.get("filename") or binary.get("identity_header"), binary["confidence"],
                         "extracted" if binary["complete"] else "extracted_incomplete",
-                        binary.get("boundary_status", "COMPLETE BINARY" if binary["complete"] else "PARTIAL BINARY"),
+                            binary.get("boundary_status", "COMPLETE" if binary["complete"] else "PARTIAL"),
                         json.dumps(binary["evidence"], ensure_ascii=False)))
 
     def upsert_ols_file(self, source_path: str, filename: str, data: bytes, kind: str,

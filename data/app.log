@@ -1,2 +1,81 @@
 2026-09-10 16:02:00,460 INFO app.database.repository Import WinOLS project=C:\tuningmaching_programa\data\winols_projects\GASDROP_100119.ols sha256=dcfc2d8d03b035e7d559fa6fb4c80b492c79e937cf1df0729f0912605782e3e8 id=1
 2026-09-10 16:03:43,759 INFO app.database.repository Import WinOLS project=C:\tuningmaching_programa\data_backup_20260910_155927\winols_projects\dcfc2d8d03b035e7d559fa6fb4c80b492c79e937cf1df0729f0912605782e3e8.ols sha256=dcfc2d8d03b035e7d559fa6fb4c80b492c79e937cf1df0729f0912605782e3e8 id=2
+2026-09-10 20:13:19,634 INFO app.database.repository Import WinOLS project=C:\1\1\tuningmaching_programa\data\winols_projects\GASDROP_100119.ols sha256=dcfc2d8d03b035e7d559fa6fb4c80b492c79e937cf1df0729f0912605782e3e8 id=3
+2026-09-10 20:13:19,725 INFO app.database.repository OLS binary gextraheerd file=BMW_4_Gran_Coupe-series_2014_(F36)_20i_(2.0T)_EU6d_184_hp_Bosch_MG1CS003_OBD_VR.bin kind=original sha256=f65abeea54d21c2571e00af3e8c0f17403251486e9598c4f55966721f8b43ba6
+2026-09-10 20:13:20,014 INFO app.database.repository OLS binary gextraheerd file=BMW 4 Serie - Coupe (Stage1+vmax ) - ).bin kind=tuned sha256=d2b0cdefd47674cb1099bcd10220ea5c30018b21055cc6b51c695bbdb46093d5
+2026-09-10 20:13:20,400 INFO app.database.repository OLS binary gextraheerd file=BMW 4 Serie - Coupe (Stage1 + vmax + pops and bang) - ).bin kind=tuned sha256=c195636efbf83f4e888e5d83ef581d021bfb8d65139cdc489e8bdcb3ca19c4ea
+2026-09-10 20:13:20,798 INFO app.database.repository OLS binary gextraheerd file=BMW 4 Serie - Coupe (Stage1 + vmax + pops and bang) - ) (1).bin kind=tuned sha256=c195636efbf83f4e888e5d83ef581d021bfb8d65139cdc489e8bdcb3ca19c4ea
+2026-09-10 20:13:21,112 INFO app.database.repository OLS binary gextraheerd file=OLS_versie_101_ONVOLLEDIG.bin kind=unknown sha256=446af7993edc65541c700b21b31d490a9f4c4fe7728dbc01e2ec8b885e93ab80
+2026-09-10 20:16:04,392 INFO app.database.repository Import file=C:\Users\Bugra\Downloads\Compressed\files\WinOLS (Audi A4 (Audi A4 (Stage 1 +vmax ) - SC1008F600000)) - SC1008F600000).bin sha256=0f83a427624f7e2c2db2ba477db17120ef156b79462dc967a5004b313d5a72ae id=6
+2026-09-10 20:16:05,214 INFO app.database.repository Import file=C:\Users\Bugra\Downloads\Compressed\files\WinOLS (Audi A4 (Origineel) - SC1008F600000).bin sha256=50fb4144aa9a85121016f5159c435387e9c8c9d11409f59be958cf4f9bc36ad6 id=7
+2026-09-10 20:16:06,037 INFO app.database.repository Import file=C:\Users\Bugra\Downloads\Compressed\files\WinOLS (Audi A5 (Stage1) - SC1008F600000).bin sha256=ffbb33e0857a60d3ffa85135e2165decd8771ba960d630c544315fc498dd1ae3 id=8
+2026-09-10 20:16:06,851 INFO app.database.repository Import file=C:\Users\Bugra\Downloads\Compressed\files\WinOLS (Audi RS3 (Audi RS3 (Stage 1 + Vmax + OPF )084544 csnone) - 084544).bin sha256=cbfdd6acb4ac8952199f8732e663b7721a5bf0bc1f819eb5c8b1f4db60e584c8 id=9
+2026-09-10 20:16:07,700 INFO app.database.repository Import file=C:\Users\Bugra\Downloads\Compressed\files\WinOLS (Audi RS3 (OPF) - 084544).bin sha256=8fba1d07e587bf8823911717cf867ea34309539c684a2bc19514611e5ad56073 id=10
+2026-09-10 20:16:08,513 INFO app.database.repository Import file=C:\Users\Bugra\Downloads\Compressed\files\WinOLS (Audi RS3 (stage 1) - 084544).bin sha256=fca57e40587ba31febaa0665fe8ce3d31189e10dcca8327976ae3bd18ec86601 id=11
+2026-09-10 20:16:09,138 INFO app.database.repository Import file=C:\Users\Bugra\Downloads\Compressed\files\WinOLS (BMW X1 SUV (BMW X2 (stage1+vmax) - )csnone) - R2C9D392BPBOXF).bin sha256=ee504f2fec818c129281592d514451a10a901f64f1487e50a9742e8f6594416a id=12
+2026-09-10 20:16:09,543 INFO app.database.repository Import file=C:\Users\Bugra\Downloads\Compressed\files\WinOLS (BMW X1 SUV (Origineel) - R2C9D392BPBOXF).bin sha256=22f9a2810878de031c6861419305b21291d99e0a92dd18792792f2396cd96f80 id=13
+2026-09-10 20:16:19,001 INFO app.database.repository Reclassified files=[7] kind=original
+2026-09-10 20:16:22,938 INFO app.database.repository Reclassified files=[13] kind=original
+2026-09-10 20:16:28,865 INFO app.database.repository Reclassified files=[10] kind=tuned
+2026-09-10 20:17:05,731 ERROR root UI operation failed
+Traceback (most recent call last):
+  File "C:\1\1\tuningmaching_programa\app\ui\main_window.py", line 110, in safe
+    callback()
+    ~~~~~~~~^^
+  File "C:\1\1\tuningmaching_programa\app\ui\main_window.py", line 323, in show_hex
+    raise ValueError('Open eerst een paar vanuit Original/Tuned Pairs.')
+ValueError: Open eerst een paar vanuit Original/Tuned Pairs.
+2026-09-10 20:17:32,596 INFO app.database.repository Pair 1 confirmed=True
+2026-09-10 20:18:39,711 ERROR root UI operation failed
+Traceback (most recent call last):
+  File "C:\1\1\tuningmaching_programa\app\ui\main_window.py", line 110, in safe
+    callback()
+    ~~~~~~~~^^
+  File "C:\1\1\tuningmaching_programa\app\ui\main_window.py", line 323, in show_hex
+    raise ValueError('Open eerst een paar vanuit Original/Tuned Pairs.')
+ValueError: Open eerst een paar vanuit Original/Tuned Pairs.
+2026-09-10 20:18:47,555 INFO app.database.repository Pair 1 confirmed=True
+2026-09-10 20:18:55,272 INFO app.database.repository Pair 2 confirmed=True
+2026-09-10 20:18:59,564 INFO app.database.repository Pair 3 confirmed=True
+2026-09-10 20:19:07,307 ERROR root Operation failed
+Traceback (most recent call last):
+  File "C:\1\1\tuningmaching_programa\app\ui\main_window.py", line 28, in run
+    self.result.emit(self.operation(self.progress.emit))
+                     ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^
+  File "C:\1\1\tuningmaching_programa\app\ui\main_window.py", line 256, in <lambda>
+    self.run_job(lambda p: self.service.strategies(ids))
+                           ~~~~~~~~~~~~~~~~~~~~~~~^^^^^
+  File "C:\1\1\tuningmaching_programa\app\service.py", line 106, in strategies
+    raise ValueError("Selecteer minimaal twee verschillende paren")
+ValueError: Selecteer minimaal twee verschillende paren
+2026-09-10 20:19:15,816 ERROR root UI operation failed
+Traceback (most recent call last):
+  File "C:\1\1\tuningmaching_programa\app\ui\main_window.py", line 110, in safe
+    callback()
+    ~~~~~~~~^^
+  File "C:\1\1\tuningmaching_programa\app\ui\main_window.py", line 256, in strategies
+    self.run_job(lambda p: self.service.strategies(ids))
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\1\1\tuningmaching_programa\app\ui\main_window.py", line 117, in run_job
+    raise ValueError('Wacht tot de huidige taak klaar is.')
+ValueError: Wacht tot de huidige taak klaar is.
+2026-09-10 20:20:02,179 ERROR root UI operation failed
+Traceback (most recent call last):
+  File "C:\1\1\tuningmaching_programa\app\ui\main_window.py", line 110, in safe
+    callback()
+    ~~~~~~~~^^
+  File "C:\1\1\tuningmaching_programa\app\ui\main_window.py", line 375, in discover_software_signatures
+    software_family_id = self.selected_id(self.software_family_table)
+  File "C:\1\1\tuningmaching_programa\app\ui\main_window.py", line 153, in selected_id
+    raise ValueError('Selecteer eerst een rij.')
+ValueError: Selecteer eerst een rij.
+2026-09-10 20:20:32,750 ERROR root UI operation failed
+Traceback (most recent call last):
+  File "C:\1\1\tuningmaching_programa\app\ui\main_window.py", line 110, in safe
+    callback()
+    ~~~~~~~~^^
+  File "C:\1\1\tuningmaching_programa\app\ui\main_window.py", line 616, in load_pair_regions
+    pair_id = self.selected_id(self.region_pair_table)
+  File "C:\1\1\tuningmaching_programa\app\ui\main_window.py", line 153, in selected_id
+    raise ValueError('Selecteer eerst een rij.')
+ValueError: Selecteer eerst een rij.

@@ -27,6 +27,34 @@ def _windows(data: bytes, start: int, end: int) -> tuple[bytes, bytes]:
             data[end:end + CROSS_SOFTWARE_CONTEXT_WINDOW])
 
 
+def _calibration_value_evidence(data: bytes, start: int, end: int, element_size: int | None) -> dict:
+    """Describe observed bytes without assigning calibration semantics."""
+    payload = data[start:end]
+    if not payload:
+        return {"count": 0, "min": None, "max": None, "mean": None,
+                "distinct": 0, "signed_candidate": "UNKNOWN", "unsigned_candidate": "UNKNOWN"}
+    values = np.frombuffer(payload, dtype=np.uint8).astype(np.int64)
+    result = {"count": int(values.size), "min": int(values.min()), "max": int(values.max()),
+              "mean": round(float(values.mean()), 4), "distinct": int(np.unique(values).size),
+              "signed_candidate": "POSSIBLE", "unsigned_candidate": "POSSIBLE"}
+    if element_size == 2 and len(payload) >= 2:
+        usable = payload[:len(payload) - len(payload) % 2]
+        little = np.frombuffer(usable, dtype="<u2")
+        big = np.frombuffer(usable, dtype=">u2")
+        result["element_count"] = int(len(little))
+        result["endian_candidates"] = {
+            "little": {"min": int(little.min()), "max": int(little.max()), "mean": round(float(little.mean()), 4)},
+            "big": {"min": int(big.min()), "max": int(big.max()), "mean": round(float(big.mean()), 4)},
+        }
+        result["signed_candidates"] = {
+            "little": {"min": int(np.frombuffer(usable, dtype="<i2").min()),
+                        "max": int(np.frombuffer(usable, dtype="<i2").max())},
+            "big": {"min": int(np.frombuffer(usable, dtype=">i2").min()),
+                    "max": int(np.frombuffer(usable, dtype=">i2").max())},
+        }
+    return result
+
+
 class ServiceV3Mixin:
     # ------------------------------------------------------------------
     # FASE 2/3: regio's en Tuning DNA
@@ -516,6 +544,7 @@ class ServiceV3Mixin:
         self.detect_map_structures(file_id, max_scan=max_scan)
         file_row = self.repo.file(file_id)
         regions = self.repo.map_regions_for_file(file_id)
+        data = self.repo.data(file_id)
         objects = []
         for region in regions:
             dimensions = region.get("dimensions")
@@ -528,6 +557,10 @@ class ServiceV3Mixin:
             structural_signature = hashlib.sha256(
                 json.dumps(signature_input, sort_keys=True).encode("utf-8")).hexdigest()
             axis_candidate = region["map_type"] == "axis_candidate"
+            start, end = region["start_offset"], region["end_offset"]
+            before, after = _windows(data, start, end)
+            context = data[max(0, start - CONTEXT_BYTES):min(len(data), end + CONTEXT_BYTES)]
+            value_statistics = _calibration_value_evidence(data, start, end, region.get("element_size"))
             objects.append({
                 "map_region_id": region["id"],
                 "object_key": f"region:{region['start_offset']}:{region['end_offset']}",
@@ -539,6 +572,7 @@ class ServiceV3Mixin:
                 "data_type": "UNKNOWN",
                 "element_size": region.get("element_size"),
                 "endian": "UNKNOWN",
+                "signedness_candidate": value_statistics.get("signed_candidate", "UNKNOWN"),
                 "row_count": dimensions[0] if dimensions and len(dimensions) > 1 else None,
                 "column_count": dimensions[1] if dimensions and len(dimensions) > 1 else (dimensions[0] if dimensions else None),
                 "axis_count": 1 if axis_candidate else 0,
@@ -546,13 +580,17 @@ class ServiceV3Mixin:
                 "surrounding_signature": "UNKNOWN",
                 "internal_pattern_signature": structural_signature,
                 "neighboring_regions": [],
-                "value_statistics": {},
-                "entropy": None,
-                "context_hashes": {},
-                "relative_layout": {"start_offset": region["start_offset"], "end_offset": region["end_offset"]},
+                "value_statistics": value_statistics,
+                "entropy": round(entropy(data[start:end]), 6),
+                "context_hashes": {"before": hashlib.sha256(before).hexdigest(),
+                                   "after": hashlib.sha256(after).hexdigest(),
+                                   "surrounding": hashlib.sha256(context).hexdigest()},
+                "relative_layout": {"start_offset": start, "end_offset": end,
+                                     "length": end - start},
                 "structural_signature": structural_signature,
                 "detection_confidence": region["map_confidence"],
-                "evidence": ["map_region structure candidate", payload.get("criteria", "UNKNOWN")],
+                "evidence": ["map_region structure candidate", payload.get("criteria", "UNKNOWN"),
+                             "value statistics observed", "context hashes observed"],
                 "status": "candidate",
             })
         self.repo.replace_calibration_objects(file_id, objects)
@@ -702,6 +740,29 @@ class ServiceV3Mixin:
                     "method": "calibration_identity_structural_context",
                     "evidence": [evidence], "status": status.lower()})
                 created.append(evidence)
+        if created:
+            identity_row = self.repo.calibration_identity(identity_id)
+            contradictions = [item for item in created if item["negative"]]
+            supporting = [item for item in created if not item["negative"]]
+            with self.repo.db.connect() as db:
+                old_support = identity_row.get("supporting_evidence", [])
+                old_contradictions = identity_row.get("contradicting_evidence", [])
+                support_entries = old_support + [
+                    {"type": "identity_alignment", "context_similarity": item["context_similarity"]}
+                    for item in supporting]
+                contradiction_entries = old_contradictions + [
+                    {"type": "identity_alignment", "negative": item["negative"],
+                     "context_similarity": item["context_similarity"]}
+                    for item in contradictions]
+                next_status = identity_row["status"]
+                if identity_row["status"] == "CANDIDATE" and contradictions:
+                    next_status = "UNKNOWN"
+                db.execute("""UPDATE calibration_identities
+                    SET supporting_evidence=?, contradicting_evidence=?, status=?,
+                        updated_at=CURRENT_TIMESTAMP WHERE id=?""",
+                           (json.dumps(support_entries, ensure_ascii=False),
+                            json.dumps(contradiction_entries, ensure_ascii=False),
+                            next_status, identity_id))
         return {"identity_id": identity_id, "alignments_created": len(created),
                 "alignments": created, "status": identity["status"],
                 "note": "Identity alignment is evidence-backed candidate support; not automatic verification."}

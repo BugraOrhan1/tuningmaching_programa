@@ -198,7 +198,7 @@ def _find_first_binary(data: bytes, records: list[dict], boundary: int) -> dict 
             "source_offset": start, "source_length": len(blob),
             "sha256": digest["sha256"], "md5": digest["md5"], "filename": record["value"],
                 "extraction_method": "explicit_import_header", "confidence": 100.0,
-            "boundary_status": "COMPLETE BINARY",
+                "boundary_status": "COMPLETE",
                 "evidence": [f"import-header met bestandsnaam op offset {record['offset']}",
                              f"binary begint op eerste niet-header byte {start}"],
                 "complete": True}
@@ -298,7 +298,7 @@ def parse_ols_structure(data: bytes) -> dict:
                          "identity_header": identity,
                          "extraction_method": "repeating_identity_header",
                  "confidence": 90.0 if complete else 70.0,
-                 "boundary_status": "COMPLETE BINARY" if complete else "PARTIAL BINARY",
+                         "boundary_status": "COMPLETE" if complete else "PARTIAL",
                          "evidence": [f"identiteitsheader op {len(page_starts)} posities met vaste "
                                       f"afstand {stride} bytes, direct na nul-padding",
                                       f"binary [{position}, {position + len(blob)})"],
