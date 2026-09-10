@@ -1,0 +1,2 @@
+2026-09-10 16:02:00,460 INFO app.database.repository Import WinOLS project=C:\tuningmaching_programa\data\winols_projects\GASDROP_100119.ols sha256=dcfc2d8d03b035e7d559fa6fb4c80b492c79e937cf1df0729f0912605782e3e8 id=1
+2026-09-10 16:03:43,759 INFO app.database.repository Import WinOLS project=C:\tuningmaching_programa\data_backup_20260910_155927\winols_projects\dcfc2d8d03b035e7d559fa6fb4c80b492c79e937cf1df0729f0912605782e3e8.ols sha256=dcfc2d8d03b035e7d559fa6fb4c80b492c79e937cf1df0729f0912605782e3e8 id=2

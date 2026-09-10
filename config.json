@@ -1,0 +1,8 @@
+{
+  "data_dir": "data",
+  "max_file_mb": 64,
+  "top_matches": 10,
+  "candidate_pool": 250,
+  "block_size": 4096,
+  "diff_merge_gap": 8
+}

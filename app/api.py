@@ -1,0 +1,222 @@
+"""Optional authenticated loopback API, sharing the desktop service layer."""
+import secrets
+from pathlib import Path
+from fastapi import FastAPI, Depends, Header, HTTPException
+from pydantic import BaseModel, Field
+from app.service import Service
+from app.winols.project_export import export_report
+
+
+class ImportRequest(BaseModel):
+    folder: str
+    kind: str = 'auto'
+
+
+class PairRequest(BaseModel):
+    original_id: int
+    tuned_id: int
+    confirmed: bool = False
+
+
+class AnalyzeRequest(BaseModel):
+    path: str
+
+
+class ProjectRequest(BaseModel):
+    path: str
+
+
+class ReclassifyRequest(BaseModel):
+    file_ids: list[int] = Field(min_length=1, max_length=1000)
+    kind: str
+
+
+class StrategyRequest(BaseModel):
+    pair_ids: list[int] = Field(min_length=2, max_length=20)
+
+
+class AlignmentRequest(BaseModel):
+    source_file_id: int
+    target_file_id: int
+
+
+class ReviewRequest(BaseModel):
+    note: str = ''
+
+
+def create_api(service: Service, token: str) -> FastAPI:
+    if len(token) < 24:
+        raise ValueError('API token moet minimaal 24 tekens bevatten')
+
+    def authorize(x_api_key: str = Header(default='')):
+        if not secrets.compare_digest(x_api_key.encode(), token.encode()):
+            raise HTTPException(401, 'Ongeldige X-API-Key')
+
+    api = FastAPI(title='Tuning File AI Assistant', dependencies=[Depends(authorize)])
+
+    @api.exception_handler(ValueError)
+    async def value_error(request, exc):
+        from fastapi.responses import JSONResponse
+        return JSONResponse(status_code=400, content={'detail': str(exc)})
+
+    @api.exception_handler(OSError)
+    async def io_error(request, exc):
+        from fastapi.responses import JSONResponse
+        return JSONResponse(status_code=400, content={'detail': str(exc)})
+
+    @api.get('/dashboard')
+    def dashboard():
+        return service.repo.dashboard()
+
+    @api.get('/files')
+    def files(q: str = ''):
+        return service.repo.files(q)
+
+    @api.get('/files/{file_id}/recognition')
+    def recognition(file_id: int):
+        return service.repo.recognition(file_id)
+
+    @api.post('/import')
+    def import_files(body: ImportRequest):
+        return service.repo.import_folder(body.folder, body.kind)
+
+    @api.patch('/files/{file_id}/metadata')
+    def metadata(file_id: int, body: dict[str, str]):
+        service.repo.update_metadata(file_id, body)
+        return service.repo.file(file_id)
+
+    @api.post('/files/reclassify')
+    def reclassify(body: ReclassifyRequest):
+        return {'updated': service.repo.reclassify_files(body.file_ids, body.kind)}
+
+    @api.post('/files/auto-classify')
+    def auto_classify():
+        return service.repo.auto_classify_evidence()
+
+    @api.get('/winols-projects')
+    def projects(q: str = ''):
+        return service.repo.projects(q)
+
+    @api.post('/winols-projects')
+    def import_project(body: ProjectRequest):
+        return {'id': service.repo.import_project(Path(body.path))}
+
+    @api.get('/winols-projects/{project_id}/inspect')
+    def inspect_project(project_id: int):
+        return service.repo.inspect_project(project_id)
+
+    @api.get('/winols-projects/{project_id}/objects')
+    def project_objects(project_id: int):
+        return service.repo.project_objects(project_id)
+
+    @api.get('/winols-projects/{project_id}/structure')
+    def project_structure(project_id: int):
+        return service.repo.ols_structure(project_id)
+
+    @api.get('/winols-projects/{project_id}/records')
+    def project_records(project_id: int):
+        return service.repo.project_records(project_id)
+
+    @api.get('/winols-projects/{project_id}/structure-report')
+    def project_structure_report(project_id: int):
+        return service.repo.project_structure_report(project_id)
+
+    @api.get('/ols-objects/unknown')
+    def unknown_ols_objects(project_id: int | None = None):
+        return service.repo.ols_unknown_objects(project_id)
+
+    @api.post('/ols-objects/{object_id}/review')
+    def review_ols_object(object_id: int, body: dict[str, str]):
+        return service.repo.review_ols_object(object_id, body.get('role', ''), body.get('note', ''), body.get('reviewer'))
+
+    @api.get('/pairs')
+    def pairs():
+        return service.repo.pairs()
+
+    @api.post('/pairs')
+    def pair(body: PairRequest):
+        return {'id': service.repo.pair(body.original_id, body.tuned_id, body.confirmed)}
+
+    @api.post('/pairs/suggest')
+    def suggest():
+        return {'suggested': service.repo.suggest_pairs()}
+
+    @api.post('/pairs/suggest-binary')
+    def suggest_binary():
+        return {'suggested': service.repo.suggest_binary_relationships()}
+
+    @api.post('/pairs/{pair_id}/confirm')
+    def confirm(pair_id: int):
+        service.repo.confirm_pair(pair_id)
+        return {'confirmed': True}
+
+    @api.get('/pairs/{pair_id}/diff')
+    def diff(pair_id: int):
+        return service.diff(pair_id)
+
+    @api.get('/pairs/{pair_id}/hex')
+    def hex_view(pair_id: int, start: int = 0, count: int = 256):
+        return service.hex(pair_id, start, count)
+
+    @api.post('/analyze')
+    def analyze(body: AnalyzeRequest):
+        return service.analyze(body.path)
+
+    @api.post('/clusters')
+    def clusters():
+        return service.clusters()
+
+    @api.post('/tuning-dna/{pair_id}/generate')
+    def generate_tuning_dna(pair_id: int):
+        return service.generate_tuning_dna(pair_id)
+
+    @api.get('/tuning-dna')
+    def tuning_dna(status: str | None = None):
+        return {'dna': service.tuning_dna(status), 'patterns': service.tuning_patterns(status)}
+
+    @api.post('/families/propose')
+    def propose_families():
+        return service.repo.propose_families()
+
+    @api.get('/ecu-families')
+    def ecu_families():
+        return service.repo.ecu_families()
+
+    @api.get('/software-families')
+    def software_families():
+        return service.repo.software_families()
+
+    @api.get('/knowledge-candidates')
+    def candidates(status: str = 'candidate'):
+        return service.repo.candidates(status)
+
+    @api.post('/knowledge-candidates/{candidate_id}/approve')
+    def approve(candidate_id: int, body: ReviewRequest):
+        return service.repo.approve_candidate(candidate_id, body.note)
+
+    @api.post('/knowledge-candidates/{candidate_id}/reject')
+    def reject(candidate_id: int, body: ReviewRequest):
+        service.repo.reject_candidate(candidate_id, body.note)
+        return {'rejected': True}
+
+    @api.post('/ecu-families/{ecu_family_id}/signature-candidates')
+    def signature_candidates(ecu_family_id: int):
+        return service.repo.discover_ecu_signature_candidates(ecu_family_id)
+
+    @api.post('/software-families/{software_family_id}/signature-candidates')
+    def software_signature_candidates(software_family_id: int):
+        return service.repo.discover_software_signature_candidates(software_family_id)
+
+    @api.post('/alignments')
+    def alignment(body: AlignmentRequest):
+        return service.align_files(body.source_file_id, body.target_file_id)
+
+    @api.post('/strategies')
+    def strategies(body: StrategyRequest):
+        return service.strategies(body.pair_ids)
+
+    @api.post('/export/pairs/{pair_id}')
+    def export(pair_id: int):
+        return export_report(service.diff(pair_id), Path(service.repo.root / 'reports'))
+
+    return api
