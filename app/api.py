@@ -12,6 +12,12 @@ class ImportRequest(BaseModel):
     kind: str = 'auto'
 
 
+class V3ReviewRequest(BaseModel):
+    action: str
+    reviewer: str | None = None
+    note: str = ''
+
+
 class PairRequest(BaseModel):
     original_id: int
     tuned_id: int
@@ -236,5 +242,65 @@ def create_api(service: Service, token: str) -> FastAPI:
     @api.post('/export/pairs/{pair_id}')
     def export(pair_id: int):
         return export_report(service.diff(pair_id), Path(service.repo.root / 'reports'))
+
+    # ---------------- V3 Tuning Intelligence ----------------
+    @api.get('/pairs/{pair_id}/regions')
+    def pair_regions(pair_id: int):
+        return service.regions(pair_id)
+
+    @api.get('/regions/{region_id}')
+    def region_detail(region_id: int):
+        return service.region_detail(region_id)
+
+    @api.post('/patterns/rebuild')
+    def patterns_rebuild(resume: bool = True):
+        return service.run_pattern_job(resume=resume)
+
+    @api.get('/patterns')
+    def patterns(status: str | None = None):
+        return service.patterns_detail(status)
+
+    @api.get('/patterns/{pattern_id}')
+    def pattern_detail(pattern_id: int):
+        pattern = service.repo.pattern(pattern_id)
+        if not pattern:
+            raise HTTPException(404, 'Onbekend patroon-ID')
+        return pattern
+
+    @api.post('/patterns/{pattern_id}/align')
+    def pattern_align(pattern_id: int):
+        return service.align_pattern_across_software(pattern_id)
+
+    @api.post('/patterns/{pattern_id}/review')
+    def pattern_review(pattern_id: int, body: V3ReviewRequest):
+        return service.review_pattern(pattern_id, body.action, body.reviewer, body.note)
+
+    @api.post('/regions/{region_id}/review')
+    def region_review(region_id: int, body: V3ReviewRequest):
+        return service.review_region(region_id, body.action, body.reviewer, body.note)
+
+    @api.post('/files/{file_id}/map-structures')
+    def map_structures(file_id: int):
+        return service.detect_map_structures(file_id)
+
+    @api.get('/files/{file_id}/map-structures')
+    def map_structures_get(file_id: int):
+        return service.repo.map_regions_for_file(file_id)
+
+    @api.get('/files/{file_id}/new-bin-report')
+    def new_bin_report(file_id: int, threshold: float = 70.0):
+        return service.new_bin_report(file_id, threshold)
+
+    @api.get('/search')
+    def search(q: str = ''):
+        return service.search(q)
+
+    @api.get('/winols-projects/{project_id}/graph')
+    def ols_graph(project_id: int):
+        return service.ols_graph(project_id)
+
+    @api.get('/jobs')
+    def jobs():
+        return service.jobs()
 
     return api

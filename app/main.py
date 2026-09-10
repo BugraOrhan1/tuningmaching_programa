@@ -61,6 +61,30 @@ def main() -> None:
     approve.add_argument('candidate_id', type=int)
     reject = sub.add_parser('reject')
     reject.add_argument('candidate_id', type=int)
+    rebuild = sub.add_parser('rebuild-patterns', help='V3-patronen herbouwen (hervatbaar)')
+    rebuild.add_argument('--no-resume', action='store_true')
+    sub.add_parser('patterns', help='V3-tuningpatronen tonen')
+    pattern_align = sub.add_parser('align-pattern', help='patroon over software heen uitlijnen')
+    pattern_align.add_argument('pattern_id', type=int)
+    regions_cmd = sub.add_parser('regions', help='TuningRegions van een paar')
+    regions_cmd.add_argument('pair_id', type=int)
+    region_detail = sub.add_parser('region', help='een regio met evidence')
+    region_detail.add_argument('region_id', type=int)
+    newbin = sub.add_parser('new-bin', help='New BIN Analysis-rapport')
+    newbin.add_argument('file_id', type=int)
+    newbin.add_argument('--threshold', type=float, default=70.0)
+    mapdetect = sub.add_parser('map-structures', help='structuurkandidaten detecteren')
+    mapdetect.add_argument('file_id', type=int)
+    search_cmd = sub.add_parser('search', help='zoeken in files/patronen/projecten/regios')
+    search_cmd.add_argument('term')
+    ols_graph = sub.add_parser('ols-graph', help='OLS-projectgraph met bewezen relaties')
+    ols_graph.add_argument('project_id', type=int)
+    sub.add_parser('jobs', help='analyse-jobs tonen')
+    review_cmd = sub.add_parser('review-knowledge', help='patroon of regio reviewen')
+    review_cmd.add_argument('subject', choices=['pattern', 'region'])
+    review_cmd.add_argument('subject_id', type=int)
+    review_cmd.add_argument('action')
+    review_cmd.add_argument('--note', default='')
     api = sub.add_parser('api')
     api.add_argument('--port', type=int, default=8765)
     args = parser.parse_args()
@@ -126,6 +150,31 @@ def main() -> None:
             result = service.identify(args.path)
         elif args.command == 'diff':
             result = service.diff(args.pair_id)
+        elif args.command == 'rebuild-patterns':
+            result = service.run_pattern_job(resume=not args.no_resume)
+        elif args.command == 'patterns':
+            result = service.patterns_detail()
+        elif args.command == 'align-pattern':
+            result = service.align_pattern_across_software(args.pattern_id)
+        elif args.command == 'regions':
+            result = service.regions(args.pair_id)
+        elif args.command == 'region':
+            result = service.region_detail(args.region_id)
+        elif args.command == 'new-bin':
+            result = service.new_bin_report(args.file_id, args.threshold)
+        elif args.command == 'map-structures':
+            result = service.detect_map_structures(args.file_id)
+        elif args.command == 'search':
+            result = service.search(args.term)
+        elif args.command == 'ols-graph':
+            result = service.ols_graph(args.project_id)
+        elif args.command == 'jobs':
+            result = service.jobs()
+        elif args.command == 'review-knowledge':
+            if args.subject == 'pattern':
+                result = service.review_pattern(args.subject_id, args.action, note=args.note)
+            else:
+                result = service.review_region(args.subject_id, args.action, note=args.note)
         elif args.command == 'propose-families':
             result = service.repo.propose_families()
         elif args.command == 'generate-tuning-dna':
