@@ -306,6 +306,144 @@ def test_calibration_identity_groups_structure_but_stays_candidate(service, tmp_
                for item in identities)
 
 
+def test_calibration_identity_review_is_traceable_and_statused(service, tmp_path):
+    path = tmp_path / "identity_review.bin"
+    path.write_bytes(_bin(64))
+    file_id = service.repo.import_file(path, "unknown")
+    service.build_calibration_objects(file_id)
+    service.build_calibration_identities([file_id])
+    identity = service.repo.calibration_identities()[0]
+
+    reviewed = service.review_calibration_identity(identity["id"], "approve", "technician", "supported")
+
+    assert reviewed["identity"]["status"] == "SUPPORTED"
+    history = service.repo.knowledge_history("calibration_identity")
+    assert history[0]["action"] == "approve"
+
+
+def test_tuning_dna_links_only_overlapping_calibration_identity_candidates(service, tmp_path):
+    original = tmp_path / "dna_identity_original.bin"
+    tuned = tmp_path / "dna_identity_tuned.bin"
+    source = bytearray(_bin(65))
+    source[512:544] = bytes(range(32))
+    changed = bytearray(source)
+    changed[520:528] = b"TUNED!!!"
+    original.write_bytes(bytes(source))
+    tuned.write_bytes(bytes(changed))
+    original_id = service.repo.import_file(original, "original")
+    tuned_id = service.repo.import_file(tuned, "tuned")
+    service.repo.update_metadata(original_id, {"ecu_family": "DNA_ECU", "software_number": "DNA_SW"})
+    pair_id = service.repo.pair(original_id, tuned_id, confirmed=True)
+    object_id = service.repo.db.rows("""INSERT INTO calibration_objects
+        (file_id,object_key,dimensions,data_type,element_size,endian,axis_count,
+         structural_signature,detection_confidence,evidence,status)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?) RETURNING id""",
+        (original_id, "test:512:544", "[32]", "UNKNOWN", 1, "UNKNOWN", 0,
+         "dna-structural-signature", 80.0, '["test evidence"]', "candidate"))[0]["id"]
+    service.repo.db.rows("UPDATE calibration_objects SET relative_layout=? WHERE id=?",
+                         ('{"start_offset": 512, "end_offset": 544}', object_id))
+    service.build_calibration_identities([original_id])
+    dna = service.generate_tuning_dna(pair_id)
+
+    assert dna["calibration_identity_ids"]
+    assert dna["regions"][0]["calibration_identity_candidates"]
+    assert dna["regions"][0]["calibration_identity_candidates"][0]["evidence"] == \
+        "same-file CalibrationObject overlap"
+
+
+def test_calibration_identity_alignment_records_context_evidence(service, tmp_path):
+    first = tmp_path / "align_first.bin"
+    second = tmp_path / "align_second.bin"
+    first.write_bytes(_bin(66))
+    second.write_bytes(_bin(66))
+    first_id = service.repo.import_file(first, "unknown")
+    second_id = service.repo.import_file(second, "unknown")
+    for file_id, software in ((first_id, "SW_A"), (second_id, "SW_B")):
+        service.repo.update_metadata(file_id, {"ecu_family": "ALIGN_ECU", "software_number": software})
+        service.repo.db.rows("""INSERT INTO calibration_objects
+            (file_id,object_key,dimensions,data_type,element_size,endian,axis_count,
+             relative_layout,structural_signature,detection_confidence,evidence,status)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (file_id, f"align:{file_id}", "[32]", "UNKNOWN", 1, "UNKNOWN", 0,
+             '{"start_offset":512,"end_offset":544}', "align-signature", 80.0,
+             '["test evidence"]', "candidate"))
+    service.build_calibration_identities([first_id, second_id])
+    identity = service.repo.calibration_identities()[0]
+
+    result = service.align_calibration_identity(identity["id"])
+
+    assert result["alignments_created"] == 1
+    assert result["alignments"][0]["positive"]
+    assert result["alignments"][0]["status"] in {"SUPPORTED", "UNKNOWN"}
+
+
+def test_confidence_evaluation_reports_metrics_and_ambiguous_cases(service):
+    result = service.evaluate_confidence([
+        {"score": 95, "label": "positive"},
+        {"score": 20, "label": "negative"},
+        {"score": 80, "label": "negative"},
+        {"score": 55, "label": "ambiguous"},
+    ])
+
+    assert result["sample_count"] == 3
+    assert result["ambiguous_count"] == 1
+    assert result["false_positive"] == 1
+    assert result["brier_score"] is not None
+    assert result["evaluation_id"] == 1
+
+
+def test_pattern_merge_rebuilds_memberships(service, tmp_path):
+    for seed, start in ((67, 300), (68, 900)):
+        original = tmp_path / f"merge_o{seed}.bin"
+        tuned = tmp_path / f"merge_t{seed}.bin"
+        original.write_bytes(_bin(seed))
+        data = bytearray(_bin(seed)); data[start:start + 64] = b"M" * 64
+        tuned.write_bytes(bytes(data))
+        oid = service.repo.import_file(original, "original")
+        tid = service.repo.import_file(tuned, "tuned")
+        service.repo.update_metadata(oid, {"ecu_family": f"MERGE_{seed}"})
+        service.repo.pair(oid, tid, confirmed=True)
+    service.rebuild_patterns()
+    patterns = service.patterns_detail()
+    assert len(patterns) >= 2
+    source, target = patterns[-1], patterns[0]
+    result = service.review_pattern(source["id"], "merge", payload={"target_pattern_id": target["id"]})
+
+    assert result["rebuild"]["status"] == "rebuilt"
+    assert service.repo.db.rows("SELECT status FROM tuning_patterns WHERE id=?",
+                                (source["id"],))[0]["status"] == "rejected"
+    assert service.repo.pattern(target["id"])["members"]
+
+
+def test_new_bin_report_exposes_identity_candidates_as_heuristic(service, tmp_path):
+    path = tmp_path / "new_identity.bin"
+    path.write_bytes(_bin(69))
+    file_id = service.repo.import_file(path, "unknown")
+
+    report = service.new_bin_report(file_id, threshold=50.0)
+
+    assert "calibration_identity_matches" in report
+    assert report["confidence_type"] == "HEURISTIC CONFIDENCE"
+    assert report["score_components"]["calibration_identity_confidence"] >= 0.0
+
+
+def test_search_finds_identity_evidence_and_builds(service, tmp_path):
+    path = tmp_path / "search_identity.bin"
+    path.write_bytes(_bin(70))
+    file_id = service.repo.import_file(path, "unknown")
+    service.repo.update_metadata(file_id, {"ecu_family": "SEARCH_IDENTITY"})
+    service.build_calibration_objects(file_id)
+    service.build_calibration_identities([file_id])
+    identity = service.repo.calibration_identities()[0]
+    service.repo.add_evidence("calibration_identity", str(identity["id"]),
+                              "structure", "SEARCH_IDENTITY evidence", confidence=80.0)
+
+    result = service.search("SEARCH_IDENTITY")
+
+    assert result["calibration_identities"]
+    assert result["evidence"]
+
+
 # ---------------------------------------------------------------- Malformed OLS
 def test_malformed_ols_is_rejected_without_invention(service, tmp_path):
     bad = tmp_path / "bad.ols"

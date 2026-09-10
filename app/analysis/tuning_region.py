@@ -208,6 +208,7 @@ def build_regions(original: bytes, tuned: bytes, blocks: list[dict], stage: str 
             "entropy_before": round(entropy(original_region), 4),
             "entropy_after": round(entropy(tuned_region), 4),
             "region_class": region_class,
+            "checksum_status": "UNKNOWN",
             "cross_pair_shared": False,
             "alignment_confidence": 100.0,  # binnen het paar is de offset exact
             "map_confidence": 0.0, "map_type": "unknown",

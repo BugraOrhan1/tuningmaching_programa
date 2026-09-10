@@ -100,6 +100,7 @@ class ServiceV3Mixin:
         for region in regions:
             if region["id"] in shared_set:
                 region["region_class"] = "checksum_candidate"
+                region["checksum_status"] = "CHECKSUM_CANDIDATE"
         stats["checksum_candidates"] = len(shared_ids)
 
         tunable = [region for region in regions if region["region_class"] not in
@@ -184,14 +185,24 @@ class ServiceV3Mixin:
                 progress(f"Patronen {pattern_count}")
         stats["patterns"] = pattern_count
         self.repo.finish_run(run_id, "done", stats)
-        return {"run_id": run_id, "patterns": pattern_count, **stats}
+        build_id = self.repo.create_knowledge_build(
+            run_id, len({region["pair_id"] for region in regions}), pattern_count,
+            len(self.repo.calibration_identities()), notes="deterministic V3 pattern rebuild")
+        return {"run_id": run_id, "build_id": build_id, "patterns": pattern_count, **stats}
 
     def patterns_detail(self, status: str | None = None) -> list[dict]:
         return self.repo.patterns_v3(status)
 
     def review_pattern(self, pattern_id: int, action: str, reviewer: str | None = None,
-                       note: str = "") -> dict:
-        return self.repo.review_knowledge("tuning_pattern", pattern_id, action, reviewer, note)
+                       note: str = "", payload: dict | None = None) -> dict:
+        result = self.repo.review_knowledge("tuning_pattern", pattern_id, action, reviewer, note, payload)
+        if action == "merge":
+            target_id = int((payload or {}).get("target_pattern_id", 0))
+            result["rebuild"] = self.repo.merge_patterns(pattern_id, target_id)
+        elif action == "split":
+            region_ids = [int(value) for value in (payload or {}).get("region_ids", [])]
+            result["rebuild"] = self.repo.split_pattern(pattern_id, region_ids)
+        return result
 
     def review_region(self, region_id: int, action: str, reviewer: str | None = None,
                       note: str = "", payload: dict | None = None) -> dict:
@@ -552,20 +563,39 @@ class ServiceV3Mixin:
         """Group identical structural candidates as unverified identities."""
         if file_ids is None:
             rows = self.repo.db.rows("SELECT * FROM calibration_objects ORDER BY id")
+            affected_keys = None
         else:
             unique_ids = list(dict.fromkeys(file_ids))
             if not unique_ids:
                 return {"identities": 0, "members": 0, "status": "candidates_only"}
             marks = ",".join("?" for _ in unique_ids)
-            rows = self.repo.db.rows(
-                f"SELECT * FROM calibration_objects WHERE file_id IN ({marks}) ORDER BY id",
+            selected = self.repo.db.rows(
+                f"SELECT ecu_family, structural_signature FROM calibration_objects WHERE file_id IN ({marks})",
                 tuple(unique_ids))
+            affected_keys = {(row.get("ecu_family") or "UNKNOWN", row["structural_signature"])
+                             for row in selected}
+            rows = []
+            if affected_keys:
+                rows = self.repo.db.rows("SELECT * FROM calibration_objects ORDER BY id")
+                rows = [row for row in rows
+                        if (row.get("ecu_family") or "UNKNOWN", row["structural_signature"]) in affected_keys]
         groups: dict[tuple[str, str], list[dict]] = {}
         for row in rows:
             groups.setdefault((row.get("ecu_family") or "UNKNOWN", row["structural_signature"]), []).append(row)
         with self.repo.db.connect() as db:
-            db.execute("DELETE FROM calibration_identity_members")
-            db.execute("DELETE FROM calibration_identities")
+            if affected_keys is None:
+                db.execute("DELETE FROM calibration_identity_members")
+                db.execute("DELETE FROM calibration_identities")
+                previous_status = {}
+            else:
+                previous_status = {}
+                for key in affected_keys:
+                    identity_key = f"v1:{key[0]}:{key[1]}"
+                    old = db.execute("SELECT id, status FROM calibration_identities WHERE identity_key=?",
+                                     (identity_key,)).fetchone()
+                    if old:
+                        previous_status[identity_key] = old["status"]
+                        db.execute("DELETE FROM calibration_identities WHERE id=?", (old["id"],))
             identity_count = 0
             member_count = 0
             for (ecu_family, signature), members in sorted(groups.items()):
@@ -581,7 +611,8 @@ class ServiceV3Mixin:
                      region_count,supporting_evidence,confidence,status)
                     VALUES (?,?,?,?,?,?,?,?,?)""",
                     (key, ecu_family, signature, json.dumps(software), len(source_file_ids),
-                     len(members), json.dumps(evidence, ensure_ascii=False), confidence, "CANDIDATE"))
+                     len(members), json.dumps(evidence, ensure_ascii=False), confidence,
+                     previous_status.get(key, "CANDIDATE")))
                 identity_id = cursor.lastrowid
                 identity_count += 1
                 for member in members:
@@ -598,6 +629,83 @@ class ServiceV3Mixin:
         return {"identities": identity_count, "members": member_count,
                 "status": "candidates_only", "confidence_type": "HEURISTIC CONFIDENCE"}
 
+    def review_calibration_identity(self, identity_id: int, action: str,
+                                    reviewer: str | None = None, note: str = "",
+                                    payload: dict | None = None) -> dict:
+        return self.repo.review_calibration_identity(identity_id, action, reviewer, note, payload)
+
+    def calibration_identity_links(self, file_id: int, regions: list[dict]) -> dict[int, list[dict]]:
+        """Return evidence-backed identity candidates overlapping regions in one file."""
+        rows = self.repo.db.rows("""SELECT i.id AS identity_id, i.status AS identity_status,
+            m.source_start, m.source_end, m.relation_confidence
+            FROM calibration_identity_members m
+            JOIN calibration_identities i ON i.id=m.identity_id
+            WHERE m.file_id=? AND i.status NOT IN ('REJECTED', 'UNKNOWN')
+            AND m.status NOT IN ('REJECTED', 'UNKNOWN')""", (file_id,))
+        links: dict[int, list[dict]] = {}
+        for region in regions:
+            matches = []
+            for row in rows:
+                if row["source_start"] is None or row["source_end"] is None:
+                    continue
+                overlaps = region["start_offset"] < row["source_end"] and row["source_start"] < region["end_offset"]
+                if overlaps:
+                    matches.append({"identity_id": row["identity_id"],
+                                    "status": row["identity_status"],
+                                    "relation_confidence": row["relation_confidence"],
+                                    "evidence": "same-file CalibrationObject overlap"})
+            links[region["start_offset"]] = matches
+        return links
+
+    def align_calibration_identity(self, identity_id: int) -> dict:
+        """Align identity members with explicit positive and negative evidence."""
+        identity = self.repo.calibration_identity(identity_id)
+        if identity is None:
+            raise ValueError("Onbekende Calibration Identity")
+        members = identity["members"]
+        created = []
+        for index, source in enumerate(members):
+            for target in members[index + 1:]:
+                if source["file_id"] == target["file_id"]:
+                    continue
+                source_data = self.repo.data(source["file_id"])
+                target_data = self.repo.data(target["file_id"])
+                source_before = source_data[max(0, source["source_start"] - 64):source["source_start"]]
+                target_before = target_data[max(0, target["source_start"] - 64):target["source_start"]]
+                source_after = source_data[source["source_end"]:source["source_end"] + 64]
+                target_after = target_data[target["source_end"]:target["source_end"] + 64]
+                context_scores = []
+                for left, right in ((source_before, target_before), (source_after, target_after)):
+                    if left and right:
+                        context_scores.append(compare(left, right, {}, {})["match_score"])
+                context_similarity = round(sum(context_scores) / len(context_scores), 2) if context_scores else 0.0
+                positive = ["exact structural signature match", "same logical identity candidate"]
+                negative = []
+                if context_similarity < 70.0:
+                    negative.append("surrounding context below 70 percent")
+                confidence = round(0.55 * 100.0 + 0.45 * context_similarity, 2)
+                status = "SUPPORTED" if context_similarity >= 70.0 else "UNKNOWN"
+                evidence = {"identity_id": identity_id, "positive": positive,
+                            "negative": negative, "context_similarity": context_similarity,
+                            "dimensions": "same structural signature", "status": status}
+                self.repo.add_alignment({
+                    "pattern_id": None, "source_file_id": source["file_id"],
+                    "target_file_id": target["file_id"],
+                    "source_software": source.get("software") or "UNKNOWN",
+                    "target_software": target.get("software") or "UNKNOWN",
+                    "source_start": source["source_start"], "source_end": source["source_end"],
+                    "target_start": target["source_start"], "target_end": target["source_end"],
+                    "structural_similarity": 100.0,
+                    "alignment_confidence": confidence,
+                    "evidence_count": len(positive), "supporting_projects": 0,
+                    "supporting_signatures": 1, "contradicting_evidence": len(negative),
+                    "method": "calibration_identity_structural_context",
+                    "evidence": [evidence], "status": status.lower()})
+                created.append(evidence)
+        return {"identity_id": identity_id, "alignments_created": len(created),
+                "alignments": created, "status": identity["status"],
+                "note": "Identity alignment is evidence-backed candidate support; not automatic verification."}
+
     # ------------------------------------------------------------------
     # FASE 7: New BIN Analysis
     # ------------------------------------------------------------------
@@ -608,6 +716,9 @@ class ServiceV3Mixin:
         best = analysis["matches"][0] if analysis["matches"] else None
         pattern_matches = self.find_pattern_matches(query, threshold)
         self.build_calibration_objects(file_id)
+        self.build_calibration_identities([file_id])
+        identity_matches = [identity for identity in self.repo.calibration_identities()
+                    if any(member["file_id"] == file_id for member in identity["members"])]
         related_projects = sorted({pair["id"] for match in analysis["matches"]
                                    for pair in match["pairs"]})
         identification = analysis.get("identification", {})
@@ -623,7 +734,8 @@ class ServiceV3Mixin:
             "hardware_confidence": evidence_confidence("hardware"),
             "software_confidence": evidence_confidence("software"),
             "calibration_confidence": evidence_confidence("calibration"),
-            "calibration_identity_confidence": 0.0,
+            "calibration_identity_confidence": max(
+                (identity["confidence"] for identity in identity_matches), default=0.0),
             "tuning_pattern_confidence": pattern_matches[0]["pattern_confidence"] if pattern_matches else 0.0,
             "cross_software_confidence": 0.0,
             "evidence_strength": min(100.0, len(related_projects) * 10.0 + len(pattern_matches) * 5.0),
@@ -651,8 +763,10 @@ class ServiceV3Mixin:
             "tuning_dna_matches": pattern_matches,
             "map_structures": self.repo.map_regions_for_file(file_id)[:100],
             "calibration_objects": self.repo.calibration_objects_for_file(file_id)[:100],
+            "calibration_identity_matches": identity_matches[:50],
             "score_components": components,
             "score_weights": weights,
+            "knowledge_build": self.repo.active_knowledge_build(),
             "confidence_type": "HEURISTIC CONFIDENCE",
             "statistically_calibrated": False,
             "overall_confidence": overall,

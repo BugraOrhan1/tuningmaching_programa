@@ -1,6 +1,6 @@
 # DATABASE_SCHEMA.md
 
-SQLite, `PRAGMA user_version = 4`. Schema is additief en idempotent
+SQLite, `PRAGMA user_version = 8`. Schema is additief en idempotent
 (`CREATE IF NOT EXISTS` + gerichte `ALTER TABLE`-kolomvulling bij oudere
 databases; migratiehistorie in `schema_migrations`). Locatie: `data/database.sqlite`.
 
@@ -20,7 +20,7 @@ databases; migratiehistorie in `schema_migrations`). Locatie: `data/database.sql
 | `calibration_alignments` | V2-blok-run-aligneringen |Bron van de V3-evidence-uitbreiding |
 | `tune_candidates` | bevroren V2.7-kandidaatstroom | output onder reports/candidates |
 
-## V3-tabellen (schema v4, additief)
+## V3/V4-tabellen (schema v8, additief)
 
 ### tuning_regions
 Één rij per gewijzigde regio van een paar. Kolommen: `pair_id` (FK, CASCADE),
@@ -30,7 +30,7 @@ databases; migratiehistorie in `schema_migrations`). Locatie: `data/database.sql
 `original_context_hash`/`original_region_context_hash`/`tuned_context_hash`,
 `relative_start`/`relative_end`, `structural_signature`/`delta_signature`,
 `structure_features` (JSON), `entropy_before`/`entropy_after`, `region_class`,
-`cross_pair_shared`, `alignment_confidence`, `map_confidence`/`map_type`,
+`checksum_status`, `cross_pair_shared`, `alignment_confidence`, `map_confidence`/`map_type`,
 `stage`, `ecu_family`, `software_number`, `calibration_number`,
 `hardware_number`, `project`, `evidence` (JSON), `confidence`, `status`.
 UNIQUE(pair_id, start_offset, end_offset). Indexen: pair, signature,
@@ -52,6 +52,21 @@ Structuurkandidaten per bestand: `file_id`, `start/end_offset`, `map_type`
 (`axis_candidate`/`table_candidate`/`unknown`), `map_confidence`,
 `dimensions` (JSON, alleen wanneer aangetoond), `element_size`, `payload`
 (JSON met criteria), `status`. UNIQUE(file_id, start, end).
+
+### calibration_objects
+Structurele Calibration Object-kandidaten per file/map-region met dimensions,
+element size, endian/axis candidates, context/signatures, relative layout,
+evidence, detection confidence en status. Niet-bewezen semantiek blijft UNKNOWN.
+
+### calibration_identities / calibration_identity_members
+Logische identity-kandidaten en hun file/offset mappings. Statussen zijn
+`CANDIDATE`, `SUPPORTED`, `VERIFIED`, `REJECTED` en `UNKNOWN`. Een structurele
+signature-match alleen bewijst geen functionele calibration identity.
+
+### knowledge_builds / confidence_evaluations
+`knowledge_builds` versioneert pattern/identity rebuilds met source run,
+projectcount, patterncount, identitycount en configversie. `confidence_evaluations`
+slaat labeled precision, recall, F1, false-positive/negative rates en Brier-score op.
 
 ### evidence / evidence_relations
 Generieke bewijsopslag: `subject_type`+`subject_id`, `evidence_type`, `value`,
@@ -81,8 +96,8 @@ engine, transmission, stage, project), `tuning_patterns` (key+payload),
 
 ## Migratiegedrag
 
-`Database.__init__` maakt eerst het volledige V2+V3-schema met
+`Database.__init__` maakt eerst het volledige V2+V4-schema met
 `CREATE IF NOT EXISTS`, vult daarna ontbrekende kolommen van reeds bestaande
 tabellen gericht aan (witlijst-gebaseerde `ALTER TABLE ADD COLUMN`) en
-registreert versie 4 in `schema_migrations` + `PRAGMA user_version`. Bestaande
+registreert versie 8 in `schema_migrations` + `PRAGMA user_version`. Bestaande
 V2-databases blijven bruikbaar; er is geen destructieve migratie.

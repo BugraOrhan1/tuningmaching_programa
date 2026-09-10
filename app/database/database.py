@@ -159,9 +159,11 @@ CREATE TABLE IF NOT EXISTS tune_candidates (
  output_path TEXT NOT NULL, sha256 TEXT NOT NULL, size INTEGER NOT NULL,
  status TEXT NOT NULL DEFAULT 'candidate', created_at TEXT DEFAULT CURRENT_TIMESTAMP);
 CREATE INDEX IF NOT EXISTS tune_candidates_target ON tune_candidates(target_file_id);
+CREATE UNIQUE INDEX IF NOT EXISTS tune_candidates_identity
+ ON tune_candidates(target_file_id, IFNULL(pair_id, 0), sha256, status);
 """
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 8
 
 
 class Database:
@@ -174,7 +176,7 @@ class Database:
             db.executescript(V3_SCHEMA)
             # additieve kolommigrale veiligheid voor reeds aangemaakte V3-tabellen
             expected = {
-                "tuning_regions": {"original_region_context_hash"},
+                "tuning_regions": {"original_region_context_hash", "checksum_status"},
                 "ols_binaries": {"payload_offset", "payload_length", "end_boundary",
                                  "source_offset", "source_length", "md5", "boundary_status"},
             }
@@ -219,7 +221,7 @@ CREATE TABLE IF NOT EXISTS tuning_regions (
  structural_signature TEXT NOT NULL, delta_signature TEXT NOT NULL,
  structure_features TEXT NOT NULL DEFAULT '{}',
  entropy_before REAL NOT NULL, entropy_after REAL NOT NULL,
- region_class TEXT NOT NULL DEFAULT 'unknown',
+ region_class TEXT NOT NULL DEFAULT 'unknown', checksum_status TEXT NOT NULL DEFAULT 'UNKNOWN',
  cross_pair_shared INTEGER NOT NULL DEFAULT 0,
  alignment_confidence REAL NOT NULL DEFAULT 100.0,
  map_confidence REAL NOT NULL DEFAULT 0.0, map_type TEXT NOT NULL DEFAULT 'unknown',
@@ -307,6 +309,18 @@ CREATE TABLE IF NOT EXISTS analysis_runs (
  stats TEXT NOT NULL DEFAULT '{}', started_at TEXT DEFAULT CURRENT_TIMESTAMP,
  updated_at TEXT DEFAULT CURRENT_TIMESTAMP);
 CREATE INDEX IF NOT EXISTS analysis_runs_type ON analysis_runs(run_type, status);
+CREATE TABLE IF NOT EXISTS knowledge_builds (
+ id INTEGER PRIMARY KEY, status TEXT NOT NULL DEFAULT 'ACTIVE',
+ source_projects INTEGER NOT NULL DEFAULT 0, pattern_count INTEGER NOT NULL DEFAULT 0,
+ calibration_identity_count INTEGER NOT NULL DEFAULT 0, config_version TEXT NOT NULL DEFAULT 'v1',
+ source_run_id INTEGER REFERENCES analysis_runs(id), notes TEXT NOT NULL DEFAULT '',
+ created_at TEXT DEFAULT CURRENT_TIMESTAMP, completed_at TEXT);
+CREATE INDEX IF NOT EXISTS knowledge_builds_status ON knowledge_builds(status, id DESC);
+CREATE TABLE IF NOT EXISTS confidence_evaluations (
+ id INTEGER PRIMARY KEY, threshold REAL NOT NULL, sample_count INTEGER NOT NULL,
+ ambiguous_count INTEGER NOT NULL DEFAULT 0, precision REAL, recall REAL, f1 REAL,
+ false_positive_rate REAL, false_negative_rate REAL, brier_score REAL,
+ metrics TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS knowledge_reviews (
  id INTEGER PRIMARY KEY, subject_type TEXT NOT NULL, subject_id TEXT NOT NULL,
  action TEXT NOT NULL, payload TEXT NOT NULL DEFAULT '{}',

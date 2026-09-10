@@ -35,13 +35,18 @@ De eerste implementatiefase moet daarom correctness en evidence-grenzen herstell
 De eerste gecontroleerde implementaties zijn inmiddels toegevoegd:
 
 - OLS binaries bewaren nu payload-offset, payload-lengte, end-boundary, source-lengte, MD5 en `COMPLETE BINARY`/`PARTIAL BINARY`.
-- Schema-versie is additive verhoogd naar v6.
+- Schema-versie is additive verhoogd naar v8.
 - Calibration Objects zijn toegevoegd als structurele kandidaten bovenop bestaande `map_regions`.
 - Axis candidates bevatten monotonicity-, stap-, elementgrootte- en endian-evidence; factor, offset en unit blijven `UNKNOWN`.
 - Calibration Identity-kandidaten groeperen exact gelijke structurele signatures met per-file/offset mappings.
 - Afgewezen regions, patterns en legacy DNA worden niet meer gebruikt in actieve knowledge-query's.
 - Folder-import en pattern-rebuild bewaren checkpoints en markeren onverwachte fouten als `interrupted`.
 - New BIN Analysis rapporteert losse scorecomponenten en labelt de uitkomst als `HEURISTIC CONFIDENCE`.
+- Calibration Identity review en alignment zijn traceerbaar via API en knowledge history.
+- Pattern merge/split voert membership- en statistiekrebuilds uit.
+- Knowledge builds en confidence evaluations worden persistent opgeslagen.
+- De GUI bevat een Calibration Identity-view.
+- Search bevat Calibration Identities, Evidence en Knowledge Builds.
 
 Deze voortgang maakt de volledige V4/V5-acceptance nog niet compleet. Identity, alignment, mapsemantiek, checksum learning, statistische calibratie, merge/split-rebuild en brede real-data-validatie blijven open.
 
@@ -399,6 +404,6 @@ De bestaande basiscriteria die wel zichtbaar zijn: bronbestanden worden niet aut
 
 **GUI changes:** geen.
 
-**Real-data validation:** bestaande OLS-real-data tests vallen binnen de 67 geslaagde tests; er is nog geen brede dataset met duizenden echte confirmed pairs.
+**Real-data validation:** bestaande OLS-real-data tests vallen binnen de 74 geslaagde tests; er is nog geen brede dataset met duizenden echte confirmed pairs.
 
 **Known UNKNOWN cases:** mapnamen, axes, scale/units, objectsemantics, verified calibration identity, cross-software correspondence en statistical confidence.

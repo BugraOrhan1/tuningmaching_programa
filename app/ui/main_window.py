@@ -73,6 +73,7 @@ class MainWindow(QMainWindow):
         self.build_clusters()
         self.build_tuning_dna()
         self.build_patterns()
+        self.build_calibration_identities()
         self.build_region_viewer()
         self.build_new_bin()
         self.build_ols_explorer()
@@ -524,6 +525,31 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.pattern_detail)
         self.pattern_table.selectionModel().currentRowChanged.connect(self.show_pattern_detail)
 
+    def build_calibration_identities(self):
+        layout = self.page('Calibration Identities',
+                           'Structurele identity-kandidaten over softwarevarianten. Alleen evidence-backed '
+                           'candidates worden getoond; VERIFIED vereist technician review.')
+        self.identity_table = self.table(layout, ['ID', 'ECU', 'Signature', 'Software', 'Regions',
+                                                   'Confidence', 'Status'])
+        self.button(layout, 'Calibration identities herbouwen', self.rebuild_calibration_identities)
+        self.identity_detail = QPlainTextEdit()
+        self.identity_detail.setReadOnly(True)
+        layout.addWidget(self.identity_detail)
+        self.identity_table.selectionModel().currentRowChanged.connect(self.show_identity_detail)
+
+    def rebuild_calibration_identities(self):
+        result = self.service.build_calibration_identities()
+        self.statusBar().showMessage(f"{result['identities']} identity candidates herbouwd.", 5000)
+        self.refresh()
+
+    def show_identity_detail(self, index, _previous=None):
+        if not index.isValid():
+            return
+        identity_id = int(self.identity_table.item(index.row(), 0).text())
+        identity = self.repo.calibration_identity(identity_id)
+        if identity:
+            self.identity_detail.setPlainText(json.dumps(identity, ensure_ascii=False, indent=2))
+
     def rebuild_patterns_job(self):
         self.run_job(lambda progress: self.service.run_pattern_job(resume=True, progress=progress),
                      callback=lambda _result: None)
@@ -650,6 +676,12 @@ class MainWindow(QMainWindow):
                          f"{match['confirmed_projects']} projecten)")
         if not report['tuning_dna_matches']:
             lines.append('  INSUFFICIENT EVIDENCE: geen patronen boven de drempel')
+        lines.extend(['', 'CALIBRATION IDENTITY CANDIDATES:'])
+        for identity in report.get('calibration_identity_matches', [])[:10]:
+            lines.append(f"  #{identity['id']} {identity['status']} confidence {identity['confidence']}% "
+                         f"software={', '.join(identity.get('software_variants', []))}")
+        if not report.get('calibration_identity_matches'):
+            lines.append('  UNKNOWN: geen structurele identity candidate met voldoende evidence')
         lines.extend(['', 'STRUCTURELE REGIO-KANDIDATEN (geen mapnamen):'])
         for structure in report['map_structures'][:15]:
             lines.append(f"  0x{structure['start_offset']:x}: {structure['map_type']} "
@@ -708,7 +740,9 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, 'Zoeken', str(exc))
             return
         lines = [f"Bestanden: {len(hits['files'])}  ·  Patronen: {len(hits['patterns'])}  ·  "
-                 f"OLS-projecten: {len(hits['winols_projects'])}  ·  Regio\'s: {len(hits['regions'])}", '']
+             f"OLS-projecten: {len(hits['winols_projects'])}  ·  Regio\'s: {len(hits['regions'])}  ·  "
+             f"Identities: {len(hits.get('calibration_identities', []))}  ·  "
+             f"Evidence: {len(hits.get('evidence', []))}", '']
         for row in hits['files']:
             lines.append(f"[File #{row['id']}] {row['filename']} ({row['file_type']}, "
                          f"ECU {row.get('ecu_family') or 'UNKNOWN'})")
@@ -720,6 +754,12 @@ class MainWindow(QMainWindow):
         for row in hits['regions']:
             lines.append(f"[Regio #{row['id']}] pair {row['pair_id']} 0x{row['start_offset']:x} "
                          f"({row['region_class']})")
+        for row in hits.get('calibration_identities', []):
+            lines.append(f"[Calibration Identity #{row['id']}] {row['status']} {row['identity_key']} "
+                         f"({row['confidence']}%)")
+        for row in hits.get('evidence', []):
+            lines.append(f"[Evidence #{row['id']}] {row['subject_type']}:{row['subject_id']} "
+                         f"{row['evidence_type']} ({row['confidence']}%)")
         self.search_output.setPlainText('\n'.join(lines) if len(lines) > 2 else 'Geen treffers.')
 
     def generate_selected_dna(self):
@@ -776,6 +816,17 @@ class MainWindow(QMainWindow):
                            'structural_similarity', 'stages', 'confidence', 'status'])
             self.populate(self.region_pair_table, [p for p in self.repo.pairs() if p['confirmed']],
                           ['id', 'pair_name', 'confirmed'])
+            identity_rows = []
+            for identity in self.repo.calibration_identities():
+                identity_rows.append({
+                    'id': identity['id'], 'ecu_family': identity.get('ecu_family'),
+                    'structural_signature': identity['structural_signature'][:24],
+                    'software_variants': ', '.join(identity.get('software_variants', [])),
+                    'region_count': identity['region_count'], 'confidence': identity['confidence'],
+                    'status': identity['status']})
+            self.populate(self.identity_table, identity_rows,
+                          ['id', 'ecu_family', 'structural_signature', 'software_variants',
+                           'region_count', 'confidence', 'status'])
             self.populate(self.explorer_table, self.repo.projects(),
                           ['id', 'filename', 'file_size', 'sha256'])
         except AttributeError:

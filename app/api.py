@@ -16,6 +16,7 @@ class V3ReviewRequest(BaseModel):
     action: str
     reviewer: str | None = None
     note: str = ''
+    payload: dict = Field(default_factory=dict)
 
 
 class PairRequest(BaseModel):
@@ -48,6 +49,11 @@ class AlignmentRequest(BaseModel):
 
 class ReviewRequest(BaseModel):
     note: str = ''
+
+
+class ConfidenceEvaluationRequest(BaseModel):
+    records: list[dict] = Field(min_length=1, max_length=100000)
+    threshold: float = Field(default=70.0, ge=0.0, le=100.0)
 
 
 def create_api(service: Service, token: str) -> FastAPI:
@@ -273,7 +279,7 @@ def create_api(service: Service, token: str) -> FastAPI:
 
     @api.post('/patterns/{pattern_id}/review')
     def pattern_review(pattern_id: int, body: V3ReviewRequest):
-        return service.review_pattern(pattern_id, body.action, body.reviewer, body.note)
+        return service.review_pattern(pattern_id, body.action, body.reviewer, body.note, body.payload)
 
     @api.post('/regions/{region_id}/review')
     def region_review(region_id: int, body: V3ReviewRequest):
@@ -303,6 +309,21 @@ def create_api(service: Service, token: str) -> FastAPI:
     def calibration_identities():
         return service.repo.calibration_identities()
 
+    @api.get('/calibration-identities/{identity_id}')
+    def calibration_identity(identity_id: int):
+        identity = service.repo.calibration_identity(identity_id)
+        if not identity:
+            raise HTTPException(404, 'Onbekende Calibration Identity')
+        return identity
+
+    @api.post('/calibration-identities/{identity_id}/review')
+    def calibration_identity_review(identity_id: int, body: V3ReviewRequest):
+        return service.review_calibration_identity(identity_id, body.action, body.reviewer, body.note)
+
+    @api.post('/calibration-identities/{identity_id}/align')
+    def calibration_identity_align(identity_id: int):
+        return service.align_calibration_identity(identity_id)
+
     @api.get('/files/{file_id}/new-bin-report')
     def new_bin_report(file_id: int, threshold: float = 70.0):
         return service.new_bin_report(file_id, threshold)
@@ -318,5 +339,21 @@ def create_api(service: Service, token: str) -> FastAPI:
     @api.get('/jobs')
     def jobs():
         return service.jobs()
+
+    @api.get('/knowledge-builds')
+    def knowledge_builds():
+        return service.repo.knowledge_builds()
+
+    @api.get('/knowledge-builds/active')
+    def active_knowledge_build():
+        return service.repo.active_knowledge_build()
+
+    @api.post('/confidence/evaluate')
+    def confidence_evaluate(body: ConfidenceEvaluationRequest):
+        return service.evaluate_confidence(body.records, body.threshold)
+
+    @api.get('/confidence/evaluations')
+    def confidence_evaluations():
+        return service.repo.confidence_evaluations()
 
     return api

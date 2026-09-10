@@ -13,6 +13,7 @@ from app.analysis.ecu_fingerprint import ecu_family_fingerprint
 from app.analysis.alignment import align_regions
 from app.intelligence import ServiceV3Mixin
 from app.analysis.tuning_region import build_regions
+from app.learning.evaluation import evaluate_confidence
 
 
 class Service(ServiceV3Mixin):
@@ -129,6 +130,9 @@ class Service(ServiceV3Mixin):
                 'tuned_context_hash': hashlib.sha256(tuned[context_start:context_end]).hexdigest(),
                 'label_status': 'unknown',
             })
+        identity_links = self.calibration_identity_links(pair['original_file_id'], regions)
+        for region in regions:
+            region['calibration_identity_candidates'] = identity_links.get(region['start_offset'], [])
         payload = {
             'pair_id': pair_id,
             'source': {'original_file_id': pair['original_file_id'], 'tuned_file_id': pair['tuned_file_id'],
@@ -138,6 +142,8 @@ class Service(ServiceV3Mixin):
                        'calibration_number': metadata.get('calibration_number'),
                        'stage': metadata.get('stage'), 'project': metadata.get('project')},
             'regions': regions,
+            'calibration_identity_ids': sorted({item['identity_id'] for values in identity_links.values()
+                                                for item in values}),
             'region_ids': [row['id'] for row in stored_regions],
             'note': 'Structurele diff-evidence; geen mapnaam of tuningfunctie gegokt.',
         }
@@ -200,6 +206,11 @@ class Service(ServiceV3Mixin):
         for row in rows:
             row['payload'] = json.loads(row['payload'])
         return rows
+
+    def evaluate_confidence(self, records: list[dict], threshold: float = 70.0) -> dict:
+        metrics = evaluate_confidence(records, threshold)
+        metrics["evaluation_id"] = self.repo.save_confidence_evaluation(metrics)
+        return metrics
 
     def auto_process_ols(self, path: str) -> dict:
         """One-call OLS workflow: import, extract, classify, pair and learn.

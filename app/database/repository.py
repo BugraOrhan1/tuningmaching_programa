@@ -739,6 +739,12 @@ class Repository(RepositoryV3Mixin):
                         and not p.resolve().is_relative_to(self.root.resolve())),
                        key=lambda path: str(path).casefold())
         run = self.resume_run("folder_import") if resume else None
+        if run:
+            expected = run["config"]
+            current_manifest = [str(path) for path in paths]
+            if (expected.get("folder") != str(source) or expected.get("kind") != kind
+                    or expected.get("paths") != current_manifest):
+                raise ValueError("Importfolder is gewijzigd sinds het checkpoint; resume geweigerd")
         run_id = run["id"] if run else self.start_run(
             "folder_import", {"folder": str(source), "kind": kind,
                                "paths": [str(path) for path in paths]})

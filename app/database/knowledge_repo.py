@@ -6,6 +6,7 @@ database en verandert niets aan V2-gedrag.
 from __future__ import annotations
 
 import json
+import hashlib
 
 REGION_FIELDS = (
     "pair_id", "seq", "start_offset", "end_offset", "length", "changed_byte_count",
@@ -13,7 +14,7 @@ REGION_FIELDS = (
     "after_context", "original_context_hash", "original_region_context_hash",
     "tuned_context_hash", "relative_start", "relative_end", "structural_signature",
     "delta_signature", "structure_features", "entropy_before", "entropy_after",
-    "region_class", "cross_pair_shared", "alignment_confidence", "map_confidence",
+    "region_class", "checksum_status", "cross_pair_shared", "alignment_confidence", "map_confidence",
     "map_type", "stage", "ecu_family", "software_number", "calibration_number",
     "hardware_number", "project", "evidence", "confidence", "status")
 
@@ -69,7 +70,8 @@ class RepositoryV3Mixin:
     def mark_shared_regions(self, region_ids: list[int]) -> None:
         with self.db.connect() as db:
             db.executemany("UPDATE tuning_regions SET cross_pair_shared=1, "
-                           "region_class='checksum_candidate', confidence=MIN(confidence,40.0) "
+                           "region_class='checksum_candidate', checksum_status='CHECKSUM_CANDIDATE', "
+                           "confidence=MIN(confidence,40.0) "
                            "WHERE id=?", [(int(i),) for i in region_ids])
 
     def set_region_map_evidence(self, region_id: int, map_type: str, map_confidence: float,
@@ -103,6 +105,68 @@ class RepositoryV3Mixin:
                 "INSERT OR IGNORE INTO tuning_pattern_members(pattern_id,region_id,pair_id,similarity) "
                 "VALUES (?,?,?,?)",
                 [(pattern_id, m["region_id"], m["pair_id"], m.get("similarity", 100.0)) for m in members])
+
+    def merge_patterns(self, source_id: int, target_id: int) -> dict:
+        if source_id == target_id:
+            raise ValueError("Een pattern kan niet met zichzelf worden gemerged")
+        source = self.pattern(source_id)
+        target = self.pattern(target_id)
+        if not source or not target:
+            raise ValueError("Onbekend pattern-ID voor merge")
+        with self.db.connect() as db:
+            db.executemany("""INSERT OR IGNORE INTO tuning_pattern_members
+                (pattern_id,region_id,pair_id,similarity) VALUES (?,?,?,?)""",
+                           [(target_id, row["region_id"], row["pair_id"], row["similarity"])
+                            for row in source["members"]])
+            members = db.execute("""SELECT COUNT(*), COUNT(DISTINCT pair_id)
+                FROM tuning_pattern_members WHERE pattern_id=?""", (target_id,)).fetchone()
+            payload = dict(target["payload"])
+            payload["merged_pattern_ids"] = sorted(set(payload.get("merged_pattern_ids", [])) | {source_id})
+            payload["observed_regions"] = members[0]
+            payload["confirmed_projects"] = members[1]
+            db.execute("""UPDATE tuning_patterns SET payload=?, frequency=?, status='candidate',
+                updated_at=CURRENT_TIMESTAMP WHERE id=?""",
+                       (json.dumps(payload, ensure_ascii=False), members[1], target_id))
+            db.execute("UPDATE tuning_patterns SET status='rejected', updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                       (source_id,))
+        return {"source_pattern_id": source_id, "target_pattern_id": target_id,
+                "members": members[0], "projects": members[1], "status": "rebuilt"}
+
+    def split_pattern(self, pattern_id: int, region_ids: list[int]) -> dict:
+        pattern = self.pattern(pattern_id)
+        selected = set(region_ids)
+        if not pattern or not selected:
+            raise ValueError("Pattern en region_ids zijn verplicht voor split")
+        members = [row for row in pattern["members"] if row["region_id"] in selected]
+        if not members or len(members) == len(pattern["members"]):
+            raise ValueError("Split vereist een niet-lege, niet-volledige memberselectie")
+        split_key = "split:{}:{}".format(pattern_id, hashlib.sha256(
+            ",".join(str(value) for value in sorted(selected)).encode()).hexdigest()[:16])
+        payload = dict(pattern["payload"])
+        payload["split_from_pattern_id"] = pattern_id
+        payload["observed_regions"] = len(members)
+        payload["confirmed_projects"] = len({row["pair_id"] for row in members})
+        with self.db.connect() as db:
+            db.execute("""INSERT INTO tuning_patterns
+                (pattern_key,payload,frequency,confidence,status) VALUES (?,?,?,?,?)""",
+                       (split_key, json.dumps(payload, ensure_ascii=False), payload["confirmed_projects"],
+                        pattern["confidence"], "candidate"))
+            split_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+            db.executemany("""INSERT INTO tuning_pattern_members
+                (pattern_id,region_id,pair_id,similarity) VALUES (?,?,?,?)""",
+                           [(split_id, row["region_id"], row["pair_id"], row["similarity"])
+                            for row in members])
+            db.executemany("DELETE FROM tuning_pattern_members WHERE pattern_id=? AND region_id=?",
+                           [(pattern_id, row["region_id"]) for row in members])
+            remaining = db.execute("""SELECT COUNT(*), COUNT(DISTINCT pair_id)
+                FROM tuning_pattern_members WHERE pattern_id=?""", (pattern_id,)).fetchone()
+            old_payload = dict(pattern["payload"])
+            old_payload["observed_regions"] = remaining[0]
+            old_payload["confirmed_projects"] = remaining[1]
+            db.execute("UPDATE tuning_patterns SET payload=?, frequency=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                       (json.dumps(old_payload, ensure_ascii=False), remaining[1], pattern_id))
+        return {"source_pattern_id": pattern_id, "split_pattern_id": split_id,
+                "moved_regions": len(members), "status": "rebuilt"}
 
     def patterns_v3(self, status: str | None = None) -> list[dict]:
         query = "SELECT * FROM tuning_patterns"
@@ -223,6 +287,44 @@ class RepositoryV3Mixin:
                 (row["id"],))
         return rows
 
+    def calibration_identity(self, identity_id: int) -> dict | None:
+        rows = self.db.rows("SELECT * FROM calibration_identities WHERE id=?", (identity_id,))
+        if not rows:
+            return None
+        row = rows[0]
+        for field in ("software_variants", "supporting_evidence", "contradicting_evidence"):
+            row[field] = json.loads(row[field]) if row[field] else []
+        row["members"] = self.db.rows(
+            "SELECT * FROM calibration_identity_members WHERE identity_id=? ORDER BY id",
+            (identity_id,))
+        return row
+
+    def review_calibration_identity(self, identity_id: int, action: str,
+                                    reviewer: str | None = None, note: str = "",
+                                    payload: dict | None = None) -> dict:
+        statuses = {"approve": "SUPPORTED", "verify": "VERIFIED", "reject": "REJECTED",
+                    "mark_unknown": "UNKNOWN"}
+        if action not in set(statuses) | {"correct"}:
+            raise ValueError("Ongeldige Calibration Identity-reviewactie")
+        identity = self.calibration_identity(identity_id)
+        if identity is None:
+            raise ValueError("Onbekende Calibration Identity")
+        new_status = statuses.get(action)
+        with self.db.connect() as db:
+            db.execute("""INSERT INTO knowledge_reviews
+                (subject_type,subject_id,action,payload,reviewer,note)
+                VALUES (?,?,?,?,?,?)""",
+                       ("calibration_identity", str(identity_id), action,
+                        json.dumps(payload or {}, ensure_ascii=False), reviewer, note))
+            if new_status:
+                db.execute("""UPDATE calibration_identities
+                    SET status=?, updated_at=CURRENT_TIMESTAMP WHERE id=?""",
+                           (new_status, identity_id))
+                db.execute("""UPDATE calibration_identity_members SET status=?
+                    WHERE identity_id=?""", (new_status, identity_id))
+        return {"identity": self.calibration_identity(identity_id), "action": action,
+                "reviewer": reviewer, "note": note}
+
     # ---------- evidence ----------
     def add_evidence(self, subject_type: str, subject_id: str, evidence_type: str, value: str,
                      offset: int | None = None, confidence: float = 0.0,
@@ -306,6 +408,43 @@ class RepositoryV3Mixin:
     def runs(self) -> list[dict]:
         return self.db.rows("SELECT * FROM analysis_runs ORDER BY id DESC LIMIT 100")
 
+    def create_knowledge_build(self, source_run_id: int | None, source_projects: int,
+                               pattern_count: int, calibration_identity_count: int,
+                               config_version: str = "v1", notes: str = "") -> int:
+        with self.db.connect() as db:
+            db.execute("UPDATE knowledge_builds SET status='SUPERSEDED' WHERE status='ACTIVE'")
+            cursor = db.execute("""INSERT INTO knowledge_builds
+                (source_run_id,source_projects,pattern_count,calibration_identity_count,
+                 config_version,notes) VALUES (?,?,?,?,?,?)""",
+                (source_run_id, source_projects, pattern_count, calibration_identity_count,
+                 config_version, notes))
+            return cursor.lastrowid
+
+    def knowledge_builds(self) -> list[dict]:
+        return self.db.rows("SELECT * FROM knowledge_builds ORDER BY id DESC")
+
+    def active_knowledge_build(self) -> dict | None:
+        rows = self.db.rows("SELECT * FROM knowledge_builds WHERE status='ACTIVE' ORDER BY id DESC LIMIT 1")
+        return rows[0] if rows else None
+
+    def save_confidence_evaluation(self, metrics: dict) -> int:
+        with self.db.connect() as db:
+            cursor = db.execute("""INSERT INTO confidence_evaluations
+                (threshold,sample_count,ambiguous_count,precision,recall,f1,
+                 false_positive_rate,false_negative_rate,brier_score,metrics)
+                VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                (metrics["threshold"], metrics["sample_count"], metrics["ambiguous_count"],
+                 metrics["precision"], metrics["recall"], metrics["f1"],
+                 metrics["false_positive_rate"], metrics["false_negative_rate"],
+                 metrics["brier_score"], json.dumps(metrics, ensure_ascii=False)))
+            return cursor.lastrowid
+
+    def confidence_evaluations(self) -> list[dict]:
+        rows = self.db.rows("SELECT * FROM confidence_evaluations ORDER BY id DESC")
+        for row in rows:
+            row["metrics"] = json.loads(row["metrics"])
+        return rows
+
     # ---------- search ----------
     def search(self, term: str, limit: int = 25) -> dict:
         term = (term or "").strip()
@@ -336,5 +475,28 @@ class RepositoryV3Mixin:
             """SELECT id, pair_id, start_offset, end_offset, region_class, structural_signature
                FROM tuning_regions WHERE structural_signature LIKE ? OR delta_signature LIKE ?
                OR region_class LIKE ? LIMIT ?""", (like, like, like, limit))
+        identities = self.db.rows(
+            """SELECT id, identity_key, ecu_family, structural_signature, software_variants,
+                      confidence, status
+               FROM calibration_identities
+               WHERE identity_key LIKE ? OR ecu_family LIKE ? OR structural_signature LIKE ?
+                  OR software_variants LIKE ? OR status LIKE ?
+               ORDER BY confidence DESC LIMIT ?""",
+            (like, like, like, like, like, limit))
+        for identity in identities:
+            identity["software_variants"] = json.loads(identity["software_variants"])
+        evidence = self.db.rows(
+            """SELECT id, subject_type, subject_id, evidence_type, value, confidence, status, source
+               FROM evidence WHERE subject_type LIKE ? OR subject_id LIKE ? OR evidence_type LIKE ?
+                  OR value LIKE ? OR status LIKE ? OR source LIKE ?
+               ORDER BY confidence DESC LIMIT ?""",
+            (like, like, like, like, like, like, limit))
+        builds = self.db.rows(
+            """SELECT id, status, source_projects, pattern_count, calibration_identity_count,
+                      config_version, notes FROM knowledge_builds
+               WHERE status LIKE ? OR config_version LIKE ? OR notes LIKE ?
+               ORDER BY id DESC LIMIT ?""", (like, like, like, limit))
         return {"term": term, "files": files, "patterns": patterns,
-                "winols_projects": projects, "regions": regions}
+                "winols_projects": projects, "regions": regions,
+                "calibration_identities": identities, "evidence": evidence,
+                "knowledge_builds": builds}
