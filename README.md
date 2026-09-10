@@ -1,4 +1,30 @@
-# Tuning File AI Assistant — V2
+# Tuning File AI Assistant — V2 + V3 Tuning Intelligence Engine
+
+## V3: leert van bevestigde Original → Tuned-paren
+
+V3 voegt een intelligence-laag toe: **TuningRegions** (rijke wijzigingsregio's
+met signatures en entropie), **Tuning DNA** (kandidaatkennis uit bevestigde
+paren), **patroonclustering** (deterministisch, met stages en
+software-varianten), **cross-software alignment** (patronen terugvinden op
+andere offsets in andere software), **map-structuurdetectie zonder namen**,
+**New BIN Analysis** (patronen + evidence + alle scorecomponenten),
+**technician review** (approve/reject/correct/mark per regio en patroon),
+hervatbare analyse-jobs en globaal zoeken. Alles UNKNOWN-first: zonder bewijs
+geen conclusie, nooit mapnamen, nooit automatische BIN-modificatie.
+
+Nieuwe GUI-pagina's: Patronen (V3), Region Viewer, New BIN Analyse (V3),
+OLS Explorer, Zoeken. Nieuwe CLI: `rebuild-patterns`, `patterns`,
+`align-pattern`, `regions`, `region`, `new-bin`, `map-structures`, `search`,
+`ols-graph`, `jobs`, `review-knowledge`. Nieuwe API: `/patterns*`,
+`/pairs/{id}/regions`, `/regions/{id}`, `/files/{id}/new-bin-report`,
+`/files/{id}/map-structures`, `/search`, `/winols-projects/{id}/graph`,
+`/jobs`.
+
+Documentatie: [TUNING_DNA.md](TUNING_DNA.md) · [ARCHITECTURE.md](ARCHITECTURE.md)
+· [EVIDENCE_MODEL.md](EVIDENCE_MODEL.md) · [DATABASE_SCHEMA.md](DATABASE_SCHEMA.md)
+· [ROADMAP.md](ROADMAP.md) · [STATUS.md](STATUS.md).
+
+## V2 (basis)
 
 Lokale Windows-desktopapp naast WinOLS 5. Importeer een BIN-bibliotheek en WinOLS `.ols`-projecten, controleer Original/Tuned-paren, vind overeenkomende originals en inspecteer daadwerkelijke wijzigingen. Er worden geen ECU-binaries aangepast of geflasht. Internet is alleen nodig voor de installatie van dependencies.
 

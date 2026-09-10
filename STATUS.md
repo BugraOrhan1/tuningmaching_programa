@@ -1,12 +1,62 @@
 # Applicatiestatus
 
-Datum: 2026-09-10
+Datum: 2026-09-10 (bijgewerkt na V3-ronde)
+
+## V3-status (Tuning Intelligence Engine)
+
+**V3 intelligence/data/evidence-laag: IMPLEMENTED en getest (65/65 groen).**
+**Automatische tuning/BIN-modificatie/flashing: NIET geïmplementeerd (bewust, V3-§21).**
+
+Geleverd in deze ronde (fases 2–9, kleine commits, alle bewijs in TUNING_DNA.md,
+ARCHITECTURE.md, EVIDENCE_MODEL.md, DATABASE_SCHEMA.md en ROADMAP.md):
+
+- **TuningRegion**: elke diff-regio is een structuurobject (context-hashes,
+  entropy voor/na, offset-onafhankelijke structural/delta-signatures,
+  regio-klasse, checksum-kandidaatbeleid, gedocumenteerde confidence).
+- **Tuning DNA**: alleen bevestigde paren, status candidate, regio-ID's en
+  ECU/HW/SW/CAL/project/stage-metadata (UNKNOWN waar onbekend).
+- **Pattern clustering**: deterministisch op (ecu_family, structural_signature)
+  met near-merge ≥0,95, stage-verdeling, software-varianten, typical delta,
+  contradictieteller; checksum-kandidaten en padding worden uitgesloten als
+  tuningkennis.
+- **Cross-software alignment**: blok-run-mapping tussen softwarevarianten met
+  contextscore, supporting/contradicting evidence en offsets per software;
+  patroonherkenning in een nieuwe BIN via dezelfde bewijsroute.
+- **Map detection zonder naamgeving**: axis/table-kandidaten met criteria,
+  map_type blijft unknown zonder bewijs.
+- **New BIN Analysis**: gecombineerd rapport (herkenning, gerelateerde
+  projecten/originals met aparte structurele en compatibiliteitsscores,
+  Tuning DNA-matches, structuurkandidaten, evidence-samenvatting,
+  gedocumenteerd overall-confidence met zichtbare componenten).
+- **Evidence graph + technician review**: evidence/evidence_relations,
+  knowledge_reviews met approve/reject/correct/merge/split/mark_*;
+  approve/reject werkt door in patroon- en regio-status.
+- **OLS project graph**: bewezen relaties met confidence; niet-bewezen
+  relaties expliciet UNKNOWN RELATIONSHIP; malformed OLS veegt veilig leeg.
+- **Performance**: hervatbare jobs (analysis_runs-checkpoints), batch-inserts,
+  begrensde scans, indexen; gemeten: 5.000 paren → import 92 s, rebuild 116 s,
+  zoeken <10 ms (scripts/scale_test.py, 100/1k/5k end-to-end).
+- **GUI**: 5 nieuwe pagina's (Patronen, Region Viewer, New BIN Analyse,
+  OLS Explorer, Zoeken) naast de 16 bestaande.
+
+Niet gedaan/gebleven (eerlijk):
+
+- Patroon-confidence is gedocumenteerd maar niet gekalibreerd op duizenden
+  ÉCHTE paren (alleen synthetische tests + één echte OLS).
+- OLS-mapinhoud (assen/factoren/units) blijft ongedecodeerd.
+- Checksum-herkenning blijft kandidaatniveau zonder cross-paar-bewijs.
+- Merge/split van patronen: review-actie bestaat, herberekening nog niet.
+- ML/embedding-laag: bewust niet (V3-§32).
+
+De V2.7-kandidaatstroom (`generate_tune_candidate`) is **bevroren**:
+behouden met alle guards, niet uitgebreid; geen enkele BIN wordt door V3
+gewijzigd.
 
 ## Eindstatus
 
 **NOT READY als volledige V2/V2.5-productrelease.**
 
-**V1 READY voor de lokale BIN/ORI-workflow én de automatische WinOLS-extractie.**
+**V1 READY voor de lokale BIN/ORI-workflow en de automatische WinOLS-extractie. V3 intelligence-laag READY als analyse/kennislaag.**
 
 De applicatie werkt betrouwbaar voor: import van raw `.bin`/`.ori`, het automatisch extraheren van alle embedded version-binaries uit een echte WinOLS 5 `.ols` (read-only), rolbepaling (Original/Tuned/unknown) met gescheiden role-/relation-confidence, automatische pair-voorstellen, diffanalyse, matching, kandidaat-Tuning-DNA uit bevestigde paren en kandidaat-tunebestanden met expliciete waarschuwing. Mapdefinities, assen, units en cross-software alignment zijn nog niet betrouwbaar gedecodeerd — daarom blijft de volledige V2/V2.5 NOT READY.
 
@@ -33,7 +83,7 @@ De applicatie werkt betrouwbaar voor: import van raw `.bin`/`.ori`, het automati
 Volledige testsuite met de project-`.venv` (incl. GUI-tests in offscreen-modus):
 
 ```text
-49 passed, 2 warnings
+65 passed, 2 warnings
 ```
 
 De warnings komen uit FastAPI/Starlette/httpx-deprecations en veroorzaken geen testfout.
