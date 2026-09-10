@@ -72,6 +72,11 @@ class MainWindow(QMainWindow):
         self.build_knowledge_review()
         self.build_clusters()
         self.build_tuning_dna()
+        self.build_patterns()
+        self.build_region_viewer()
+        self.build_new_bin()
+        self.build_ols_explorer()
+        self.build_search()
         self.build_learning()
         self.build_winols()
         self.build_ols_review()
@@ -492,6 +497,231 @@ class MainWindow(QMainWindow):
         self.dna_output.setReadOnly(True)
         layout.addWidget(self.dna_output)
 
+    def build_patterns(self):
+        layout = self.page('Patronen (V3)', 'Structuurpatronen uit bevestigde paren. Clustering is '
+                           'deterministisch op structurele signatures; checksum-kandidaten en padding '
+                           'worden nooit als tuningkennis gebruikt.')
+        self.pattern_table = self.table(layout, ['ID', 'Patroon', 'ECU', 'Projecten', 'Regio\'s',
+                                                 'Structuur-gel.', 'Stages', 'Confidence', 'Status'])
+        row = QHBoxLayout()
+        self.pattern_rebuild_btn = QPushButton('Patronen herbouwen (hervatbaar)')
+        self.pattern_rebuild_btn.clicked.connect(self.rebuild_patterns_job)
+        row.addWidget(self.pattern_rebuild_btn)
+        self.pattern_align_btn = QPushButton('Geselecteerd patroon over software uitlijnen')
+        self.pattern_align_btn.clicked.connect(self.align_selected_pattern)
+        row.addWidget(self.pattern_align_btn)
+        layout.addLayout(row)
+        row2 = QHBoxLayout()
+        approve = QPushButton('Patroon goedkeuren')
+        approve.clicked.connect(lambda: self.review_selected_pattern('approve'))
+        row2.addWidget(approve)
+        reject = QPushButton('Patroon afkeuren')
+        reject.clicked.connect(lambda: self.review_selected_pattern('reject'))
+        row2.addWidget(reject)
+        layout.addLayout(row2)
+        self.pattern_detail = QPlainTextEdit()
+        self.pattern_detail.setReadOnly(True)
+        layout.addWidget(self.pattern_detail)
+        self.pattern_table.selectionModel().currentRowChanged.connect(self.show_pattern_detail)
+
+    def rebuild_patterns_job(self):
+        self.run_job(lambda progress: self.service.run_pattern_job(resume=True, progress=progress),
+                     callback=lambda _result: None)
+        self.safe(self.refresh)
+
+    def align_selected_pattern(self):
+        pattern_id = self.selected_id(self.pattern_table)
+        result = self.service.align_pattern_across_software(pattern_id)
+        offsets = json.dumps(result.get('offsets_by_software', {}), ensure_ascii=False)
+        self.pattern_detail.setPlainText(
+            f"Alignering: {result['alignments_created']} regio-afspraken.\n"
+            f"Offsets per software: {offsets}\n\n{result['note']}")
+
+    def review_selected_pattern(self, action):
+        pattern_id = self.selected_id(self.pattern_table)
+        self.service.review_pattern(pattern_id, action, reviewer='gui')
+        self.safe(self.refresh)
+
+    def show_pattern_detail(self, index, _previous=None):
+        if not index.isValid():
+            return
+        pattern_id = int(self.pattern_table.item(index.row(), 0).text())
+        pattern = self.service.repo.pattern(pattern_id)
+        if not pattern:
+            return
+        payload = pattern['payload']
+        lines = [f"Patroon #{pattern['id']}  sleutel: {pattern['pattern_key']}",
+                 f"ECU family: {payload.get('ecu_family')}  ·  Confirmed projects: "
+                 f"{payload.get('confirmed_projects')}  ·  Regio's: {payload.get('observed_regions')}",
+                 f"Software varianten: {', '.join(payload.get('software_variants', []))}",
+                 f"Stages: {json.dumps(payload.get('stages', {}), ensure_ascii=False)}",
+                 f"Structurele gelijkenis: {payload.get('structural_similarity')}%  ·  "
+                 f"Typical delta: {json.dumps(payload.get('typical_delta', {}))}",
+                 f"Contradicties: {payload.get('contradictions')}  ·  Confidence: {pattern['confidence']}%",
+                 '', 'Leden (pair / offsets / klasse / software):']
+        for member in pattern['members'][:40]:
+            lines.append(f"  pair {member['pair_id']}  0x{member['start_offset']:x}-"
+                         f"0x{member['end_offset']:x}  {member['region_class']}  "
+                         f"{member.get('software_number') or 'unknown'}")
+        if pattern['alignments']:
+            lines.append('', 'Cross-software aligneringen:')
+            for alignment in pattern['alignments'][:20]:
+                lines.append(f"  {alignment['source_software'] or '?'} 0x{(alignment['source_start'] or 0):x} "
+                             f"→ {alignment['target_software'] or '?'} "
+                             f"{hex(alignment['target_start']) if alignment['target_start'] is not None else 'UNKNOWN'} "
+                             f"(conf {alignment['alignment_confidence']}, bewijs {alignment['evidence_count']}, "
+                             f"contra {alignment['contradicting_evidence']})")
+        self.pattern_detail.setPlainText('\n'.join(lines))
+
+    def build_region_viewer(self):
+        layout = self.page('Region Viewer', 'Inspecteer TuningRegions van een bevestigd paar: hex '
+                           'voor/na, signatures, entropie, klasse en evidence. Checksum-kandidaten '
+                           'zijn gemarkeerd en nooit tuninggebied.')
+        self.region_pair_table = self.table(layout, ['Pair-ID', 'Naam', 'Bevestigd'])
+        self.button(layout, 'Regio\'s van geselecteerd paar laden', self.load_pair_regions)
+        self.region_table = self.table(layout, ['ID', 'Start', 'Einde', 'Lengte', 'Gewijzigd',
+                                                'Klasse', 'Entropy o→n', 'Confidence', 'Status'])
+        self.region_detail = QPlainTextEdit()
+        self.region_detail.setReadOnly(True)
+        layout.addWidget(self.region_detail)
+        self.region_table.selectionModel().currentRowChanged.connect(self.show_region_detail)
+
+    def load_pair_regions(self):
+        pair_id = self.selected_id(self.region_pair_table)
+        self.regions = self.service.regions(pair_id)['regions']
+        self.populate(self.region_table, self.regions,
+                      ['id', 'start_offset', 'end_offset', 'length', 'changed_byte_count',
+                       'region_class', 'confidence', 'status'])
+        hint = [{'id': r['id'], 'entropy': f"{r['entropy_before']:.2f}→{r['entropy_after']:.2f}"}
+                for r in self.regions]
+        for row_index, extra in enumerate(hint):
+            self.region_table.setItem(row_index, 6, QTableWidgetItem(extra['entropy']))
+
+    def show_region_detail(self, index, _previous=None):
+        if not index.isValid() or not getattr(self, 'regions', None):
+            return
+        region = self.regions[index.row()]
+        detail = self.service.region_detail(region['id'])
+        region = detail['region']
+        lines = [f"Regio #{region['id']}  0x{region['start_offset']:x}-0x{region['end_offset']:x} "
+                 f"({region['length']} B, {region['changed_byte_count']} gewijzigd)",
+                 f"Klasse: {region['region_class']}  ·  map_type: {region['map_type']} "
+                 f"(confidence {region['map_confidence']}) — zonder bewijs blijft dit UNKNOWN",
+                 f"Structuur-signature: {region['structural_signature'][:32]}…",
+                 f"Delta-signature:      {region['delta_signature'][:32]}…",
+                 f"Entropie: {region['entropy_before']} → {region['entropy_after']}",
+                 f"Relatief: {region['relative_start']}–{region['relative_end']}",
+                 f"Stage: {region.get('stage') or 'UNKNOWN'}  ·  ECU: {region.get('ecu_family') or 'UNKNOWN'}",
+                 '', 'Evidence:']
+        for entry in region['evidence']:
+            lines.append('  - ' + json.dumps(entry, ensure_ascii=False))
+        related = detail['related_regions']
+        if related:
+            lines.append('', f"Gerelateerde regio's (zelfde signature): {len(related)}")
+            for item in related[:10]:
+                lines.append(f"  regio {item['id']} pair {item['pair_id']} "
+                             f"0x{item['start_offset']:x} ({item['region_class']})")
+        if detail['patterns']:
+            lines.append('', 'In patronen: ' + ', '.join(
+                f"#{p['id']} ({p['status']})" for p in detail['patterns']))
+        self.region_detail.setPlainText('\n'.join(lines))
+
+    def build_new_bin(self):
+        layout = self.page('New BIN Analyse (V3)', 'Volledig rapport: herkenning, gerelateerde '
+                           'projecten/originals, Tuning DNA-matches, structuurkandidaten en alle '
+                           'onderliggende scores. Analyse-only; geen BIN wordt gewijzigd.')
+        self.button(layout, 'Geselecteerd bestand uit Files volledig analyseren', self.run_new_bin_report)
+        self.new_bin_output = QTextBrowser()
+        self.new_bin_output.setOpenExternalLinks(False)
+        layout.addWidget(self.new_bin_output)
+
+    def run_new_bin_report(self):
+        file_id = self.selected_id(self.file_table)
+        report = self.service.new_bin_report(file_id)
+        lines = [f"NEW BIN: {report['filename']}",
+                 f"ECU: {report['ecu_family']}  ·  SW: {report['software_family']}  ·  "
+                 f"CAL: {report['calibration_family']}",
+                 f"Gerelateerde projecten: {report['related_projects']}",
+                 '', 'TUNING DNA MATCHES:']
+        for match in report['tuning_dna_matches'][:10]:
+            lines.append(f"  Patroon #{match['pattern_id']}  context {match['context_similarity']}%  "
+                         f"query-offset 0x{match['query_offset']:x}  "
+                         f"(patroon-confidence {match['pattern_confidence']}%, "
+                         f"{match['confirmed_projects']} projecten)")
+        if not report['tuning_dna_matches']:
+            lines.append('  INSUFFICIENT EVIDENCE: geen patronen boven de drempel')
+        lines.append('', 'STRUCTURELE REGIO-KANDIDATEN (geen mapnamen):')
+        for structure in report['map_structures'][:15]:
+            lines.append(f"  0x{structure['start_offset']:x}: {structure['map_type']} "
+                         f"(confidence {structure['map_confidence']})")
+        lines.append('', 'GERELATEERDE ORIGINALS (structureel en compatibiliteit zijn apart):')
+        for original in report['related_originals'][:8]:
+            lines.append(f"  {original['filename']}: structureel {original['structural_similarity']}%  "
+                         f"compatibiliteit {original['software_compatibility']} "
+                         f"({original['compatibility_status']})")
+        lines.append('', f"Score-componenten: {json.dumps(report['score_components'])}",
+                     f"Gewichten: {json.dumps(report['score_weights'])}",
+                     f"Overall confidence: {report['overall_confidence']}%",
+                     f"Evidence: {json.dumps(report['evidence_summary'], ensure_ascii=False)}")
+        self.new_bin_output.setPlainText('\n'.join(lines))
+
+    def build_ols_explorer(self):
+        layout = self.page('OLS Explorer', 'Project → versies → binaries → objecten, met per relatie '
+                           'confidence en bewijs. Relaties zonder bewijs staan expliciet als UNKNOWN.')
+        self.explorer_table = self.table(layout, ['ID', 'Project', 'Bytes', 'SHA256'])
+        self.button(layout, 'Graph van geselecteerd project tonen', self.show_ols_graph)
+        self.ols_graph_output = QTextBrowser()
+        layout.addWidget(self.ols_graph_output)
+
+    def show_ols_graph(self):
+        project_id = self.selected_id(self.explorer_table)
+        graph = self.service.ols_graph(project_id)
+        lines = [f"OLS PROJECT: {graph['project']['filename']}  (sha {graph['project']['sha256'][:16]}…)"]
+        for node in graph['nodes']:
+            if node['type'] == 'version':
+                lines.append(f"  Versie {node['id']}: {node['name']}  rol={node['role']} "
+                             f"(confidence {node['role_confidence']})")
+            elif node['type'] == 'file':
+                lines.append(f"      └── Binary → Files #{node['id']} ({node.get('sha256', '')[:16]}…)")
+        lines.append('', f"Bewezen relaties: {graph['proven_relations']}  ·  "
+                      f"Recordtypes: {json.dumps([(r['record_type'], r['count']) for r in graph['record_types']])}")
+        for unknown in graph['unknown_relationships']:
+            lines.append(f"  UNKNOWN RELATIONSHIP: {unknown['version']} — {unknown['reason']}")
+        lines.append('', graph['note'])
+        self.ols_graph_output.setPlainText('\n'.join(lines))
+
+    def build_search(self):
+        layout = self.page('Zoeken', 'Doorzoek bestanden, patronen, OLS-projecten en regio\'s op ECU, '
+                           'HW/SW/CAL, project, stage, SHA256, bestandsnaam en signatures.')
+        self.v3_search = QLineEdit()
+        self.v3_search.setPlaceholderText('Zoekterm (ECU, SHA, project, stage, signature…)…')
+        self.v3_search.returnPressed.connect(self.run_v3_search)
+        layout.addWidget(self.v3_search)
+        self.button(layout, 'Zoeken', self.run_v3_search)
+        self.search_output = QTextBrowser()
+        layout.addWidget(self.search_output)
+
+    def run_v3_search(self):
+        try:
+            hits = self.service.search(self.v3_search.text())
+        except ValueError as exc:
+            QMessageBox.information(self, 'Zoeken', str(exc))
+            return
+        lines = [f"Bestanden: {len(hits['files'])}  ·  Patronen: {len(hits['patterns'])}  ·  "
+                 f"OLS-projecten: {len(hits['winols_projects'])}  ·  Regio\'s: {len(hits['regions'])}", '']
+        for row in hits['files']:
+            lines.append(f"[File #{row['id']}] {row['filename']} ({row['file_type']}, "
+                         f"ECU {row.get('ecu_family') or 'UNKNOWN'})")
+        for row in hits['patterns']:
+            lines.append(f"[Patroon #{row['id']}] {row['pattern_key']} (frequency {row['frequency']}, "
+                         f"confidence {row['confidence']}%)")
+        for row in hits['winols_projects']:
+            lines.append(f"[OLS #{row['id']}] {row['filename']}")
+        for row in hits['regions']:
+            lines.append(f"[Regio #{row['id']}] pair {row['pair_id']} 0x{row['start_offset']:x} "
+                         f"({row['region_class']})")
+        self.search_output.setPlainText('\n'.join(lines) if len(lines) > 2 else 'Geen treffers.')
+
     def generate_selected_dna(self):
         pair_id = self.selected_id(self.pair_table)
         dna = self.service.generate_tuning_dna(pair_id)
@@ -529,6 +759,27 @@ class MainWindow(QMainWindow):
         candidates = self.repo.candidates()
         candidate_rows = [{**row, 'payload': json.dumps(row['payload'], ensure_ascii=False)} for row in candidates]
         self.populate(self.candidate_table, candidate_rows, ['id', 'candidate_type', 'subject_key', 'confidence', 'payload'])
+        # V3-tabellen
+        try:
+            pattern_rows = []
+            for pattern in self.service.patterns_detail():
+                payload = pattern['payload']
+                pattern_rows.append({'id': pattern['id'], 'pattern_key': pattern['pattern_key'][:34],
+                                     'ecu_family': payload.get('ecu_family'),
+                                     'confirmed_projects': payload.get('confirmed_projects'),
+                                     'observed_regions': payload.get('observed_regions'),
+                                     'structural_similarity': payload.get('structural_similarity'),
+                                     'stages': json.dumps(payload.get('stages', {}), ensure_ascii=False),
+                                     'confidence': pattern['confidence'], 'status': pattern['status']})
+            self.populate(self.pattern_table, pattern_rows,
+                          ['id', 'pattern_key', 'ecu_family', 'confirmed_projects', 'observed_regions',
+                           'structural_similarity', 'stages', 'confidence', 'status'])
+            self.populate(self.region_pair_table, [p for p in self.repo.pairs() if p['confirmed']],
+                          ['id', 'pair_name', 'confirmed'])
+            self.populate(self.explorer_table, self.repo.projects(),
+                          ['id', 'filename', 'file_size', 'sha256'])
+        except AttributeError:
+            pass  # pagina's zijn tijdens tests niet altijd gebouwd
         for combo, kind in [(self.original_combo, 'original'), (self.tuned_combo, 'tuned')]:
             previous = combo.currentData()
             combo.clear()
