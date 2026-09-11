@@ -2,6 +2,38 @@
 
 Datum: 2026-09-10 (bijgewerkt na V3-ronde)
 
+## V4-status (Real Calibration Intelligence — vervolg op eigen v4/v4.1)
+
+**80/80 tests groen.** Deze ronde bouwt voort op de eigen v4/v4.1-werk (audit,
+CalibrationObject/Identity, knowledge builds, evaluations, merge/split-basis).
+
+Nieuw in deze ronde:
+
+- **Identity-alignment v2**: extra evidence-componenten (waardestatistiek-
+  gelijkenis, bevestigde Original/Tuned-regio's), gedocumenteerde
+  confidence-formule, escalatie naar REJECTED bij ≥2 tegenstrijdige zonder
+  steun en SUPPORTED bij ≥3 consistente zonder contradicties; VERIFIED blijft
+  uitsluitend technician-review.
+- **Merge/split volledige rebuild**: confidence herberekend uit leden
+  (gedocumenteerde formule), stages/software-varianten herbouwd, stale
+  alignments van het bronpattern verwijderd, knowledge_build geregistreerd
+  per review-actie (knowledge versioning).
+- **Candidate-dedup bewezen**: identieke kandidaat-regeneratie → 1 rij
+  (unieke identity-index).
+- **Batch-import exact resumable bewezen**: crash → checkpoint → resume
+  verwerkt de rest zonder duplicaten.
+- **REAL DATA VERIFIED**: payload-boundaries (payload_offset/length,
+  end_boundary, boundary_status COMPLETE/PARTIAL) van alle 5 binaries in de
+  echte GASDROP_100119.ols getest; bron-SHA onveranderd.
+- **GUI**: Map Structuren- en Cross Software Alignment-views (24 pagina's).
+- **Schaal 10.000 paren** (synthetisch, scripts/scale_test.py): import 234 s,
+  10.000 paren+bevestigen 163 s, regio-extractie+rebuild 396 s, zoeken 28 ms.
+
+Nog steeds open (eerlijk): statistische kalibratie van confidence (blijft
+HEURISTIC_CONFIDENCE tot echte gelabelde dataset bestaat), brede real-data-
+validatie met duizenden echte paren, mapsemantiek/factor/unit alleen UNKNOWN
+zonder bronbewijs.
+
 ## V3-status (Tuning Intelligence Engine)
 
 **V3 intelligence/data/evidence-laag: IMPLEMENTED en getest (65/65 groen).**
@@ -83,7 +115,7 @@ De applicatie werkt betrouwbaar voor: import van raw `.bin`/`.ori`, het automati
 Volledige testsuite met de project-`.venv` (incl. GUI-tests in offscreen-modus):
 
 ```text
-65 passed, 2 warnings
+80 passed, 2 warnings
 ```
 
 De warnings komen uit FastAPI/Starlette/httpx-deprecations en veroorzaken geen testfout.

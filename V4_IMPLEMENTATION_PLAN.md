@@ -30,6 +30,22 @@ De V4-doelstelling, namelijk een evidence-backed calibration knowledge engine ov
 
 De eerste implementatiefase moet daarom correctness en evidence-grenzen herstellen voordat nieuwe intelligence-modellen worden toegevoegd.
 
+## Actuele voortgang na de vervolgronde (na v4.1)
+
+- Fase E/F: identity-alignment heeft nu waardestatistiek- en Original/Tuned-
+  evidence, gedocumenteerde confidence en status-escalatie
+  (REJECTED/SUPPORTED); VERIFIED blijft review-only. Status: `IMPLEMENTED`
+  als candidate/evidence-engine, kalibratie op echte data open.
+- Fase I: merge/split herbouwt confidence, stages, software-varianten,
+  verwijdert stale alignments en registreert een knowledge_build. Status:
+  `IMPLEMENTED`.
+- Fase L: candidate-dedup en exact resumable folder-import zijn bewezen met
+  tests; 10.000-paren-benchmark gedraaid (import 234 s, rebuild 396 s,
+  zoeken 28 ms). Status: `IMPLEMENTED` op synthetische schaal.
+- Fase M/N: Map Structuren- en Cross Software Alignment-views toegevoegd
+  (24 GUI-pagina's); REAL DATA VERIFIED voor OLS-boundaries via regressietest.
+  Statistische calibratie blijft open (HEURISTIC_CONFIDENCE).
+
 ## Actuele voortgang na Phase A
 
 De eerste gecontroleerde implementaties zijn inmiddels toegevoegd:
