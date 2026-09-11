@@ -13,10 +13,13 @@ Alle cijfers hieronder zijn **gemeten** op de ontwikkelmachine
 | 500.000 | 12,3 | 1,2 | 38,3 | 29,6 | 1,1 | 268,8 |
 | 1.000.000 | 26,1 | 1,2 | 77,5 | 59,2 | 1,1 | 537,5 |
 | 5.000.000 | 244,1 | 10,1 | 2.256 | 1.657 | 1,4 | 2.713 |
+| 10.000.000 | 637,4 | 13,2 | 10.089 | 7.178 | 2,4 | 5.441 |
 
 Conclusies:
-- **Geïndexeerde lookups blijven ~1 ms tot 5 m records** (sha256-index,
-  filename-index): retrieval-filterstadia zijn O(index), niet O(n).
+- **Geïndexeerde lookups blijven ~1 ms tot 5 m en 2,4 ms bij 10 m records**
+  (sha256-index, filename-index): retrieval-filterstadia zijn O(index),
+  niet O(n). Naakte LIKE-scans schalen niet (10 s bij 10 m) — zoeken gaat
+  daarom via de FTS5-index, matching via de multi-stage pijplijn.
 - Insert schaalt lineair (batched executemany in één transactie).
 - Naakte LIKE-scans worden traag bij 5 m (2,3 s) — daarom gaat zoeken via
   de FTS5-index en gaan New BIN-matches via de multi-stage pijplijn.

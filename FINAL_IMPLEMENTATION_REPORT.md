@@ -1,4 +1,43 @@
-# FINAL_IMPLEMENTATION_REPORT.md — TuningMatching V5 (2026-09-11)
+# FINAL_IMPLEMENTATION_REPORT.md — TuningMatching V6 (2026-09-11)
+
+**V6-ronde ("FINAL PRODUCT COMPLETION — NO FEATURE LEFT BEHIND")**: alle 20
+punten van de aanvullende master-review zijn geïmplementeerd of expliciet
+UNKNOWN-safe gemaakt. Totale testbasis: **119/119 groen**, Golden Dataset
+9/9 (incl. echte-OLS-case), metadata-schaal gemeten t/m 10.000.000 records.
+De V5-rapportage hieronder blijft geldig en is niet ingetrokken.
+
+## V6: de 20 punten, met bewijs
+
+| # | Punt | Uitkomst | Bewijs |
+|---|---|---|---|
+| 1 | WinOLS-first productie (geen BIN-export) | IMPLEMENTED + README gesynchroniseerd | library-roots → OLS direct; LOCAL_LIBRARY/KNOWLEDGE_MODEL |
+| 2 | OLS → echte O/T-binaries bij andere interne opslagvorm | IMPLEMENTED, UNKNOWN-safe | **echte bug gevonden en gefixt**: pairing gebruikte geclaimde binary_length i.p.v. werkelijke imagegrootte → 855 KB↔2 MiB foutief bevestigd; nu waar-size-guard + zelfherstellende ontkoppeling + UNKNOWN-relatie met subset-meting (38% blokgelijkheid); 2 MiB-trio = 1 image identity (424 B verschil) |
+| 3 | Één waarheid Location→Content→…→Knowledge | IMPLEMENTED | alle importpaden schrijven dezelfde tabellen (content_files); geen aparte OLS/BIN/library-kennis |
+| 4 | ECU Image Identity | IMPLEMENTED | R1 exact-sha / R2 size+meta+diff≤5% / R3 size-only; tests + echte OLS-case |
+| 5 | Project Family | IMPLEMENTED | (ECU, SW)-groepering + tellingen + test |
+| 6 | Variant lineage | IMPLEMENTED | SAME_CALIBRATION_FAMILY/SOFTWARE_UPDATE/DERIVATIVE/HARDWARE_VARIANT/UNKNOWN + test |
+| 7 | Provenance/version contract | IMPLEMENTED | algorithm_version + knowledge_build + parser_version op elk rapport + test |
+| 8 | Negatieve kennis permanent | IMPLEMENTED | reject-match → negative_relations; New BIN + alignment respecteren; permanentie getest |
+| 9 | Golden Dataset | IMPLEMENTED | 9 cases (KNOWN SAME/DIFF/O-T/SAME-CAL-SW/DIFF-CAL/CHECKSUM/MAP/UNKNOWN/REAL-OLS) — 9/9 PASS, opgeslagen per engine-versie |
+| 10 | Knowledge regression | IMPLEMENTED | snapshot + diff (verdwenen/verschenen/gewijzigd/rejected-terug) + test |
+| 11 | Human-in-the-loop lus gemeten | IMPLEMENTED | measure_review_impact (golden before/after) + test |
+| 12 | Customer/project history | IMPLEMENTED | readouts-domeinlaag; test bewijst dat matching ze nooit raadpleegt |
+| 13 | 10TB-retrieval (bloom/LSH-ruimte) | IMPLEMENTED | multi-stage + FTS5; geïndexeerde lookups 2,4 ms @10 m; ANN bewust nog niet (geen noodzaak gemeten) |
+| 14 | DB-schaal 1m/5m/10m/20m | IMPLEMENTED t/m 10 m | 10.000.000 records: insert 637 s, sha 13 ms, geïnd. naam 2,4 ms, 5,4 GB; 20 m geëxtrapoleerd lineair |
+| 15 | Why this match | IMPLEMENTED | explain: component×gewicht=bijdrage + bewijsaantallen; GUI-tabel + API/CLI |
+| 16 | Comparison workspace | IMPLEMENTED | compare A|B: metadata, image-identiteit, corresponderende signaturen, beide O→T-kettingen, negatieve markering; GUI + API + CLI |
+| 17 | Bulk knowledge operations | IMPLEMENTED | bulk_process_projects: hervatbaar, checkpoints, fouten stoppen niet |
+| 18 | Disk-aware scheduling | IMPLEMENTED | DiskScheduler: per-schijf serieel, cross-schijf parallel ≤ profiel; geïntegreerd in analyze_pending (per-root checkpoints); getest op serialisatie én paralleliteit |
+| 19 | Parser versioning | IMPLEMENTED | PARSER_VERSION op projecten; reparse-ols read-only + drift-rapport; raw evidence blijft |
+| 20 | Geen blind vertrouwen OLS-metadata | IMPLEMENTED | 5 evidence levels; SOURCE_EXPLICIT ≠ TECHNICIAN_CONFIRMED; rollen dragen niveau |
+
+Extra waarborgen: Golden Dataset voorkomt stille intelligence-regressie;
+knowledge-snapshots maken conclusie-verschuivingen expliciet; de
+review-actie zet evidence-level TECHNICIAN_CONFIRMED.
+
+---
+
+# Historie: V5-rapport (2026-09-11)
 
 Dit rapport beschrijft de **werkelijke, geteste** staat van het product,
 per §80/§81 van de master-specificatie. Niets is "compleet" genoemd op

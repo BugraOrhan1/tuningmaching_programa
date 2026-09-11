@@ -2,6 +2,28 @@
 
 Datum: 2026-09-10 (bijgewerkt na V3-ronde)
 
+## V6-status (FINAL PRODUCT COMPLETION) — actueel
+
+**119/119 tests groen** (incl. 19 V6-completiontests en de Golden Dataset
+met 9/9 cases, ook de echte-OLS-case). Zie
+[FINAL_IMPLEMENTATION_REPORT.md](FINAL_IMPLEMENTATION_REPORT.md) en
+[KNOWLEDGE_MODEL.md](KNOWLEDGE_MODEL.md).
+
+- **WinOLS-first bevestigd uit de echte data**: de OLS-pairing gebruikte de
+  geclaimde binary_length i.p.v. de werkelijke imagegrootte (855 KB-'Origineel'
+  werd bevestigd gepaard met 2 MiB-tunedversies). Gefixt + zelfherstellend;
+  de relatie staat nu als UNKNOWN met gemeten reden (subset-blokgelijkheid
+  38%). De drie 2 MiB-versies vormen één ECU Image Identity (samen 424 bytes
+  verschil); de 855 KB-versie krijgt een eigen identiteit. Handmatige
+  BIN-export uit WinOLS is niet nodig: library-roots lezen OLS direct.
+- Nieuw: ECU Image Identity, Project Families, Software Lineage, negatieve
+  kennis (A ≠ B permanent), provenance-contract, Golden Dataset + knowledge
+  regression + review-impact, Why-this-match, Comparison Workspace,
+  bulk-operaties, disk-aware scheduler, parser-versioning (reparse read-only),
+  evidence levels, readouts-domeinlaag (bewezen niet in matching).
+- Metadata-schaal nu gemeten t/m 10.000.000 records (geïndexeerde lookups
+  2,4 ms; zie SCALABILITY.md).
+
 ## V5-status (Phase 2: Local Library Engine)
 
 **89/89 tests groen. Production Library Mode is geïmplementeerd en bewezen
@@ -146,7 +168,7 @@ De applicatie werkt betrouwbaar voor: import van raw `.bin`/`.ori`, het automati
 Volledige testsuite met de project-`.venv` (incl. GUI-tests in offscreen-modus):
 
 ```text
-100 passed, 2 warnings
+119 passed, 2 warnings
 ```
 
 De warnings komen uit FastAPI/Starlette/httpx-deprecations en veroorzaken geen testfout.

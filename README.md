@@ -9,6 +9,29 @@ hervatbaar; offline schijven breken niets. GUI-pagina **Library (V5)**,
 CLI `library-add/library-list/library-scan/library-locations`, API
 `/libraries*`. Zie [LOCAL_LIBRARY.md](LOCAL_LIBRARY.md).
 
+## V6: kennislaag — ECU Image Identity, lineage, negatieve kennis, golden dataset
+
+- **ECU Image Identity**: technisch hetzelfde ECU-image herkend over
+  OLS-versies, BIN/ORI, backups en mappen (regels: exacte SHA · size+metadata
+  +diffratio ≤5% · size-only kandidaat; grootteverschil nooit samengevoegd).
+- **Project Families + Software Lineage**: projecten gegroepeerd per
+  (ECU, software); relaties SAME_CALIBRATION_FAMILY / SOFTWARE_UPDATE /
+  DERIVATIVE / UNKNOWN, alle met bewijs en confidence.
+- **Negatieve kennis**: `reject-match …` registreert A ≠ B permanent;
+  toekomstige voorstellen respecteren dat en rapporteren suppressies.
+- **Why this match?**: elk rapport kan met `explain` alle
+  scorecomponenten × gewicht × bewijsaantallen tonen — geen zwarte doos.
+- **Vergelijk A|B**: comparison workspace met gedeelde image-identiteit,
+  corresponderende structuren en beide Original→Tuned-kettingen.
+- **Golden Dataset**: 9 deterministisch bewaakte cases (incl. echte OLS);
+  `golden` bewaakt per engine-versie dat intelligence niet stilletjes
+  achteruit gaat; `snapshot` maakt kennis-regression zichtbaar.
+- **Parser-versioning**: `reparse-ols` her-interpreteert read-only met
+  drift-rapport; raw evidence blijft altijd bewaard.
+- **Disk-aware scheduling**: taken per schijf serieel, over schijven
+  parallel tot het resourceprofiel (geen HDD-storm).
+- Zie [KNOWLEDGE_MODEL.md](KNOWLEDGE_MODEL.md).
+
 ## V3: leert van bevestigde Original → Tuned-paren
 
 V3 voegt een intelligence-laag toe: **TuningRegions** (rijke wijzigingsregio's
@@ -168,7 +191,9 @@ Tuning DNA bevat alleen traceerbare diff-regio's, relatieve offsets, context-has
 
 De projectlijst toont ook **Voorgesteld**: `original`, `tuned` of `unknown`. Dit wordt uitsluitend bepaald uit expliciete labels die in de zichtbare WinOLS-projecttekst staan, zoals `Original`, `OEM`, `Stage 1` of `Tuned`; de eigen projectnaam van WinOLS kan daardoor worden gebruikt als die als leesbare tekst in het `.ols`-bestand staat. Een nummer zonder label blijft `unknown`.
 
-OLS is een propriëtair projectformaat en is geen raw ECU-BIN. De app slaat het OLS-project en de gevonden records/evidence op, maar zet embedded binary-objecten nog niet automatisch om naar `files`: onbekende bytes mogen niet zonder bewezen grenzen als Original of Tuned worden geïmporteerd. Exporteer de relevante original/tuned data in WinOLS naar raw `.bin` of `.ori`, en importeer die bestanden voor bytevergelijking. Dit voorkomt dat projectmetadata ten onrechte als ECU-data wordt geïnterpreteerd.
+**Productiemodus leest OLS direct (WinOLS-first, V5):** registreer je bestaande WinOLS-mappen als library-root (`library-add D:\WinOLS`) — de projecten blijven op hun eigen schijf en worden **niet gekopieerd**. Versie-binaries worden op bewezen recordgrenzen uit de OLS geëxtraheerd (`ols_version_binaries`, automatisch als `ols://`-bestanden geïndexeerd), gehasht en gededupliceerd; Original/Tuned-rollen komen uit expliciete WinOLS-versielabels, paren worden alléén bij gelijke **werkelijke** imagegrootte voorgesteld (een size-mismatch, zoals een 855 KB-OBD-readout naast 2 MiB-full dumps, wordt never automatisch gepaard maar geregistreerd als UNKNOWN-relatie met reden). Handmatig BIN-export uit WinOLS is daarmee **niet** meer nodig; de beheerde kopie in `data/` blijft alleen voor development/demo.
+
+Zie [LOCAL_LIBRARY.md](LOCAL_LIBRARY.md) en [KNOWLEDGE_MODEL.md](KNOWLEDGE_MODEL.md) voor de volledige WinOLS-first pijplijn.
 
 ### V2 in drie delen
 
@@ -187,11 +212,11 @@ API-routes zijn `GET /winols-projects/{id}/objects`, `GET /winols-projects/{id}/
 
 ## Rapporten en WinOLS 5
 
-1. Importeer de `.ols`-projectmap; de projecten zijn daarna doorzoekbaar in **WinOLS**.
-2. Exporteer de relevante bestanden uit WinOLS als raw original/tuned BIN en importeer die.
-3. Controleer paren en analyseer een nieuwe original.
-4. Exporteer een analyse- of diffrapport naar een gekozen map.
-5. Open de projectmap via **WinOLS → WinOLS-projectmap openen**.
+1. Registreer je WinOLS-map als library-root (`library-add D:\WinOLS`) en scan — de projecten blijven op hun eigen schijf.
+2. `library-analyze` verwerkt nieuwe OLS-content automatisch (project → versies → binaries → paren op expliciete rollen bij gelijke werkelijke imagegrootte).
+3. Controleer voorgestelde paren (bevestigen = technicusbeslissing) en draai `rebuild-patterns`.
+4. Analyseer een nieuwe BIN met `new-bin-library` (multi-stage; een exacte content-hit hergebruikt bestaande kennis) en vraag `explain` voor het WHY-rapport.
+5. Exporteer rapporten met `report … --format md|html|csv|json`; open de projectmap via **WinOLS → WinOLS-projectmap openen**.
 6. Open de originele BIN handmatig in WinOLS 5 en controleer de gerapporteerde offsets.
 7. De technicus identificeert maps en maakt eventuele aanpassingen uitsluitend in WinOLS.
 8. Importeer de resulterende BIN als tuned voor een nieuwe vergelijking.

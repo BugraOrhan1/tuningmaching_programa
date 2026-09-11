@@ -1,9 +1,34 @@
 # ROADMAP.md
 
-Stand: na V5 productronde (2026-09-11). Statuswoorden volgens de
+Stand: na V6 FINAL PRODUCT COMPLETION-ronde (2026-09-11). Statuswoorden volgens de
 V3-conventie (IMPLEMENTED / PARTIALLY IMPLEMENTED / NOT IMPLEMENTED /
 UNKNOWN), met bewijsverwijzingen. V3/V4-tabellen onderaan blijven geldig
 voor de historie; dit kopblok beschrijft de actuele stand.
+
+## Afgerond in V6 (kennislaag, "no feature left behind")
+
+| Punt | Status | Bewijs |
+|---|---|---|
+| 1. WinOLS-first productiemodus (geen BIN-export nodig) | IMPLEMENTED | library-roots lezen OLS direct; README gesynchroniseerd |
+| 2. OLS → echte O/T-binaries bij andere opslagvorm | IMPLEMENTED (UNKNOWN-safe) | waar-imagegrootte-guard + zelfherstel + UNKNOWN-relatie met reden; REAL_OLS-case 9/9 |
+| 3. Één waarheid Location→Content→…→Knowledge | IMPLEMENTED | content_files + zelfde tabellen voor élle importroutes; KNOWLEDGE_MODEL.md |
+| 4. ECU Image Identity | IMPLEMENTED | R1/R2/R3-regels + tests + echte OLS-case |
+| 5. Project Family | IMPLEMENTED | families op (ECU, SW) + test |
+| 6. Variant lineage | IMPLEMENTED | SAME_CAL/UPDATE/DERIVATIVE/HW/UNKNOWN + test |
+| 7. Provenance/version contract | IMPLEMENTED | algorithm/knowledge-build/parser-version op conclusies + test |
+| 8. Negatieve kennis permanent | IMPLEMENTED | register + suppressie in New BIN en alignment + permanentie-test |
+| 9. Golden Dataset | IMPLEMENTED | 9 cases incl. echte OLS; 9/9 PASS; opslag per engine-versie |
+| 10. Knowledge regression | IMPLEMENTED | snapshot + diff incl. rejected-die-terugkeerden |
+| 11. Human-in-the-loop gemeten | IMPLEMENTED | measure_review_impact (golden before/after) |
+| 12. Readout-domeinlaag | IMPLEMENTED | readouts + matching-onafhankelijkheidstest |
+| 13. Retrieval-laag schaalbaar | IMPLEMENTED | multi-stage + FTS5; 10 m-records 2,4 ms geïndexeerde lookup |
+| 14. DB-schaal 1m/5m/10m | IMPLEMENTED | 10.000.000 records gemeten (637 s insert, 5,4 GB) |
+| 15. Why-this-match | IMPLEMENTED | explain-componenten met bijdragen/bewijsaantallen + GUI-tabel |
+| 16. Comparison workspace | IMPLEMENTED | compare A|B met image-identiteit + kettingen + GUI-pagina |
+| 17. Bulk knowledge operations | IMPLEMENTED | bulk_process_projects (hervatbaar, foutveilig) |
+| 18. Disk-aware scheduling | IMPLEMENTED | DiskScheduler per-root serieel/cross-schijf parallel + tests |
+| 19. Parser versioning | IMPLEMENTED | PARSER_VERSION + reparse read-only met drift-rapport |
+| 20. Evidence levels expliciet | IMPLEMENTED | 5 niveaus; review = TECHNICIAN_CONFIRMED + test |
 
 ## Afgerond in V5 (Local Library + productlaag)
 
