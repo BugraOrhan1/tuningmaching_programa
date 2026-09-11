@@ -1,6 +1,6 @@
 # DATABASE_SCHEMA.md
 
-SQLite, `PRAGMA user_version = 8`. Schema is additief en idempotent
+SQLite, `PRAGMA user_version = 9` (was 8`. Schema is additief en idempotent
 (`CREATE IF NOT EXISTS` + gerichte `ALTER TABLE`-kolomvulling bij oudere
 databases; migratiehistorie in `schema_migrations`). Locatie: `data/database.sqlite`.
 
@@ -101,3 +101,13 @@ engine, transmission, stage, project), `tuning_patterns` (key+payload),
 tabellen gericht aan (witlijst-gebaseerde `ALTER TABLE ADD COLUMN`) en
 registreert versie 8 in `schema_migrations` + `PRAGMA user_version`. Bestaande
 V2-databases blijven bruikbaar; er is geen destructieve migratie.
+
+
+## V5 library-tabellen (schema v9)
+
+| Tabel | Doel |
+|---|---|
+| `library_roots` | geregistreerde bronmappen (UNIQUE path), status ONLINE/OFFLINE, tellers, resource-preset |
+| `content_objects` | unieke inhoud: sha256 UNIQUE, md5, crc32, size, file_type, analysis_state |
+| `file_locations` | pad-registratie per root (UNIQUE root+normalized_path), content-koppeling, scan_status NEW/UNCHANGED/MODIFIED/MOVED/MISSING/DUPLICATE/ERROR |
+| `library_scans` | scansessies met status, checkpoint (last_path) en stats — hervatbaar |

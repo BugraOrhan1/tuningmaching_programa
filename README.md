@@ -1,5 +1,14 @@
 # Tuning File AI Assistant — V2 + V3 Tuning Intelligence Engine
 
+## V5: lokale bibliotheek (10 TB blijft staan)
+
+**Library Mode**: registreer bronmappen (`D:\Tuning\`, `E:\WinOLS\`) en
+indexeer ze zonder te kopiëren. Content (SHA256) is los van Location (pad):
+duplicaten delen één content-object. Scans zijn incrementeel (hash-cache) en
+hervatbaar; offline schijven breken niets. GUI-pagina **Library (V5)**,
+CLI `library-add/library-list/library-scan/library-locations`, API
+`/libraries*`. Zie [LOCAL_LIBRARY.md](LOCAL_LIBRARY.md).
+
 ## V3: leert van bevestigde Original → Tuned-paren
 
 V3 voegt een intelligence-laag toe: **TuningRegions** (rijke wijzigingsregio's

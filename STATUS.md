@@ -2,6 +2,25 @@
 
 Datum: 2026-09-10 (bijgewerkt na V3-ronde)
 
+## V5-status (Phase 2: Local Library Engine)
+
+**89/89 tests groen. Production Library Mode is geïmplementeerd en bewezen
+op een 10.000-files testlibrary.**
+
+- Bronbestanden blijven op hun eigen schijf (WinOLS-achtig); geen kopie naar
+  `data/`. Content (SHA256) is los van Location (pad): dedup op inhoud,
+  kennis kan nooit dubbel ontstaan.
+- Incrementeel (size+mtime-hashcache, 0 rehashes op ongewijzigde library),
+  hervatbaar (checkpoints, crash-safe), offline-schijfveilig (OFFLINE zonder
+  databasebreuk), corrupte bestanden stoppen de scan niet.
+- 10.000-files benchmark: eerste scan 34,9 s (288 files/s), incrementeel
+  22 s/0 rehash, na 1 wijziging exact 1 rehash, 1.001 uniek/9.000 duplicaat,
+  database 4,2 MB metadata, bronbestanden ongewijzigd (SHA-bewijs).
+- GUI Library-pagina (25 pagina's totaal), 6 API-endpoints, 4 CLI-commando's.
+- Zie [LOCAL_LIBRARY.md](LOCAL_LIBRARY.md).
+
+
+
 ## V4-status (Real Calibration Intelligence — vervolg op eigen v4/v4.1)
 
 **80/80 tests groen.** Deze ronde bouwt voort op de eigen v4/v4.1-werk (audit,
@@ -84,6 +103,25 @@ De V2.7-kandidaatstroom (`generate_tune_candidate`) is **bevroren**:
 behouden met alle guards, niet uitgebreid; geen enkele BIN wordt door V3
 gewijzigd.
 
+## Nog open naar PRODUCTION READY (eerlijk, per master-spec)
+
+1. **Windows-packaging** (§40/41): PyInstaller/portable build + test op schone
+   Windows 10/11 — kan niet eerlijk worden gebouwd/gevalideerd vanuit deze
+   Linux-sandbox; bouwplan staat in DEPLOYMENT.md.
+2. **PHASE 3+ library-pijplijn**: OLS-projectverwerking bovenop de library-
+   index (project/versions/relations met parser-versie-cache), metadata- en
+   evidence-stages, O/T-kandidaat-pairing over library-content, diff/DNA/
+   identity/pattern-stages alleen op confirmed paren — de kennis-engine
+   bestaat al; de koppeling content → analyse moet nog worden doorverbonden.
+3. **Watch folders** (§10): directory-notificatie is nog niet geïmplementeerd.
+4. **Echte 10 TB-validatie** (§56): 100k/1M/5M-recordschaaltests op echte
+   hardware; de 10k-benchmark is geslaagd, grotere schalen zijn extrapolatie.
+5. **First-run wizard** (§43), **backup-systeem voor db/config/reports** (§39)
+   en **job-manager-UI met pauze** (§46): database/jobs-laag bestaat
+   (analysis_runs/library_scans), de volledige UI/automation nog niet.
+6. **ML/ranking-laag** (§24): bewust uitgesteld; deterministische evidence
+   first.
+
 ## Eindstatus
 
 **NOT READY als volledige V2/V2.5-productrelease.**
@@ -115,7 +153,7 @@ De applicatie werkt betrouwbaar voor: import van raw `.bin`/`.ori`, het automati
 Volledige testsuite met de project-`.venv` (incl. GUI-tests in offscreen-modus):
 
 ```text
-80 passed, 2 warnings
+89 passed, 2 warnings
 ```
 
 De warnings komen uit FastAPI/Starlette/httpx-deprecations en veroorzaken geen testfout.
