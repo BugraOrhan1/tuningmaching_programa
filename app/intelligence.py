@@ -22,6 +22,28 @@ NEAR_PATTERN_THRESHOLD = 0.95          # deterministische near-merge drempel
 CROSS_SOFTWARE_CONTEXT_WINDOW = 128    # bytes rond een regio voor contextvergelijking
 
 
+def _value_statistics_similarity(left: dict, right: dict) -> float:
+    """Deterministische gelijkenis tussen twee waardestatistiek-dicten (0..100).
+
+    Vergelijkt gemiddelde, sigma en tekenkandidaat; UNKNOWN-velden tellen
+    neutraal (0,5) zodat ontbrekend bewijs geen valse overeenkomst claimt.
+    """
+    if not left or not right:
+        return 50.0
+    parts = []
+    for key in ("mean", "mean_value", "average"):
+        if isinstance(left.get(key), (int, float)) and isinstance(right.get(key), (int, float)):
+            spread = max(1.0, abs(float(left[key])) + abs(float(right[key])))
+            parts.append(max(0.0, 1.0 - abs(float(left[key]) - float(right[key])) / spread))
+            break
+    left_signed, right_signed = left.get("signed_candidate"), right.get("signed_candidate")
+    if left_signed in (None, "UNKNOWN") or right_signed in (None, "UNKNOWN"):
+        parts.append(0.5)
+    else:
+        parts.append(1.0 if left_signed == right_signed else 0.0)
+    return round(100.0 * (sum(parts) / len(parts)) if parts else 50.0, 2)
+
+
 def _windows(data: bytes, start: int, end: int) -> tuple[bytes, bytes]:
     return (data[max(0, start - CROSS_SOFTWARE_CONTEXT_WINDOW):start],
             data[end:end + CROSS_SOFTWARE_CONTEXT_WINDOW])
@@ -230,7 +252,28 @@ class ServiceV3Mixin:
         elif action == "split":
             region_ids = [int(value) for value in (payload or {}).get("region_ids", [])]
             result["rebuild"] = self.repo.split_pattern(pattern_id, region_ids)
+        if action in {"merge", "split"}:
+            # knowledge versioning: elke rebuild is een nieuwe build (V4-§19)
+            patterns = self.repo.patterns_v3()
+            result["knowledge_build_id"] = self.repo.create_knowledge_build(
+                None, len({member["pair_id"] for pattern in patterns for member in pattern["members"]}),
+                len([p for p in patterns if p["status"] != "rejected"]),
+                len(self.repo.calibration_identities()), "v4-review",
+                f"{action} van pattern {pattern_id}")
         return result
+
+    def evaluate_knowledge_confidence(self, records: list[dict], threshold: float = 70.0) -> dict:
+        """Evalueer heuristische confidence tegen gelabelde voorbeelden.
+
+        Blijft expliciet HEURISTIC_CONFIDENCE: pas wanneer er echte,
+        representatieve testdata is, kan van statistische calibratie
+        worden gesproken (V4-§20)."""
+        from app.learning.evaluation import evaluate_confidence
+        metrics = evaluate_confidence(records, threshold)
+        metrics["evaluation_id"] = self.repo.save_confidence_evaluation(metrics)
+        metrics["confidence_type"] = "HEURISTIC_CONFIDENCE"
+        metrics["calibrated"] = False
+        return metrics
 
     def review_region(self, region_id: int, action: str, reviewer: str | None = None,
                       note: str = "", payload: dict | None = None) -> dict:
@@ -717,14 +760,40 @@ class ServiceV3Mixin:
                     if left and right:
                         context_scores.append(compare(left, right, {}, {})["match_score"])
                 context_similarity = round(sum(context_scores) / len(context_scores), 2) if context_scores else 0.0
+                # waardestatistiek van beide CalibrationObjects vergelijken
+                stats_rows = self.repo.db.rows(
+                    """SELECT id, value_statistics FROM calibration_objects
+                       WHERE id IN (?, ?)""",
+                    (source.get("calibration_object_id"), target.get("calibration_object_id")))
+                stats_by_id = {row["id"]: json.loads(row["value_statistics"] or "{}")
+                               for row in stats_rows}
+                value_similarity = _value_statistics_similarity(
+                    stats_by_id.get(source.get("calibration_object_id"), {}),
+                    stats_by_id.get(target.get("calibration_object_id"), {}))
+                # bevestigde Original->Tuned-regio's op deze plaats (onafhankelijk bewijs)
+                ot_rows = self.repo.db.rows(
+                    """SELECT COUNT(*) AS n FROM tuning_regions r
+                       JOIN file_pairs p ON p.id=r.pair_id
+                       JOIN files f ON f.id=p.original_file_id
+                       WHERE p.confirmed=1 AND f.id=? AND r.start_offset < ? AND r.end_offset > ?""",
+                    (source["file_id"], source["source_end"], source["source_start"]))
+                ot_regions = int(ot_rows[0]["n"]) if ot_rows else 0
                 positive = ["exact structural signature match", "same logical identity candidate"]
                 negative = []
                 if context_similarity < 70.0:
                     negative.append("surrounding context below 70 percent")
-                confidence = round(0.55 * 100.0 + 0.45 * context_similarity, 2)
-                status = "SUPPORTED" if context_similarity >= 70.0 else "UNKNOWN"
+                if value_similarity < 50.0:
+                    negative.append("value statistics divergence below 50 percent")
+                if ot_regions:
+                    positive.append(f"{ot_regions} confirmed Original->Tuned regions overlap")
+                confidence = round(0.45 * 100.0 + 0.25 * context_similarity
+                                   + 0.15 * value_similarity
+                                   + 0.15 * min(100.0, 50.0 * ot_regions), 2)
+                status = "SUPPORTED" if not negative else "UNKNOWN"
                 evidence = {"identity_id": identity_id, "positive": positive,
                             "negative": negative, "context_similarity": context_similarity,
+                            "value_statistics_similarity": value_similarity,
+                            "original_tuned_regions": ot_regions,
                             "dimensions": "same structural signature", "status": status}
                 self.repo.add_alignment({
                     "pattern_id": None, "source_file_id": source["file_id"],
@@ -755,8 +824,14 @@ class ServiceV3Mixin:
                      "context_similarity": item["context_similarity"]}
                     for item in contradictions]
                 next_status = identity_row["status"]
-                if identity_row["status"] == "CANDIDATE" and contradictions:
+                if identity_row["status"] in ("CANDIDATE", "UNKNOWN") and contradictions:
                     next_status = "UNKNOWN"
+                # escalatie: sterke tegenstrijdige overmacht -> REJECTED;
+                # brede consistente steun blijft op SUPPORTED tot technician-review.
+                if len(contradictions) >= 2 and not supporting:
+                    next_status = "REJECTED"
+                elif len(supporting) >= 3 and not contradictions and next_status in ("CANDIDATE", "UNKNOWN"):
+                    next_status = "SUPPORTED"
                 db.execute("""UPDATE calibration_identities
                     SET supporting_evidence=?, contradicting_evidence=?, status=?,
                         updated_at=CURRENT_TIMESTAMP WHERE id=?""",

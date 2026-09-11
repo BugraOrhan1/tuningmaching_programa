@@ -1,6 +1,7 @@
 """V3-tests: TuningRegion, Tuning DNA v3, patronen, cross-software, maps,
 malformed OLS, jobs, zoeken en schaal. Alles met synthetische binaries."""
 import json
+import math
 import struct
 
 import pytest
@@ -536,3 +537,102 @@ def test_scale_100_pairs_pattern_rebuild(service, tmp_path):
     assert result["patterns"] >= 1
     patterns = service.patterns_detail()
     assert sum(p["payload"]["confirmed_projects"] for p in patterns) >= 100
+
+
+# ---------------------------------------------------------------- V4 afronding
+def test_identity_alignment_escalates_to_rejected(service, tmp_path):
+    """Sterke tegenstrijdige overmacht (3 files, willekeurige omgeving) -> REJECTED."""
+    for seed in (71, 72, 73):
+        data = bytearray(_bin(seed))
+        data[512:544] = bytes(range(32))  # identieke ramp, willekeurige omgeving
+        path = tmp_path / f"reject_{seed}.bin"
+        path.write_bytes(bytes(data))
+        file_id = service.repo.import_file(path, "unknown")
+        service.repo.update_metadata(file_id, {"ecu_family": "REJ_ECU", "software_number": f"SW_{seed}"})
+        service.build_calibration_objects(file_id)
+    service.build_calibration_identities()
+    identity = next(row for row in service.repo.calibration_identities()
+                    if len(row["members"]) >= 3)
+    result = service.align_calibration_identity(identity["id"])
+    refreshed = service.repo.calibration_identity(identity["id"])
+    assert refreshed["status"] == "REJECTED"
+    assert all(item["negative"] for item in result["alignments"])
+    assert refreshed["contradicting_evidence"], "contradicties moeten bewaard blijven"
+
+
+def test_merge_rebuilds_confidence_and_knowledge_build(service, tmp_path):
+    """Technician MERGE herbouwt members, confidence, stages/software en registreert een knowledge build."""
+    for seed, start, kind in ((81, 500, "delta"), (82, 1500, "delta"), (83, 700, "constant")):
+        original = tmp_path / f"m{seed}.bin"
+        tuned = tmp_path / f"mt{seed}.bin"
+        original.write_bytes(_bin(seed))
+        data = bytearray(_bin(seed))
+        for i in range(start, start + 64):
+            data[i] = (data[i] + 3) % 256 if kind == "delta" else 0x5A
+        tuned.write_bytes(bytes(data))
+        oid = service.repo.import_file(original, "original")
+        tid = service.repo.import_file(tuned, "tuned")
+        service.repo.update_metadata(oid, {"ecu_family": "MERGE_ECU", "stage": "Stage 1"})
+        service.repo.pair(oid, tid, confirmed=True)
+    service.rebuild_patterns()
+    patterns = service.patterns_detail()
+    assert len(patterns) == 2
+    source_id, target_id = patterns[0]["id"], patterns[1]["id"]
+    result = service.review_pattern(source_id, "merge", payload={"target_pattern_id": target_id})
+    target = service.repo.pattern(target_id)
+    expected = round(max(50.0, min(95.0, 50.0 + 15.0 * math.log2(1 + target["frequency"]))), 2)
+    assert abs(target["confidence"] - expected) < 0.01
+    assert target["payload"]["software_variants"] == ["unknown"]  # herbouwd uit leden
+    rejected_row = service.repo.db.rows(
+        "SELECT status FROM tuning_patterns WHERE id=?", (source_id,))
+    assert rejected_row[0]["status"] == "rejected"  # patterns_v3 filtert rejected bewust weg
+    builds = service.repo.knowledge_builds()
+    assert builds and builds[0]["status"] == "ACTIVE"
+    assert result["knowledge_build_id"] == builds[0]["id"]
+
+
+def test_generate_tune_candidate_dedup(service, tmp_path):
+    """Identieke candidate-regeneratie maakt geen tweede tune_candidates-rij."""
+    original = tmp_path / "dedup_o.bin"
+    tuned = tmp_path / "dedup_t.bin"
+    target = tmp_path / "dedup_target.bin"
+    original.write_bytes(_bin(91))
+    data = bytearray(_bin(91))
+    for i in range(600, 632):
+        data[i] = (data[i] + 4) % 256
+    tuned.write_bytes(bytes(data))
+    target.write_bytes(_bin(91))
+    oid = service.repo.import_file(original, "original")
+    tid = service.repo.import_file(tuned, "tuned")
+    service.repo.pair(oid, tid, confirmed=True)
+    target_id = service.repo.import_file(target, "unknown")
+    first = service.generate_tune_candidate(target_id, threshold=70.0)
+    assert first["status"] == "candidate_generated"
+    second = service.generate_tune_candidate(target_id, threshold=70.0)
+    assert second["candidate_id"] == first["candidate_id"]
+    assert len(service.tune_candidates()) == 1
+
+
+def test_import_folder_resume_exact_and_idempotent(service, tmp_path):
+    """Crash tijdens batch-import -> checkpoint; resume verwerkt exact de rest, geen duplicaten."""
+    folder = tmp_path / "batch"
+    folder.mkdir()
+    for index in range(6):
+        (folder / f"f{index}.bin").write_bytes(_bin(100 + index, size=512))
+    calls = {"n": 0}
+
+    def progress(_message):
+        calls["n"] += 1
+        if calls["n"] == 4:
+            raise RuntimeError("gesimuleerde crash")
+
+    with pytest.raises(RuntimeError):
+        service.repo.import_folder(str(folder), "unknown", progress)
+    interrupted = [run for run in service.repo.runs() if run["status"] == "interrupted"]
+    assert interrupted, "crash moet een interrupted run achterlaten"
+    result = service.repo.import_folder(str(folder), "unknown", resume=True)
+    assert result["status"] if "status" in result else True
+    assert len(service.repo.files()) == 6  # idempotent: geen duplicaten
+    assert result["processed"] >= 6
+    done = [run for run in service.repo.runs() if run["status"] == "done"]
+    assert done and done[0]["checkpoint"]

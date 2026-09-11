@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import math
 
 REGION_FIELDS = (
     "pair_id", "seq", "start_offset", "end_offset", "length", "changed_byte_count",
@@ -106,6 +107,31 @@ class RepositoryV3Mixin:
                 "VALUES (?,?,?,?)",
                 [(pattern_id, m["region_id"], m["pair_id"], m.get("similarity", 100.0)) for m in members])
 
+    @staticmethod
+    def _recompute_pattern_stats(db, pattern_id: int, base_payload: dict) -> tuple[dict, int, float]:
+        """Herbouw payload/statistieken/confidence uit de huidige leden.
+
+        Confidence-formule (gedocumenteerd in EVIDENCE_MODEL.md):
+        clamp(50 + 15*log2(1+confirmed_projects), 50, 95). Heuristisch,
+        geen statistische kalibratie.
+        """
+        members = db.execute("""SELECT r.stage, r.software_number
+            FROM tuning_pattern_members m JOIN tuning_regions r ON r.id=m.region_id
+            WHERE m.pattern_id=?""", (pattern_id,)).fetchall()
+        counts = db.execute("""SELECT COUNT(*), COUNT(DISTINCT pair_id)
+            FROM tuning_pattern_members WHERE pattern_id=?""", (pattern_id,)).fetchone()
+        payload = dict(base_payload)
+        payload["observed_regions"] = counts[0]
+        payload["confirmed_projects"] = counts[1]
+        payload["stages"] = dict(sorted(
+            {((row["stage"] or "unknown")): 0 for row in members}.items())) if members else {}
+        for row in members:
+            stage = row["stage"] or "unknown"
+            payload["stages"][stage] = payload["stages"].get(stage, 0) + 1
+        payload["software_variants"] = sorted({(row["software_number"] or "unknown") for row in members})
+        confidence = round(max(50.0, min(95.0, 50.0 + 15.0 * math.log2(1 + counts[1]))), 2)
+        return payload, counts[1], confidence
+
     def merge_patterns(self, source_id: int, target_id: int) -> dict:
         if source_id == target_id:
             raise ValueError("Een pattern kan niet met zichzelf worden gemerged")
@@ -118,19 +144,20 @@ class RepositoryV3Mixin:
                 (pattern_id,region_id,pair_id,similarity) VALUES (?,?,?,?)""",
                            [(target_id, row["region_id"], row["pair_id"], row["similarity"])
                             for row in source["members"]])
-            members = db.execute("""SELECT COUNT(*), COUNT(DISTINCT pair_id)
-                FROM tuning_pattern_members WHERE pattern_id=?""", (target_id,)).fetchone()
-            payload = dict(target["payload"])
+            payload, projects, confidence = self._recompute_pattern_stats(
+                db, target_id, dict(target["payload"]))
             payload["merged_pattern_ids"] = sorted(set(payload.get("merged_pattern_ids", [])) | {source_id})
-            payload["observed_regions"] = members[0]
-            payload["confirmed_projects"] = members[1]
-            db.execute("""UPDATE tuning_patterns SET payload=?, frequency=?, status='candidate',
-                updated_at=CURRENT_TIMESTAMP WHERE id=?""",
-                       (json.dumps(payload, ensure_ascii=False), members[1], target_id))
-            db.execute("UPDATE tuning_patterns SET status='rejected', updated_at=CURRENT_TIMESTAMP WHERE id=?",
-                       (source_id,))
+            db.execute("""UPDATE tuning_patterns SET payload=?, frequency=?, confidence=?,
+                status='candidate', updated_at=CURRENT_TIMESTAMP WHERE id=?""",
+                       (json.dumps(payload, ensure_ascii=False), projects, confidence, target_id))
+            # stale kennis van het bronpattern weg: leden zijn verhuisd
+            db.execute("DELETE FROM software_alignments WHERE pattern_id=?", (source_id,))
+            db.execute("DELETE FROM tuning_pattern_members WHERE pattern_id=?", (source_id,))
+            db.execute("UPDATE tuning_patterns SET status='rejected', frequency=0, "
+                       "updated_at=CURRENT_TIMESTAMP WHERE id=?", (source_id,))
         return {"source_pattern_id": source_id, "target_pattern_id": target_id,
-                "members": members[0], "projects": members[1], "status": "rebuilt"}
+                "members": payload["observed_regions"], "projects": projects,
+                "confidence": confidence, "status": "rebuilt"}
 
     def split_pattern(self, pattern_id: int, region_ids: list[int]) -> dict:
         pattern = self.pattern(pattern_id)
@@ -144,12 +171,10 @@ class RepositoryV3Mixin:
             ",".join(str(value) for value in sorted(selected)).encode()).hexdigest()[:16])
         payload = dict(pattern["payload"])
         payload["split_from_pattern_id"] = pattern_id
-        payload["observed_regions"] = len(members)
-        payload["confirmed_projects"] = len({row["pair_id"] for row in members})
         with self.db.connect() as db:
             db.execute("""INSERT INTO tuning_patterns
                 (pattern_key,payload,frequency,confidence,status) VALUES (?,?,?,?,?)""",
-                       (split_key, json.dumps(payload, ensure_ascii=False), payload["confirmed_projects"],
+                       (split_key, json.dumps(payload, ensure_ascii=False), 0,
                         pattern["confidence"], "candidate"))
             split_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
             db.executemany("""INSERT INTO tuning_pattern_members
@@ -158,15 +183,21 @@ class RepositoryV3Mixin:
                             for row in members])
             db.executemany("DELETE FROM tuning_pattern_members WHERE pattern_id=? AND region_id=?",
                            [(pattern_id, row["region_id"]) for row in members])
-            remaining = db.execute("""SELECT COUNT(*), COUNT(DISTINCT pair_id)
-                FROM tuning_pattern_members WHERE pattern_id=?""", (pattern_id,)).fetchone()
-            old_payload = dict(pattern["payload"])
-            old_payload["observed_regions"] = remaining[0]
-            old_payload["confirmed_projects"] = remaining[1]
-            db.execute("UPDATE tuning_patterns SET payload=?, frequency=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
-                       (json.dumps(old_payload, ensure_ascii=False), remaining[1], pattern_id))
+            split_payload, split_projects, split_confidence = self._recompute_pattern_stats(
+                db, split_id, payload)
+            db.execute("""UPDATE tuning_patterns SET payload=?, frequency=?, confidence=?,
+                updated_at=CURRENT_TIMESTAMP WHERE id=?""",
+                       (json.dumps(split_payload, ensure_ascii=False), split_projects,
+                        split_confidence, split_id))
+            remaining_payload, remaining_projects, remaining_confidence = self._recompute_pattern_stats(
+                db, pattern_id, dict(pattern["payload"]))
+            db.execute("""UPDATE tuning_patterns SET payload=?, frequency=?, confidence=?,
+                updated_at=CURRENT_TIMESTAMP WHERE id=?""",
+                       (json.dumps(remaining_payload, ensure_ascii=False), remaining_projects,
+                        remaining_confidence, pattern_id))
         return {"source_pattern_id": pattern_id, "split_pattern_id": split_id,
-                "moved_regions": len(members), "status": "rebuilt"}
+                "moved_regions": len(members), "confidence": split_confidence,
+                "status": "rebuilt"}
 
     def patterns_v3(self, status: str | None = None) -> list[dict]:
         query = "SELECT * FROM tuning_patterns"

@@ -74,6 +74,8 @@ class MainWindow(QMainWindow):
         self.build_tuning_dna()
         self.build_patterns()
         self.build_calibration_identities()
+        self.build_map_structures()
+        self.build_identity_alignment()
         self.build_region_viewer()
         self.build_new_bin()
         self.build_ols_explorer()
@@ -550,6 +552,89 @@ class MainWindow(QMainWindow):
         if identity:
             self.identity_detail.setPlainText(json.dumps(identity, ensure_ascii=False, indent=2))
 
+    def build_map_structures(self):
+        layout = self.page('Map Structuren',
+                           'Structuurkandidaten per bestand (scalar/1D/2D/axis). MAP STRUCTURE is '
+                           'GEEN MAP NAME: zonder bronbewijs blijft alles UNKNOWN.')
+        self.map_file_table = self.table(layout, ['ID', 'Bestand', 'Type', 'Bytes'])
+        self.button(layout, 'Structuren bouwen voor geselecteerd bestand', self.build_map_structure_job)
+        self.map_detail = QPlainTextEdit()
+        self.map_detail.setReadOnly(True)
+        layout.addWidget(self.map_detail)
+
+    def build_map_structure_job(self):
+        file_id = self.selected_id(self.map_file_table)
+        result = self.service.build_calibration_objects(file_id)
+        rows = self.repo.calibration_objects_for_file(file_id)
+        lines = [f"CalibrationObject-kandidaten: {result['objects']}",
+                 f"{result['note']}", '']
+        for row in rows[:60]:
+            layout_info = row.get('relative_layout') or {}
+            value_stats = row.get('value_statistics') or {}
+            start = layout_info.get('start_offset')
+            end = layout_info.get('end_offset')
+            lines.append(f"  0x{start:x}-0x{end:x}  dims={row['dimensions']}  "
+                         f"signed={value_stats.get('signed_candidate', 'UNKNOWN')}  "
+                         f"entropie={row['entropy']}")
+            if value_stats:
+                lines.append(f"      waardestatistiek: {json.dumps(value_stats, ensure_ascii=False)}")
+        self.map_detail.setPlainText('\n'.join(lines))
+
+    def build_identity_alignment(self):
+        layout = self.page('Cross Software Alignment',
+                           'Alignering van Calibration Identities over softwarevarianten, met '
+                           'positieve en tegensprekende evidence. Alignering bewijst nooit '
+                           'gelijke functie; VERIFIED vereist review.')
+        self.alignment_table = self.table(layout, ['ID', 'ECU', 'Status', 'Regions', 'Confidence'])
+        self.button(layout, 'Geselecteerde identity uitlijnen', self.align_selected_identity)
+        self.alignment_detail = QPlainTextEdit()
+        self.alignment_detail.setReadOnly(True)
+        layout.addWidget(self.alignment_detail)
+        self.alignment_table.selectionModel().currentRowChanged.connect(self.show_identity_alignment)
+        self._identity_rows = []
+
+    def refresh_alignment_table(self):
+        identities = self.repo.calibration_identities()
+        self._identity_rows = identities
+        self.populate(self.alignment_table,
+                      [{'id': row['id'], 'ecu_family': row['ecu_family'], 'status': row['status'],
+                        'region_count': row['region_count'], 'confidence': row['confidence']}
+                       for row in identities],
+                      ['id', 'ecu_family', 'status', 'region_count', 'confidence'])
+
+    def align_selected_identity(self):
+        identity_id = self.selected_id(self.alignment_table)
+        result = self.service.align_calibration_identity(identity_id)
+        self.show_identity_alignment_rows(result)
+        self.safe(self.refresh_alignment_table)
+
+    def show_identity_alignment(self, index, _previous=None):
+        if not index.isValid():
+            return
+        identity_id = int(self.alignment_table.item(index.row(), 0).text())
+        alignments = self.repo.db.rows(
+            'SELECT * FROM software_alignments WHERE pattern_id IS NULL AND '
+            'method=? ORDER BY id DESC LIMIT 40', ('calibration_identity_structural_context',))
+        lines = ['Recente identity-aligneringen:']
+        for row in alignments:
+            lines.append(f"  #{row['id']} {row['source_software']} 0x{(row['source_start'] or 0):x} -> "
+                         f"{row['target_software']} 0x{(row['target_start'] or 0):x}  "
+                         f"conf={row['alignment_confidence']}  contra={row['contradicting_evidence']}  "
+                         f"status={row['status']}")
+        self.alignment_detail.setPlainText('\n'.join(lines))
+
+    def show_identity_alignment_rows(self, result):
+        lines = [f"Identity #{result['identity_id']}: {result['alignments_created']} aligneringen "
+                 f"(status: {result['status']})", '']
+        for item in result['alignments']:
+            lines.append(f"  context={item['context_similarity']}  "
+                         f"value_stats={item.get('value_statistics_similarity')}  "
+                         f"OT-regio\'s={item.get('original_tuned_regions')}  status={item['status']}")
+            if item['negative']:
+                lines.append(f"      contra: {'; '.join(item['negative'])}")
+        lines.append('', result['note'])
+        self.alignment_detail.setPlainText('\n'.join(lines))
+
     def rebuild_patterns_job(self):
         self.run_job(lambda progress: self.service.run_pattern_job(resume=True, progress=progress),
                      callback=lambda _result: None)
@@ -829,6 +914,11 @@ class MainWindow(QMainWindow):
                            'region_count', 'confidence', 'status'])
             self.populate(self.explorer_table, self.repo.projects(),
                           ['id', 'filename', 'file_size', 'sha256'])
+            self.refresh_alignment_table()
+            self.populate(self.map_file_table,
+                          [{'id': row['id'], 'filename': row['filename'], 'file_type': row['file_type'],
+                            'file_size': row['file_size']} for row in self.repo.files()],
+                          ['id', 'filename', 'file_type', 'file_size'])
         except AttributeError:
             pass  # pagina's zijn tijdens tests niet altijd gebouwd
         for combo, kind in [(self.original_combo, 'original'), (self.tuned_combo, 'tuned')]:

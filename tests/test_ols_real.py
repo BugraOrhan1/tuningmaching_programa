@@ -83,3 +83,30 @@ def test_existing_ols_reference_is_indexed_as_unknown(tmp_path, service):
     rows = service.repo.db.rows('SELECT * FROM ols_binaries WHERE project_id=?', (project_id,))
     assert rows and rows[-1]['status'] == 'external_file_indexed'
     assert service.repo.file(json.loads(rows[-1]['evidence'])['file_id'])['file_type'] == 'unknown'
+
+def test_real_ols_binary_boundaries_are_proven(service):
+    """REAL DATA VERIFIED: payload-grenzen van elke binary in de echte OLS."""
+    from app.winols.ols_structure import parse_ols_structure
+    root = Path(__file__).parents[1]
+    candidates = [root / 'data' / 'winols_projects' / 'GASDROP_100119.ols']
+    source = next((path for path in candidates if path.exists()), None)
+    if source is None:
+        pytest.skip('Echte GASDROP_100119.ols is niet aanwezig')
+    data = source.read_bytes()
+    structure = parse_ols_structure(data)
+    binaries = structure['binaries']
+    assert len(binaries) == 5
+    for binary in binaries:
+        assert binary['payload_offset'] == binary['start']
+        assert binary['payload_length'] == binary['length']
+        assert binary['end_boundary'] == binary['start'] + binary['length']
+        assert binary['boundary_status'] in {'COMPLETE', 'PARTIAL'}
+        assert binary['payload_length'] <= len(data) - binary['payload_offset']
+    complete = [b for b in binaries if b['boundary_status'] == 'COMPLETE']
+    partial = [b for b in binaries if b['boundary_status'] == 'PARTIAL']
+    assert len(complete) == 4 and len(partial) == 1
+    pages = [b for b in complete if b['length'] == 2097152]
+    assert len(pages) == 3
+    assert partial[0]['end_boundary'] <= len(data)
+    # source_offset/source_length aanwezig: de brongrens is expliciet bewaard
+    assert all('source_offset' in b and 'source_length' in b for b in binaries)
