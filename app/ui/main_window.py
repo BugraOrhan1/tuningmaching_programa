@@ -88,6 +88,8 @@ class MainWindow(QMainWindow):
         self.build_settings()
         self.build_jobs_manager()
         self.build_backup()
+        self.build_ecu_images()
+        self.build_compare_workspace()
         self.nav.currentRowChanged.connect(self.stack.setCurrentIndex)
         self.nav.setCurrentRow(0)
         self.refresh()
@@ -751,10 +753,22 @@ class MainWindow(QMainWindow):
         self.new_bin_output = QTextBrowser()
         self.new_bin_output.setOpenExternalLinks(False)
         layout.addWidget(self.new_bin_output)
+        layout.addWidget(QLabel('WHY THIS MATCH? (component × gewicht = bijdrage, met '
+                                'bewijsaantallen en negatieve aftrek):'))
+        self.why_table = self.table(layout, ['Component', 'Waarde', 'Gewicht',
+                                             'Bijdrage', 'Bewijs (n)', 'Rol'])
 
     def run_new_bin_report(self):
         file_id = self.selected_id(self.file_table)
         report = self.service.new_bin_report(file_id)
+        # WHY-this-match (§15): onderbouwde componenten met bewijsaantallen
+        try:
+            explanation = self.service.explain_new_bin(file_id)
+            self.populate(self.why_table, explanation['explanation'],
+                          ['component', 'value', 'weight', 'contribution',
+                           'evidence_count', 'role'])
+        except Exception:
+            pass
         lines = [f"NEW BIN: {report['filename']}",
                  f"ECU: {report['ecu_family']}  ·  SW: {report['software_family']}  ·  "
                  f"CAL: {report['calibration_family']}",
@@ -1052,6 +1066,99 @@ class MainWindow(QMainWindow):
         wizard.registerField('start_scan', start)
         return page
 
+    def build_ecu_images(self):
+        layout = self.page('ECU Images (V6)', 'ECU Image Identity: technisch hetzelfde '
+                           'ECU-image herkend over OLS-versies, BIN/ORI, backups en '
+                           'mappen heen. Groepering alleen op inhoudelijk bewijs '
+                           '(exacte SHA, size+metadata+diffratio). Grootteverschil '
+                           'binnen één OLS-project wordt als UNKNOWN-relatie met '
+                           'reden geregistreerd — nooit geforceerd samengevoegd.')
+        self.image_table = self.table(layout, ['ID', 'Size (B)', 'ECU', 'HW', 'SW',
+                                               'CAL', 'Status', 'Confidence', 'Members'])
+        self.button(layout, 'Kennismodel herbouwen (images/families/lineage)',
+                    self.rebuild_knowledge_model)
+        layout.addWidget(QLabel('Software-lineage (SAME_CALIBRATION_FAMILY / '
+                                'SOFTWARE_UPDATE / DERIVATIVE / UNKNOWN):'))
+        self.lineage_table = self.table(layout, ['ID', 'ECU', 'Van', 'Naar', 'Relatie',
+                                                 'Confidence', 'Status'])
+
+    def rebuild_knowledge_model(self):
+        self.run_job(lambda progress: self.service.build_knowledge_model(),
+                     callback=lambda _result: self.safe(self.refresh_knowledge_model))
+
+    def refresh_knowledge_model(self):
+        images = self.repo.db.rows(
+            """SELECT i.id, i.image_size, i.ecu_family, i.hardware_number, i.software_number,
+                      i.calibration_number, i.status, i.confidence,
+                      (SELECT COUNT(*) FROM ecu_image_members m WHERE m.image_id=i.id)
+                      AS members
+               FROM ecu_image_identities i ORDER BY i.id""")
+        self.populate(self.image_table, images,
+                      ['id', 'image_size', 'ecu_family', 'hardware_number',
+                       'software_number', 'calibration_number', 'status',
+                       'confidence', 'members'])
+        self.populate(self.lineage_table, self.repo.db.rows(
+            "SELECT id, ecu_family, from_family, to_family, relation, confidence, "
+            "status FROM software_lineage ORDER BY id"),
+            ['id', 'ecu_family', 'from_family', 'to_family', 'relation',
+             'confidence', 'status'])
+
+    def build_compare_workspace(self):
+        layout = self.page('Vergelijk A|B (V6)', 'Comparison workspace: twee bestanden '
+                           'naast elkaar met gedeelde ECU-image-identiteit, '
+                           'overeenkomstige structuren en de Original→Tuned-ketting '
+                           'van beide kanten. Correspondenties zijn kandidaten; '
+                           'een negatieve markering van de technicus wordt gerespecteerd.')
+        row = QHBoxLayout()
+        row.addWidget(QLabel('Links (A):'))
+        self.compare_left = QComboBox()
+        row.addWidget(self.compare_left)
+        row.addWidget(QLabel('Rechts (B):'))
+        self.compare_right = QComboBox()
+        row.addWidget(self.compare_right)
+        self.button(row, 'Vergelijken', self.run_compare)
+        layout.addLayout(row)
+        self.compare_output = QLabel('Kies twee bestanden en druk op Vergelijken.')
+        self.compare_output.setWordWrap(True)
+        layout.addWidget(self.compare_output)
+        self.compare_chain_table = self.table(layout, ['Zijde', 'Pair', 'Rol',
+                                                       'Diff-regio’s'])
+
+    def run_compare(self):
+        left = self.compare_left.currentData()
+        right = self.compare_right.currentData()
+        if left is None or right is None:
+            self.compare_output.setText('Er moeten eerst bestanden bestaan (Files of Library).')
+            return
+
+        def done(result):
+            def apply():
+                negative = " — NEGATIEF GEMARKEERD" if result['negative_relation'] else ""
+                shared = "ja" if result['same_ecu_image_identity'] else "onbekend/nee"
+                self.compare_output.setText(
+                    f"A: {result['left']['filename']} ({result['left']['size']} B, "
+                    f"ECU={result['left']['ecu'] or 'UNKNOWN'}, "
+                    f"SW={result['left']['software'] or 'UNKNOWN'})\n"
+                    f"B: {result['right']['filename']} ({result['right']['size']} B, "
+                    f"ECU={result['right']['ecu'] or 'UNKNOWN'}, "
+                    f"SW={result['right']['software'] or 'UNKNOWN'})\n"
+                    f"Gedeelde ECU-image-identiteit: {shared}{negative}\n"
+                    f"Overeenkomstige structuursignaturen: "
+                    f"{len(result['corresponding_structural_signatures'])}\n"
+                    f"{result['note']}")
+                rows = []
+                for side_key in ('left', 'right'):
+                    for chain in result[side_key]['confirmed_pairs']:
+                        rows.append({'zijde': 'A' if side_key == 'left' else 'B',
+                                     'pair_id': chain['pair_id'], 'rol': chain['role'],
+                                     'regios': chain['regions']})
+                self.populate(self.compare_chain_table, rows,
+                              ['zijde', 'pair_id', 'rol', 'regios'])
+            self.safe(apply)
+
+        self.run_job(lambda progress: self.service.compare_workspace(left, right),
+                     callback=done)
+
     def build_search(self):
         layout = self.page('Zoeken', 'Doorzoek bestanden, patronen, OLS-projecten en regio\'s op ECU, '
                            'HW/SW/CAL, project, stage, SHA256, bestandsnaam en signatures.')
@@ -1099,6 +1206,28 @@ class MainWindow(QMainWindow):
         self.refresh()
 
     def refresh(self):
+        try:
+            if hasattr(self, 'compare_left'):
+                current_left = self.compare_left.currentData()
+                current_right = self.compare_right.currentData()
+                self.compare_left.clear()
+                self.compare_right.clear()
+                for row in self.repo.files():
+                    label = f"{row['id']}: {row['filename'][:48]}"
+                    self.compare_left.addItem(label, row['id'])
+                    self.compare_right.addItem(label, row['id'])
+                if current_left is not None:
+                    index = self.compare_left.findData(current_left)
+                    if index >= 0:
+                        self.compare_left.setCurrentIndex(index)
+                if current_right is not None:
+                    index = self.compare_right.findData(current_right)
+                    if index >= 0:
+                        self.compare_right.setCurrentIndex(index)
+            if hasattr(self, 'image_table'):
+                self.refresh_knowledge_model()
+        except Exception:
+            pass
         self.stats.setText('\n\n'.join(f'{key}:  {value}' for key, value in self.repo.dashboard().items()))
         files = self.repo.files(self.search.text())
         self.populate(self.file_table, files, ['id', 'filename', 'file_type', 'file_size', 'ecu_family', 'software_number', 'hardware_number', 'stage', 'customer', 'project'])

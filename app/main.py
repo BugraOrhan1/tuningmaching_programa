@@ -127,6 +127,23 @@ def main() -> None:
     report_cmd.add_argument('subject_id', nargs='?', type=int, default=None)
     report_cmd.add_argument('--format', choices=['json', 'csv', 'md', 'html'], default='json')
     report_cmd.add_argument('--out', default='')
+    sub.add_parser('knowledge-model', help='V6-kennismodel herbouwen (images/families/lineage)')
+    sub.add_parser('golden', help='Golden Dataset-benchmark draaien (§9)')
+    sub.add_parser('snapshot', help='kennis-snapshot maken (knowledge regression §10)')
+    compare_cmd = sub.add_parser('compare', help='twee bestanden naast elkaar (§16)')
+    compare_cmd.add_argument('left_file_id', type=int)
+    compare_cmd.add_argument('right_file_id', type=int)
+    explain_cmd = sub.add_parser('explain', help='Why this match? (§15)')
+    explain_cmd.add_argument('file_id', type=int)
+    negative_cmd = sub.add_parser('reject-match', help='A ≠ B registreren (negatieve kennis §8)')
+    negative_cmd.add_argument('subject')
+    negative_cmd.add_argument('a_type')
+    negative_cmd.add_argument('a_id')
+    negative_cmd.add_argument('b_type')
+    negative_cmd.add_argument('b_id')
+    negative_cmd.add_argument('--reason', default='')
+    reparse_cmd = sub.add_parser('reparse-ols', help='OLS her-interpreteren (parser-versie §19)')
+    reparse_cmd.add_argument('project_id', type=int)
     api = sub.add_parser('api')
     api.add_argument('--port', type=int, default=8765)
     args = parser.parse_args()
@@ -252,6 +269,22 @@ def main() -> None:
         elif args.command == 'report':
             result = service.export_report(args.kind, args.subject_id, args.format,
                                            args.out or None)
+        elif args.command == 'knowledge-model':
+            result = service.build_knowledge_model()
+        elif args.command == 'golden':
+            result = service.evaluate_golden(save=True)
+        elif args.command == 'snapshot':
+            result = service.snapshot_knowledge()
+        elif args.command == 'compare':
+            result = service.compare_workspace(args.left_file_id, args.right_file_id)
+        elif args.command == 'explain':
+            result = service.explain_new_bin(args.file_id)
+        elif args.command == 'reject-match':
+            result = service.register_negative_match(
+                args.subject, (args.a_type, args.a_id), (args.b_type, args.b_id),
+                reason=args.reason)
+        elif args.command == 'reparse-ols':
+            result = service.repo.reparse_project(args.project_id)
         elif args.command == 'jobs':
             result = service.jobs()
         elif args.command == 'review-knowledge':

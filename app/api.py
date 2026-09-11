@@ -35,6 +35,25 @@ class NewBinPathRequest(BaseModel):
 class RestoreRequest(BaseModel):
     path: str
 
+class NegativeRequest(BaseModel):
+    subject_type: str
+    a: list[str]
+    b: list[str]
+    reason: str = ''
+    reviewer: str = ''
+
+
+class ReadoutRequest(BaseModel):
+    customer: str = ''
+    vehicle: str = ''
+    stage: str = ''
+    technician: str = ''
+    readout_date: str = ''
+    file_id: int | None = None
+    project_id: int | None = None
+    note: str = ''
+
+
 
 
 class V3ReviewRequest(BaseModel):
@@ -480,5 +499,83 @@ def create_api(service: Service, token: str) -> FastAPI:
     @api.get('/reports/library')
     def export_library_report(format: str = 'json', path: str = ''):
         return service.export_report('library', None, format, path or None)
+
+    # ---------------- V6 kennismodel ----------------
+    @api.post('/knowledge-model/rebuild')
+    def rebuild_knowledge_model():
+        return service.build_knowledge_model()
+
+    @api.get('/ecu-images')
+    def ecu_images():
+        return {'identities': service.repo.db.rows(
+            """SELECT i.*, (SELECT COUNT(*) FROM ecu_image_members m
+               WHERE m.image_id=i.id) AS members FROM ecu_image_identities i
+               ORDER BY i.id""")}
+
+    @api.get('/ecu-images/{image_id}')
+    def ecu_image_detail(image_id: int):
+        identity = service.repo.db.rows(
+            "SELECT * FROM ecu_image_identities WHERE id=?", (image_id,))
+        if not identity:
+            raise HTTPException(status_code=404, detail='Onbekende image-identiteit')
+        members = service.repo.db.rows(
+            "SELECT * FROM ecu_image_members WHERE image_id=? ORDER BY id", (image_id,))
+        return {'identity': identity[0], 'members': members}
+
+    @api.get('/project-families')
+    def project_families():
+        return {'families': service.repo.db.rows(
+            """SELECT f.*, (SELECT COUNT(*) FROM project_family_members m
+               WHERE m.family_id=f.id) AS members FROM project_families f
+               ORDER BY f.id""")}
+
+    @api.get('/lineage')
+    def lineage():
+        return {'relations': service.repo.db.rows(
+            "SELECT * FROM software_lineage ORDER BY id")}
+
+    @api.get('/negatives')
+    def negatives(subject_type: str = ''):
+        return {'relations': service.negatives(subject_type or None)}
+
+    @api.post('/negatives')
+    def register_negative(body: NegativeRequest):
+        return service.register_negative_match(
+            body.subject_type, tuple(body.a), tuple(body.b), reason=body.reason,
+            reviewer=body.reviewer)
+
+    @api.get('/compare')
+    def compare(left_file_id: int, right_file_id: int):
+        return service.compare_workspace(left_file_id, right_file_id)
+
+    @api.get('/files/{file_id}/explain')
+    def explain(file_id: int, threshold: float = 70.0):
+        return service.explain_new_bin(file_id, threshold)
+
+    @api.post('/golden/run')
+    def golden_run():
+        return service.evaluate_golden(save=True)
+
+    @api.get('/golden/runs')
+    def golden_runs():
+        return {'runs': service.km.golden_history()}
+
+    @api.get('/knowledge/snapshot')
+    def knowledge_snapshot():
+        return service.snapshot_knowledge()
+
+    @api.post('/projects/{project_id}/reparse')
+    def reparse_project(project_id: int):
+        return service.repo.reparse_project(project_id)
+
+    @api.get('/readouts')
+    def readouts(q: str = ''):
+        return {'readouts': service.readouts(q)}
+
+    @api.post('/readouts')
+    def add_readout(body: ReadoutRequest):
+        return service.add_readout(body.customer, body.vehicle, body.stage,
+                                   body.technician, body.readout_date,
+                                   body.file_id, body.project_id, body.note)
 
     return api

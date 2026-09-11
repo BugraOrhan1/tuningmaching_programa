@@ -756,10 +756,22 @@ class ServiceV3Mixin:
         if identity is None:
             raise ValueError("Onbekende Calibration Identity")
         members = identity["members"]
+        km = getattr(self, "km", None)
+        negative_pairs = km.negative_pairs("calibration_identity") if km else set()
         created = []
+        suppressed_negative = 0
         for index, source in enumerate(members):
             for target in members[index + 1:]:
                 if source["file_id"] == target["file_id"]:
+                    continue
+                negative_keys = {
+                    frozenset({("identity_member", str(source.get("id", source["file_id"]))),
+                               ("identity_member", str(target.get("id", target["file_id"])))}),
+                    frozenset({("file", str(source["file_id"])),
+                               ("file", str(target["file_id"]))}),
+                }
+                if negative_keys & negative_pairs:
+                    suppressed_negative += 1
                     continue
                 source_data = self.repo.data(source["file_id"])
                 target_data = self.repo.data(target["file_id"])
@@ -852,6 +864,7 @@ class ServiceV3Mixin:
                             next_status, identity_id))
         return {"identity_id": identity_id, "alignments_created": len(created),
                 "alignments": created, "status": identity["status"],
+                "suppressed_by_negative_knowledge": suppressed_negative,
                 "note": "Identity alignment is evidence-backed candidate support; not automatic verification."}
 
     # ------------------------------------------------------------------
@@ -861,6 +874,15 @@ class ServiceV3Mixin:
         file_row = self.repo.file(file_id)
         query = self.repo.data(file_id)
         analysis = self.analyze(file_row["filepath"])
+        # negatieve kennis (§8): door technicus verworpen matches komen NIET terug
+        km = getattr(self, "km", None)
+        if km is not None:
+            suppressed = [match for match in analysis["matches"]
+                          if km.is_negative("file_match", ("file", str(file_id)),
+                                            ("file", str(match["file_id"])))]
+            analysis["matches"] = [match for match in analysis["matches"]
+                                   if match not in suppressed]
+            analysis["suppressed_by_negative_knowledge"] = len(suppressed)
         best = analysis["matches"][0] if analysis["matches"] else None
         pattern_matches = self.find_pattern_matches(query, threshold)
         self.build_calibration_objects(file_id)
@@ -917,6 +939,8 @@ class ServiceV3Mixin:
             "knowledge_build": self.repo.active_knowledge_build(),
             "confidence_type": "HEURISTIC CONFIDENCE",
             "statistically_calibrated": False,
+            "provenance": (getattr(self, "km", None) and
+                           self.km.provenance() or {"algorithm_version": "v6.0"}),
             "overall_confidence": overall,
             "evidence_summary": {
                 "confirmed_pairs": len(related_projects),

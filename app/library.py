@@ -466,7 +466,7 @@ class LibraryEngine:
 
     def pending_contents(self, root_id: int | None = None, after_id: int = 0,
                          limit: int | None = None) -> list[dict]:
-        query = """SELECT DISTINCT c.id, c.sha256, c.size, c.file_type
+        query = """SELECT DISTINCT c.id, c.sha256, c.size, c.file_type, l.root_id
                    FROM content_objects c JOIN file_locations l ON l.content_id=c.id
                    WHERE c.analysis_state='NEW' AND c.id>? AND l.scan_status!='ERROR'"""
         params: list = [after_id]
@@ -491,35 +491,68 @@ class LibraryEngine:
             "library_analysis", {"root_id": root_id})
         if run:
             self.repo.reopen_run(run_id)  # hervat: run is weer actief
-        after_id = run["checkpoint"].get("last_content_id", 0) if run else 0
+        ckpt = run["checkpoint"] if run else {}
         stats = dict(run["stats"]) if run else {"analyzed": 0, "cached": 0, "linked": 0,
                                                 "offline": 0, "errors": 0}
-        rows = self.pending_contents(root_id, after_id, limit)
+        # per-root voortgang (disk-aware scheduling §18); oude globale
+        # checkpointvorm blijft leesbaar voor compatibiliteit
+        last_ids = {int(key): int(value) for key, value
+                    in (ckpt.get("last_ids") or {}).items()}
+        global_after = ckpt.get("last_content_id", 0) \
+            if not isinstance(ckpt.get("last_content_id"), dict) else 0
+        rows = [row for row in self.pending_contents(root_id, 0, limit)
+                if row["id"] > last_ids.get(row["root_id"], global_after)]
+        groups: dict[int, list[dict]] = {}
+        for row in rows:
+            groups.setdefault(row["root_id"], []).append(row)
         total = len(rows)
-        for index, row in enumerate(rows):
-            state = self.repo.run_status(run_id)
-            if state == "paused":
-                self.repo.pause_run(run_id, {"last_content_id": after_id}, stats)
-                return {"run_id": run_id, "status": "paused", "remaining": total - index,
-                        **stats}
-            if state == "cancelled":
-                self.repo.cancel_run(run_id, stats)
-                return {"run_id": run_id, "status": "cancelled", **stats}
+        state = {"paused": False, "cancelled": False}
+        lock = __import__("threading").Lock()
+
+        def should_stop() -> bool:
+            status = self.repo.run_status(run_id)
+            if status == "paused":
+                state["paused"] = True
+            elif status in ("cancelled", "cancel_requested"):
+                state["cancelled"] = True
+            return state["paused"] or state["cancelled"]
+
+        def task(root_key, row):
             try:
                 result = self.analyze_content(row["id"])
-                stats[result["status"] if result["status"] in ("cached", "offline",
-                                                               "linked") else "analyzed"] += 1
-            except Exception as exc:  # één slecht bestand stopt de taak niet
-                stats["errors"] += 1
-                self.repo.db.rows("SELECT 1")  # verbinding gezond houden
+                key = result["status"] if result["status"] in ("cached", "offline",
+                                                               "linked") else "analyzed"
+                with lock:
+                    stats[key] = stats.get(key, 0) + 1
+            except Exception as exc:  # één slecht bestand stopt de taak niet (§52)
+                with lock:
+                    stats["errors"] += 1
                 if progress:
                     progress(f"Fout bij content {row['id']}: {exc}")
-            after_id = row["id"]
-            self.repo.checkpoint_run(run_id, {"last_content_id": after_id}, stats)
-            if progress:
-                progress(f"Analyse {index + 1}/{total}")
+
+        def checkpoint(root_key, row):
+            with lock:
+                last_ids[root_key] = row["id"]
+                self.repo.checkpoint_run(run_id, {"last_ids": last_ids}, stats)
+
+        from app.scheduler import DiskScheduler
+        workers = int(self.config.get("analysis_workers",
+                                      {"LOW": 1, "BALANCED": 2, "HIGH": 4}.get(
+                                          self.config.get("resource_preset",
+                                                          "BALANCED"), 1)))
+        outcome = DiskScheduler(workers=workers).run(
+            groups, task, should_stop=should_stop, checkpoint=checkpoint,
+            progress=lambda item: progress(f"Analyse {item['id']}")
+            if progress else None)
+        if state["paused"]:
+            self.repo.pause_run(run_id, {"last_ids": last_ids}, stats)
+            return {"run_id": run_id, "status": "paused", "remaining": total, **stats}
+        if state["cancelled"]:
+            self.repo.cancel_run(run_id, stats)
+            return {"run_id": run_id, "status": "cancelled", **stats}
         self.repo.finish_run(run_id, "done", stats)
-        return {"run_id": run_id, "status": "done", **stats}
+        return {"run_id": run_id, "status": "done",
+                "max_concurrent_roots": outcome["max_concurrent"], **stats}
 
     # ------------------------------------------------------------------
     # Watch folders (§7): optioneel, nooit automatisch Original/Tuned

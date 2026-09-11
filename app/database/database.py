@@ -163,7 +163,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS tune_candidates_identity
  ON tune_candidates(target_file_id, IFNULL(pair_id, 0), sha256, status);
 """
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 
 class Database:
@@ -174,6 +174,7 @@ class Database:
             db.execute("PRAGMA journal_mode=WAL")
             db.executescript(SCHEMA)
             db.executescript(V3_SCHEMA)
+            db.executescript(V6_SCHEMA)
             db.executescript(LIBRARY_SCHEMA)
             try:
                 db.executescript(FTS_DDL)
@@ -184,6 +185,12 @@ class Database:
                 "tuning_regions": {"original_region_context_hash", "checksum_status"},
                 "ols_binaries": {"payload_offset", "payload_length", "end_boundary",
                                  "source_offset", "source_length", "md5", "boundary_status"},
+                "winols_projects": {"parser_version"},
+                "ols_objects": {"evidence_level"},
+                "ols_records": {"parser_version"},
+                "calibration_identities": {"evidence_level", "algorithm_version"},
+                "tuning_patterns": {"algorithm_version"},
+                "file_pairs": {"evidence_level"},
             }
             for table, columns in expected.items():
                 present = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
@@ -331,6 +338,55 @@ CREATE TABLE IF NOT EXISTS knowledge_reviews (
  action TEXT NOT NULL, payload TEXT NOT NULL DEFAULT '{}',
  reviewer TEXT, note TEXT NOT NULL DEFAULT '', created_at TEXT DEFAULT CURRENT_TIMESTAMP);
 CREATE INDEX IF NOT EXISTS knowledge_reviews_subject ON knowledge_reviews(subject_type, subject_id);
+"""
+
+
+V6_SCHEMA = """
+CREATE TABLE IF NOT EXISTS ecu_image_identities (
+ id INTEGER PRIMARY KEY, image_size INTEGER, ecu_family TEXT, hardware TEXT,
+ software TEXT, calibration TEXT, status TEXT NOT NULL DEFAULT 'CANDIDATE',
+ confidence REAL NOT NULL DEFAULT 0, evidence TEXT NOT NULL DEFAULT '[]',
+ knowledge_build_id INTEGER, parser_version TEXT, algorithm_version TEXT,
+ created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+CREATE INDEX IF NOT EXISTS ecu_image_status ON ecu_image_identities(status, image_size);
+CREATE TABLE IF NOT EXISTS ecu_image_members (
+ id INTEGER PRIMARY KEY, image_id INTEGER NOT NULL REFERENCES ecu_image_identities(id),
+ member_type TEXT NOT NULL, member_id INTEGER NOT NULL, sha256 TEXT,
+ relation TEXT NOT NULL DEFAULT 'SAME_IMAGE', confidence REAL NOT NULL DEFAULT 0,
+ evidence TEXT NOT NULL DEFAULT '[]',
+ created_at TEXT DEFAULT CURRENT_TIMESTAMP, UNIQUE(image_id, member_type, member_id));
+CREATE INDEX IF NOT EXISTS ecu_image_members_image ON ecu_image_members(image_id);
+CREATE TABLE IF NOT EXISTS project_families (
+ id INTEGER PRIMARY KEY, name TEXT NOT NULL, ecu_family TEXT, software_family TEXT,
+ project_count INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'CANDIDATE',
+ evidence TEXT NOT NULL DEFAULT '[]', created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS project_family_members (
+ id INTEGER PRIMARY KEY, family_id INTEGER NOT NULL REFERENCES project_families(id),
+ project_id INTEGER NOT NULL REFERENCES winols_projects(id),
+ created_at TEXT DEFAULT CURRENT_TIMESTAMP, UNIQUE(family_id, project_id));
+CREATE INDEX IF NOT EXISTS project_family_members_family ON project_family_members(family_id);
+CREATE TABLE IF NOT EXISTS software_lineage (
+ id INTEGER PRIMARY KEY, ecu_family TEXT, from_family TEXT NOT NULL, to_family TEXT NOT NULL,
+ relation TEXT NOT NULL, confidence REAL NOT NULL DEFAULT 0,
+ evidence TEXT NOT NULL DEFAULT '[]', status TEXT NOT NULL DEFAULT 'CANDIDATE',
+ created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+CREATE INDEX IF NOT EXISTS software_lineage_pair ON software_lineage(from_family, to_family);
+CREATE TABLE IF NOT EXISTS negative_relations (
+ id INTEGER PRIMARY KEY, subject_type TEXT NOT NULL, a_type TEXT NOT NULL, a_id TEXT NOT NULL,
+ b_type TEXT NOT NULL, b_id TEXT NOT NULL, relation TEXT NOT NULL DEFAULT 'NOT_SAME',
+ reason TEXT NOT NULL DEFAULT '', reviewer TEXT,
+ created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+ UNIQUE(subject_type, a_type, a_id, b_type, b_id));
+CREATE INDEX IF NOT EXISTS negative_relations_subject ON negative_relations(subject_type, a_type, a_id);
+CREATE TABLE IF NOT EXISTS golden_runs (
+ id INTEGER PRIMARY KEY, engine_version TEXT NOT NULL, totals TEXT NOT NULL DEFAULT '{}',
+ per_category TEXT NOT NULL DEFAULT '{}', skipped TEXT NOT NULL DEFAULT '[]',
+ notes TEXT NOT NULL DEFAULT '', created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS readouts (
+ id INTEGER PRIMARY KEY, customer TEXT NOT NULL DEFAULT '', vehicle TEXT NOT NULL DEFAULT '',
+ stage TEXT NOT NULL DEFAULT '', technician TEXT, readout_date TEXT,
+ file_id INTEGER, project_id INTEGER, note TEXT NOT NULL DEFAULT '',
+ created_at TEXT DEFAULT CURRENT_TIMESTAMP);
 """
 
 

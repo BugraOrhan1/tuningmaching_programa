@@ -85,6 +85,71 @@ class Repository(RepositoryV3Mixin):
         row = self.project(project_id)
         return self.ols_importer.extract_project_structure(row["filepath"], self.config["max_file_mb"])
 
+    def reparse_project(self, project_id: int) -> dict:
+        """Her-interpretatie zonder data-verlies (§19): leest de bekende
+        projectbestanden opnieuw (read-only), vergelijkt met de opgeslagen
+        raw evidence en registreert de nieuwe parser-versie. Oude records
+        blijven bewaard; bronbestanden worden nooit gewijzigd."""
+        from app.winols.ols_reader import PARSER_VERSION, inspect_ols
+        from app.winols.ols_structure import parse_ols_structure
+        rows = self.db.rows("SELECT * FROM winols_projects WHERE id=?", (project_id,))
+        if not rows:
+            raise ValueError("Onbekend project")
+        project = rows[0]
+        path = Path(project["filepath"])
+        data = path.read_bytes()
+        current_sha = hashes(data)["sha256"]
+        if current_sha != project["sha256"]:
+            raise ValueError("Projectbestand is gewijzigd sinds de laatste import")
+        before_records = self.db.rows(
+            "SELECT COUNT(*) AS n FROM ols_records WHERE project_id=?",
+            (project_id,))[0]["n"]
+        before_maps = self.db.rows(
+            "SELECT COUNT(*) AS n FROM ols_map_objects WHERE project_id=?",
+            (project_id,))[0]["n"]
+        details = inspect_ols(data)
+        structure = parse_ols_structure(data)
+        drift = {
+            "parser_version": PARSER_VERSION,
+            "records_before": before_records,
+            "records_detected": len(details.get("records", [])) or None,
+            "maps_detected": len(structure.get("maps", [])),
+            "maps_before": before_maps,
+            "structure_signature_unchanged": (
+                structure.get("format_signature") == "WinOLS File"),
+            "reparse_note": "raw evidence en oude records blijven bewaard; "
+                            "vergelijking bewaard in project_metadata.",
+        }
+        metadata = json.loads(project["project_metadata"])
+        metadata.setdefault("reparse", []).append(drift)
+        with self.db.connect() as db:
+            db.execute(
+                """UPDATE winols_projects SET project_metadata=?, parser_version=?
+                   WHERE id=?""",
+                (json.dumps(metadata, ensure_ascii=False), PARSER_VERSION, project_id))
+        self.audit("reparse_project", "winols_project", project_id,
+                   after={"parser_version": PARSER_VERSION, "drift": drift})
+        return {"project_id": project_id, **drift,
+                "source_unchanged": True}
+
+    def add_readout(self, customer: str, vehicle: str, stage: str = "",
+                    technician: str | None = None, readout_date: str | None = None,
+                    file_id: int | None = None, project_id: int | None = None,
+                    note: str = "") -> int:
+        with self.db.connect() as db:
+            cursor = db.execute(
+                """INSERT INTO readouts(customer,vehicle,stage,technician,
+                   readout_date,file_id,project_id,note) VALUES (?,?,?,?,?,?,?,?)""",
+                (customer, vehicle, stage, technician, readout_date, file_id,
+                 project_id, note))
+            return cursor.lastrowid
+
+    def readouts(self, query: str = "") -> list[dict]:
+        like = f"%{query}%"
+        return self.db.rows(
+            """SELECT * FROM readouts WHERE customer LIKE ? OR vehicle LIKE ?
+               OR stage LIKE ? ORDER BY id DESC LIMIT 200""", (like, like, like))
+
     def import_project(self, path: Path) -> int:
         path = path.resolve()
         data = read_ols(path, self.config["max_file_mb"])
@@ -104,6 +169,9 @@ class Repository(RepositoryV3Mixin):
         with self.db.connect() as db:
             db.execute(f"INSERT OR IGNORE INTO winols_projects ({','.join(row)}) VALUES ({','.join('?' for _ in row)})", tuple(row.values()))
             project_id = db.execute("SELECT id FROM winols_projects WHERE source_path=? AND sha256=?", (str(path), digest["sha256"])).fetchone()[0]
+            from app.winols.ols_reader import PARSER_VERSION
+            db.execute("UPDATE winols_projects SET parser_version=? WHERE id=?",
+                       (PARSER_VERSION, project_id))
             for obj in details.get("objects", []):
                     db.execute(
                     """INSERT INTO ols_objects
@@ -377,8 +445,10 @@ class Repository(RepositoryV3Mixin):
                          VALUES (?,?,?,?) ON CONFLICT(object_id) DO UPDATE SET
                          role=excluded.role, note=excluded.note, reviewer=excluded.reviewer,
                          created_at=CURRENT_TIMESTAMP""", (object_id, role, note, reviewer))
-            db.execute("UPDATE ols_objects SET role=?, confidence=?, detection_method=? WHERE id=?",
-                       (role, 100.0 if role != "unknown" else 0.0, "human_review", object_id))
+            db.execute("""UPDATE ols_objects SET role=?, confidence=?, detection_method=?,
+                evidence_level=? WHERE id=?""",
+                       (role, 100.0 if role != "unknown" else 0.0, "human_review",
+                        "TECHNICIAN_CONFIRMED", object_id))
         self.audit("review_role", "ols_object", object_id, actor=reviewer or "technician",
                    before={"role": previous_role}, after={"role": role}, reason=note)
         return self.db.rows("SELECT o.*, r.note, r.reviewer, r.created_at AS reviewed_at FROM ols_objects o JOIN ols_object_reviews r ON r.object_id=o.id WHERE o.id=?", (object_id,))[0]
@@ -401,17 +471,39 @@ class Repository(RepositoryV3Mixin):
         """
         self.project(project_id)
         rows = [row for row in self.ols_versions(project_id) if row["file_id"] and row["complete"]]
+        # WAARIMAGEWEZEN: de guard gebruikt de werkelijke geëxtraheerde
+        # bestandsgrootte, niet de geclaimde binary_length uit de OLS —
+        # WinOLS kan een andere interne opslagvorm hebben dan de export.
+        actual_sizes = {row["file_id"]: self.file(row["file_id"])["file_size"]
+                        for row in rows if row["file_id"]}
         originals = [row for row in rows if row["role"] == "original"]
         tuned = [row for row in rows if row["role"] == "tuned"]
         results = []
         for original in originals:
             for candidate in tuned:
-                if candidate["binary_length"] != original["binary_length"]:
+                original_size = actual_sizes.get(original["file_id"])
+                candidate_size = actual_sizes.get(candidate["file_id"])
+                if original_size != candidate_size:
+                    # bestaand (mogelijk foutief bevestigd) paar zelfherstellend
+                    # ontkoppelen: grootteverschil = geen betrouwbaar diffbewijs
+                    with self.db.connect() as db:
+                        db.execute(
+                            """UPDATE file_pairs SET confirmed=0 WHERE original_file_id=?
+                               AND tuned_file_id=? AND confirmed=1""",
+                            (original["file_id"], candidate["file_id"]))
+                    self.audit("size_mismatch_unpaired", "file_pair",
+                               f"{original['file_id']}|{candidate['file_id']}",
+                               before={"confirmed": True}, after={"confirmed": False},
+                               reason="werkelijke imagegroottes verschillen; "
+                                      "technicusbeslissing vereist")
                     results.append({"original_file_id": original["file_id"],
                                     "tuned_file_id": candidate["file_id"],
                                     "status": "size_mismatch_not_paired",
-                                    "reason": f"Versiegrootte {original['binary_length']} ≠ "
-                                              f"{candidate['binary_length']}; diff is niet betrouwbaar."})
+                                    "reason": f"Werkelijke imagegroottes {original_size} ≠ "
+                                              f"{candidate_size} B (geclaimd "
+                                              f"{original['binary_length']}/"
+                                              f"{candidate['binary_length']}); diff is niet "
+                                              f"betrouwbaar zonder bewezen correspondentie."})
                     continue
                 explicit = min(original["role_confidence"], candidate["role_confidence"]) >= 95.0
                 pair_id = self.pair(original["file_id"], candidate["file_id"], explicit, 90.0)

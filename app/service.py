@@ -24,7 +24,9 @@ class Service(ServiceV3Mixin):
     def __init__(self, config: dict):
         self.repo = Repository(config)
         from app.library import LibraryEngine
+        from app.knowledge_model import KnowledgeModelEngine
         self.library = LibraryEngine(self.repo, config, service=self)
+        self.km = KnowledgeModelEngine(self)
 
     def analyze(self, path: str, progress=None) -> dict:
         query = read_binary(path, self.repo.config['max_file_mb'])
@@ -497,6 +499,215 @@ class Service(ServiceV3Mixin):
 
     def audit_log(self, limit: int = 200, subject_type: str | None = None) -> list[dict]:
         return self.repo.audit_log(limit=limit, subject_type=subject_type)
+
+    # ------------------------------------------------------------------
+    # V6: kennismodel (ECU Image Identity, families, lineage, negatieven)
+    # ------------------------------------------------------------------
+    def build_knowledge_model(self) -> dict:
+        images = self.km.build_ecu_image_identities()
+        families = self.km.build_project_families()
+        lineage = self.km.build_software_lineage()
+        return {"images": images, "families": families, "lineage": lineage}
+
+    def register_negative_match(self, subject_type: str, a, b, reason: str = "",
+                                reviewer: str | None = None) -> dict:
+        """Technicus: A ≠ B. Permanent negatief bewijs (§8); toekomstige
+        rebuilds mogen dit voorstel niet opnieuw doen."""
+        return self.km.register_negative(subject_type, a, b, reason=reason,
+                                         reviewer=reviewer)
+
+    def negatives(self, subject_type: str | None = None) -> list[dict]:
+        return self.km.negatives(subject_type)
+
+    def evaluate_golden(self, save: bool = True) -> dict:
+        return self.km.evaluate_golden(save=save)
+
+    def snapshot_knowledge(self) -> dict:
+        return self.km.snapshot_knowledge()
+
+    def diff_knowledge_snapshots(self, before: dict, after: dict) -> dict:
+        return self.km.diff_knowledge_snapshots(before, after)
+
+    # ------------------------------------------------------------------
+    # V6: "Why this match?" (§15) — alle componenten + bewijsaantallen
+    # ------------------------------------------------------------------
+    def explain_new_bin(self, file_id: int, threshold: float = 70.0) -> dict:
+        """Per scorecomponent: waarde, gewicht, bijdrage, bewijsaantallen en
+        negatieve aftrekken. Geen zwarte doos: dit is het volledige WHY-rapport."""
+        report = self.new_bin_report(file_id, threshold)
+        components = report["score_components"]
+        weights = report.get("score_weights", {})
+        identification = report.get("identification", {})
+        evidence_counts = {
+            "binary_similarity": len(report.get("related_originals", [])),
+            "structural_similarity": len(report.get("related_originals", [])),
+            "ecu_confidence": len(identification.get("ecu", [])),
+            "hardware_confidence": len(identification.get("hardware", [])),
+            "software_confidence": len(identification.get("software", [])),
+            "calibration_confidence": len(identification.get("calibration", [])),
+            "calibration_identity_confidence": len(report.get("calibration_identity_matches", [])),
+            "tuning_pattern_confidence": len(report.get("tuning_dna_matches", [])),
+            "cross_software_confidence": 0,
+            "evidence_strength": report.get("related_projects", 0),
+            "contradiction_penalty": report.get("evidence_summary", {}).get("contradictions", 0),
+            "context_alignment": len(report.get("tuning_dna_matches", [])),
+        }
+        explanation = []
+        for name, value in components.items():
+            weight = weights.get(name, 0.0)
+            explanation.append({
+                "component": name, "value": round(value, 2), "weight": round(weight, 3),
+                "contribution": round(value * weight, 2),
+                "evidence_count": evidence_counts.get(name, 0),
+                "role": "negative" if "contradiction" in name or "penalty" in name
+                        else ("unused" if weight == 0 else "positive"),
+            })
+        explanation.sort(key=lambda item: -abs(item["contribution"]))
+        return {
+            "file_id": file_id, "filename": report["filename"],
+            "overall_confidence": report["overall_confidence"],
+            "confidence_type": report["confidence_type"],
+            "explanation": explanation,
+            "why": "Bijdrage = componentwaarde × gewicht; alleen componenten met "
+                   "gewicht tellen mee in het gewogen gemiddelde. Bewijsaantallen "
+                   "zijn zichtbaar per component; UNKNOWN blijft UNKNOWN.",
+            "provenance": self.km.provenance(),
+            "note": "ANALYSIS ONLY FOR TECHNICIAN REVIEW.",
+        }
+
+    # ------------------------------------------------------------------
+    # V6: Comparison Workspace (§16)
+    # ------------------------------------------------------------------
+    def compare_workspace(self, left_file_id: int, right_file_id: int) -> dict:
+        """Twee files/projecten naast elkaar: metadata, ECU-image-identiteit,
+        overeenkomstige regio's (identiteiten + structuursignaturen) en de
+        Original→Tuned-ketting van beide kanten. ANALYSIS ONLY."""
+        def side(file_id):
+            row = self.repo.file(file_id)
+            links = self.calibration_identity_links(file_id, [])
+            regions = self.repo.map_regions_for_file(file_id)
+            pairs = [pair for pair in self.repo.pairs()
+                     if pair["confirmed"] and (pair["original_file_id"] == file_id
+                                               or pair["tuned_file_id"] == file_id)]
+            chain = []
+            for pair in pairs[:5]:
+                try:
+                    diff_report = self.diff(pair["id"])
+                    chain.append({"pair_id": pair["id"],
+                                  "role": "original" if pair["original_file_id"] == file_id
+                                          else "tuned",
+                                  "regions": len(diff_report["blocks"])})
+                except (OSError, ValueError):
+                    continue
+            images = self.repo.db.rows(
+                """SELECT i.id, i.status, i.image_size, i.confidence
+                   FROM ecu_image_identities i JOIN ecu_image_members m
+                   ON m.image_id=i.id WHERE m.member_type='file' AND m.member_id=?""",
+                (file_id,))
+            return {"file_id": file_id, "filename": row["filename"],
+                    "size": row["file_size"], "ecu": row["ecu_family"],
+                    "hardware": row["hardware_number"],
+                    "software": row["software_number"],
+                    "calibration": row["calibration_number"],
+                    "stage": row["stage"],
+                    "identity_links": links, "map_regions": len(regions),
+                    "confirmed_pairs": chain,
+                    "ecu_image_identities": images}
+
+        left, right = side(left_file_id), side(right_file_id)
+        # correspondenties: gedeelde structuursignaturen + gedeelde image-identiteit
+        def signatures(file_id):
+            return {region.get("structural_signature") or region.get("signature")
+                    or str(region.get("region_hash") or region.get("id"))
+                    for region in self.repo.map_regions_for_file(file_id)}
+        left_sig = signatures(left_file_id)
+        right_sig = signatures(right_file_id)
+        correspondences = sorted(left_sig & right_sig)
+        shared_image = bool(set(row["id"] for row in left["ecu_image_identities"])
+                            & set(row["id"] for row in right["ecu_image_identities"]))
+        negative = self.km.is_negative("file_match",
+                                       ("file", str(left_file_id)),
+                                       ("file", str(right_file_id)))
+        return {
+            "left": left, "right": right,
+            "corresponding_structural_signatures": correspondences,
+            "same_ecu_image_identity": shared_image,
+            "negative_relation": negative,
+            "note": ("Technicus heeft deze match negatief gemarkeerd" if negative
+                     else "Correspondenties zijn kandidaten: identificatie blijft "
+                          "review-only."),
+            "provenance": self.km.provenance(),
+        }
+
+    # ------------------------------------------------------------------
+    # V6: bulk-operaties (§17) met veilige taakgrenzen
+    # ------------------------------------------------------------------
+    def bulk_process_projects(self, project_ids: list[int], progress=None) -> dict:
+        """Meerdere OLS-projecten automatisch verwerken in één hervatbare taak;
+        fouten stoppen de bulk niet; elke stap checkpoint."""
+        if not project_ids:
+            raise ValueError("Geen projecten opgegeven")
+        run_id = self.repo.start_run("bulk_ols_process", {"count": len(project_ids)})
+        stats = {"processed": 0, "errors": 0}
+        errors = []
+        for index, project_id in enumerate(project_ids):
+            try:
+                project = self.repo.project(project_id)
+                self.auto_process_ols(project["filepath"])
+                stats["processed"] += 1
+            except Exception as exc:
+                stats["errors"] += 1
+                errors.append({"project_id": project_id, "error": str(exc)})
+            self.repo.checkpoint_run(run_id, {"index": index}, stats)
+            if progress:
+                progress(f"Bulk {index + 1}/{len(project_ids)}")
+        self.repo.finish_run(run_id, "done", stats)
+        return {"run_id": run_id, "status": "done", **stats,
+                "error_details": errors[:20]}
+
+    # ------------------------------------------------------------------
+    # V6: review-impact meten (§11): before/after op de golden benchmark
+    # ------------------------------------------------------------------
+    def measure_review_impact(self, apply_review, note: str = "") -> dict:
+        """Voer een review-actie uit met before/after-kennissnapshot én
+        golden-benchmark. resultaat: verbeterde of verslechterde metrics."""
+        before_snapshot = self.snapshot_knowledge()
+        before_golden = self.evaluate_golden(save=True)
+        apply_review()
+        after_snapshot = self.snapshot_knowledge()
+        after_golden = self.evaluate_golden(save=True)
+        return {
+            "knowledge_diff": self.diff_knowledge_snapshots(before_snapshot,
+                                                            after_snapshot),
+            "golden_before": before_golden["totals"],
+            "golden_after": after_golden["totals"],
+            "note": note or "review-impact gemeten op golden dataset",
+            "provenance": self.km.provenance(),
+        }
+
+    # ------------------------------------------------------------------
+    # V6: readouts — klant/voertuig-domeinlaag (§12), NOOIT in matching
+    # ------------------------------------------------------------------
+    def add_readout(self, customer: str, vehicle: str, stage: str = "",
+                    technician: str | None = None, readout_date: str | None = None,
+                    file_id: int | None = None, project_id: int | None = None,
+                    note: str = "") -> dict:
+        with self.repo.db.connect() as db:
+            cursor = db.execute(
+                """INSERT INTO readouts(customer,vehicle,stage,technician,
+                   readout_date,file_id,project_id,note) VALUES (?,?,?,?,?,?,?,?)""",
+                (customer, vehicle, stage, technician, readout_date, file_id,
+                 project_id, note))
+            readout_id = cursor.lastrowid
+        self.repo.audit("add_readout", "readout", readout_id, actor=technician or "system",
+                        after={"customer": customer, "vehicle": vehicle})
+        return self.repo.db.rows("SELECT * FROM readouts WHERE id=?", (readout_id,))[0]
+
+    def readouts(self, query: str = "") -> list[dict]:
+        like = f"%{query}%"
+        return self.repo.db.rows(
+            """SELECT * FROM readouts WHERE customer LIKE ? OR vehicle LIKE ?
+               OR stage LIKE ? ORDER BY id DESC LIMIT 200""", (like, like, like))
 
     # ------------------------------------------------------------------
     # Rapportexport (§62): JSON/CSV/MD/HTML voor elk kennisrapport

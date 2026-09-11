@@ -3,7 +3,13 @@
 The OLS project format is proprietary.  This module deliberately does not
 interpret project bytes as an ECU binary and never writes to the source file.
 """
+
+
 from __future__ import annotations
+
+# Parser-versie: wordt per project/record bewaard zodat her-interpretatie
+# zonder data-verlies kan (§19). Verhogen = nieuwe interpretatie, raw evidence blijft.
+PARSER_VERSION = "v1"
 
 import re
 import struct
