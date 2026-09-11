@@ -163,7 +163,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS tune_candidates_identity
  ON tune_candidates(target_file_id, IFNULL(pair_id, 0), sha256, status);
 """
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 
 class Database:
@@ -175,6 +175,10 @@ class Database:
             db.executescript(SCHEMA)
             db.executescript(V3_SCHEMA)
             db.executescript(LIBRARY_SCHEMA)
+            try:
+                db.executescript(FTS_DDL)
+            except sqlite3.OperationalError:
+                pass  # geen FTS5 in deze SQLite-build: zoekfunctie gebruikt LIKE
             # additieve kolommigrale veiligheid voor reeds aangemaakte V3-tabellen
             expected = {
                 "tuning_regions": {"original_region_context_hash", "checksum_status"},
@@ -361,4 +365,26 @@ CREATE TABLE IF NOT EXISTS library_scans (
  status TEXT NOT NULL DEFAULT 'running', checkpoint TEXT NOT NULL DEFAULT '{}',
  stats TEXT NOT NULL DEFAULT '{}', config TEXT NOT NULL DEFAULT '{}');
 CREATE INDEX IF NOT EXISTS library_scans_root ON library_scans(root_id, status);
+CREATE TABLE IF NOT EXISTS content_files (
+ id INTEGER PRIMARY KEY, content_id INTEGER NOT NULL REFERENCES content_objects(id),
+ file_id INTEGER REFERENCES files(id), kind TEXT NOT NULL DEFAULT 'binary',
+ project_id INTEGER, analysis_run_id INTEGER, created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+ UNIQUE(content_id, file_id));
+CREATE INDEX IF NOT EXISTS content_files_content ON content_files(content_id);
+CREATE INDEX IF NOT EXISTS content_files_file ON content_files(file_id);
+CREATE TABLE IF NOT EXISTS audit_log (
+ id INTEGER PRIMARY KEY, actor TEXT NOT NULL DEFAULT 'system',
+ action TEXT NOT NULL, subject_type TEXT NOT NULL, subject_id TEXT NOT NULL,
+ before_state TEXT NOT NULL DEFAULT '{}', after_state TEXT NOT NULL DEFAULT '{}',
+ reason TEXT NOT NULL DEFAULT '', created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+CREATE INDEX IF NOT EXISTS audit_log_subject ON audit_log(subject_type, subject_id);
+CREATE INDEX IF NOT EXISTS audit_log_time ON audit_log(created_at);
 """
+V10_SCHEMA = """
+-- FTS5-versnellingsindex voor bibliotheekzoekopdrachten (optioneel: alleen
+-- aangemaakt als SQLite met FTS5 is gebouwd; zoekfunctie valt terug op LIKE).
+"""
+FTS_DDL = """
+CREATE VIRTUAL TABLE IF NOT EXISTS library_fts USING fts5(filename, path, sha256, content='file_locations', content_rowid='id');
+"""
+

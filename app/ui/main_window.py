@@ -6,7 +6,7 @@ from PySide6.QtCore import QThread, Signal
 from PySide6.QtWidgets import (QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QListWidget,
     QStackedWidget, QLabel, QPushButton, QLineEdit, QComboBox, QTableWidget,
     QTableWidgetItem, QFileDialog, QMessageBox, QPlainTextEdit, QTextBrowser,
-    QInputDialog, QAbstractItemView)
+    QInputDialog, QAbstractItemView, QWizard, QWizardPage, QCheckBox)
 from app.analysis.metadata import FIELDS
 from app.analysis.binary_reader import read_binary
 from app.learning.model import LearningIndex
@@ -32,7 +32,8 @@ class Worker(QThread):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, service):
+    def __init__(self, service, first_run=False):
+
         super().__init__()
         self.service, self.repo = service, service.repo
         self.worker = None
@@ -85,9 +86,13 @@ class MainWindow(QMainWindow):
         self.build_winols()
         self.build_ols_review()
         self.build_settings()
+        self.build_jobs_manager()
+        self.build_backup()
         self.nav.currentRowChanged.connect(self.stack.setCurrentIndex)
         self.nav.setCurrentRow(0)
         self.refresh()
+        if first_run:
+            self.maybe_first_run()
 
     def page(self, name, subtitle):
         self.nav.addItem(name)
@@ -864,6 +869,188 @@ class MainWindow(QMainWindow):
                         'scan_status': row['scan_status'],
                         'sha256': (row['sha256'] or '')[:16]} for row in rows],
                       ['id', 'filename', 'path', 'file_type', 'size', 'scan_status', 'sha256'])
+
+    def build_jobs_manager(self):
+        layout = self.page('Jobs & Audit', 'Achtergrondtaken (scan/analyse/patronen) zijn '
+                           'hervatbaar: pauzeren gaat tussen batches met geldig checkpoint. '
+                           'Elke technicus-actie staat in de auditlog en wordt meegebacket.')
+        self.jobs_table = self.table(layout, ['ID', 'Type', 'Status', 'Gestart', 'Bijgewerkt',
+                                              'Voortgang (stats)'])
+        row = QHBoxLayout()
+        pause_btn = QPushButton('Pauzeren')
+        pause_btn.clicked.connect(lambda: self.job_control('pause'))
+        row.addWidget(pause_btn)
+        resume_btn = QPushButton('Hervatten')
+        resume_btn.clicked.connect(lambda: self.job_control('resume'))
+        row.addWidget(resume_btn)
+        cancel_btn = QPushButton('Annuleren')
+        cancel_btn.clicked.connect(lambda: self.job_control('cancel'))
+        row.addWidget(cancel_btn)
+        refresh_btn = QPushButton('Vernieuwen')
+        refresh_btn.clicked.connect(self.refresh_jobs)
+        row.addWidget(refresh_btn)
+        layout.addLayout(row)
+        layout.addWidget(QLabel('Auditlog (technicus-acties, wie/wanneer/wat/waarom):'))
+        self.audit_table = self.table(layout, ['ID', 'Tijdstip', 'Actor', 'Actie', 'Subject',
+                                               'Reden'])
+
+    def refresh_jobs(self):
+        jobs = self.service.jobs()
+        self.populate(self.jobs_table,
+                      [{'id': job['id'], 'run_type': job['run_type'], 'status': job['status'],
+                        'started_at': job['started_at'], 'updated_at': job['updated_at'],
+                        'stats': json.dumps(job['stats'], ensure_ascii=False)} for job in jobs],
+                      ['id', 'run_type', 'status', 'started_at', 'updated_at', 'stats'])
+        self.populate(self.audit_table, self.service.audit_log(100),
+                      ['id', 'created_at', 'actor', 'action', 'subject_type', 'reason'])
+
+    def job_control(self, action):
+        run_id = self.selected_id(self.jobs_table)
+        if not run_id:
+            return
+
+        def operation(progress):
+            if action == 'pause':
+                return self.service.job_pause(run_id)
+            if action == 'cancel':
+                return self.service.job_cancel(run_id)
+            return self.service.job_resume(run_id, progress=progress)
+
+        self.run_job(operation, callback=lambda _result: self.safe(self.refresh_jobs))
+
+    def build_backup(self):
+        layout = self.page('Backup & Health', 'Backup bevat database, kennis, reviews, '
+                           'auditlog en configuratie — NOOIT de bronbibliotheek zelf. '
+                           'Herstellen maakt eerst een veiligheidsbackup van de huidige staat.')
+        row = QHBoxLayout()
+        backup_btn = QPushButton('Backup maken…')
+        backup_btn.clicked.connect(self.make_backup)
+        row.addWidget(backup_btn)
+        restore_btn = QPushButton('Backup herstellen…')
+        restore_btn.clicked.connect(self.restore_backup)
+        row.addWidget(restore_btn)
+        health_btn = QPushButton('Health check')
+        health_btn.clicked.connect(self.run_health_check)
+        row.addWidget(health_btn)
+        layout.addLayout(row)
+        self.health_output = QLabel('Nog geen health check uitgevoerd.')
+        self.health_output.setWordWrap(True)
+        layout.addWidget(self.health_output)
+
+    def make_backup(self):
+        folder = QFileDialog.getExistingDirectory(self, 'Waar wilt u de backup opslaan?')
+        if not folder:
+            return
+        self.run_job(lambda progress: self.service.backup(folder),
+                     callback=lambda result: self.safe(
+                         lambda: self.health_output.setText(
+                             f"Backup gemaakt: {result['backup_path']}")))
+
+    def restore_backup(self):
+        chosen = QFileDialog.getExistingDirectory(self, 'Kies de backupmap')
+        if not chosen:
+            return
+        self.run_job(lambda progress: self.service.restore(chosen),
+                     callback=lambda result: self.safe(
+                         lambda: (self.health_output.setText(
+                             f"Hersteld vanaf {result['restored_from']} "
+                             f"(veiligheidsbackup: {result['safety_backup']})"),
+                             self.safe(self.refresh))))
+
+    def run_health_check(self):
+        self.run_job(lambda progress: self.service.health_check(),
+                     callback=lambda result: self.safe(
+                         lambda: self.health_output.setText(json.dumps(result, indent=2))))
+
+    # ------------------------------------------------------------------
+    # First-run wizard (§49)
+    # ------------------------------------------------------------------
+    def maybe_first_run(self):
+        try:
+            has_content = bool(self.repo.db.rows('SELECT id FROM files LIMIT 1'))
+            has_roots = bool(self.service.library.roots())
+        except Exception:
+            return
+        if has_content or has_roots:
+            return
+        wizard = QWizard(self)
+        wizard.setWindowTitle('Eerste keer instellen')
+        wizard.addPage(self._wizard_welcome())
+        wizard.addPage(self._wizard_roots(wizard))
+        wizard.addPage(self._wizard_profile(wizard))
+        if wizard.exec():
+            profile = wizard.field('profile') or 'BALANCED'
+            self.service.library.config['resource_preset'] = profile
+            self._persist_profile(profile)
+            for path in getattr(self, '_wizard_root_paths', []):
+                try:
+                    self.service.library.add_root(path)
+                except ValueError:
+                    pass  # dubbele root: overslaan
+            self.safe(self.refresh)
+            if wizard.field('start_scan'):
+                for root in self.service.library.roots():
+                    self.run_job(lambda progress, root_id=root['id']:
+                                 self.service.library.scan_root(root_id, progress=progress),
+                                 callback=lambda _result: self.safe(self.refresh))
+
+    def _wizard_welcome(self):
+        page = QWizardPage()
+        page.setTitle('Welkom bij TuningMatching')
+        layout = QVBoxLayout(page)
+        layout.addWidget(QLabel(
+            'Deze wizard stelt uw lokale kennisbank in.\n\n'
+            '1. Kies library-mappen met uw bronbestanden (D:\\Tuning, E:\\WinOLS, …).\n'
+            '   Bestanden blijven op hun eigen schijf; er wordt niets gekopieerd.\n'
+            '2. Kies een resourceprofiel voor scans.\n'
+            '3. Start eventueel direct de eerste (hervatbare) scan.'))
+        layout.addStretch(1)
+        page.setLayout(layout)
+        return page
+
+    def _wizard_roots(self, wizard):
+        page = QWizardPage()
+        page.setTitle('Library roots (bron blijft staan)')
+        layout = QVBoxLayout(page)
+        self._wizard_root_list = QListWidget()
+        layout.addWidget(self._wizard_root_list)
+
+        def add_folder():
+            folder = QFileDialog.getExistingDirectory(self, 'Library root kiezen')
+            if folder:
+                self._wizard_root_list.addItem(folder)
+
+        add_btn = QPushButton('Map toevoegen…')
+        add_btn.clicked.connect(add_folder)
+        layout.addWidget(add_btn)
+        page.setLayout(layout)
+
+        def collect():
+            self._wizard_root_paths = [self._wizard_root_list.item(index).text()
+                                       for index in range(self._wizard_root_list.count())]
+            return True
+
+        page.validatePage = collect
+        return page
+
+    def _wizard_profile(self, wizard):
+        page = QWizardPage()
+        page.setTitle('Resourceprofiel en eerste scan')
+        layout = QVBoxLayout(page)
+        combo = QComboBox()
+        combo.addItems(['LOW', 'BALANCED', 'HIGH'])
+        combo.setObjectName('profileCombo')
+        layout.addWidget(QLabel('Resourceprofiel (aantal hash/analyse-workers):'))
+        layout.addWidget(combo)
+        start = QCheckBox('Direct de eerste scan starten (hervatbaar)')
+        start.setChecked(True)
+        layout.addWidget(start)
+        layout.addWidget(QLabel('LOW = minste disk-I/O en CPU; HIGH = snelste scan.'))
+        layout.addStretch(1)
+        page.setLayout(layout)
+        wizard.registerField('profile*', combo, property='currentText')
+        wizard.registerField('start_scan', start)
+        return page
 
     def build_search(self):
         layout = self.page('Zoeken', 'Doorzoek bestanden, patronen, OLS-projecten en regio\'s op ECU, '

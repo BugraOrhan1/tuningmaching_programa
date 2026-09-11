@@ -372,12 +372,15 @@ class Repository(RepositoryV3Mixin):
             row = db.execute("SELECT * FROM ols_objects WHERE id=?", (object_id,)).fetchone()
             if not row:
                 raise ValueError("Onbekend OLS-object-ID")
+            previous_role = row["role"]
             db.execute("""INSERT INTO ols_object_reviews(object_id,role,note,reviewer)
                          VALUES (?,?,?,?) ON CONFLICT(object_id) DO UPDATE SET
                          role=excluded.role, note=excluded.note, reviewer=excluded.reviewer,
                          created_at=CURRENT_TIMESTAMP""", (object_id, role, note, reviewer))
             db.execute("UPDATE ols_objects SET role=?, confidence=?, detection_method=? WHERE id=?",
                        (role, 100.0 if role != "unknown" else 0.0, "human_review", object_id))
+        self.audit("review_role", "ols_object", object_id, actor=reviewer or "technician",
+                   before={"role": previous_role}, after={"role": role}, reason=note)
         return self.db.rows("SELECT o.*, r.note, r.reviewer, r.created_at AS reviewed_at FROM ols_objects o JOIN ols_object_reviews r ON r.object_id=o.id WHERE o.id=?", (object_id,))[0]
 
     def ols_versions(self, project_id: int) -> list[dict]:
@@ -826,6 +829,10 @@ class Repository(RepositoryV3Mixin):
             with self.db.connect() as db:
                 db.execute("UPDATE files SET file_type=?, filepath=? WHERE id=?", (kind, str(target.resolve()), row["id"]))
         LOG.info("Reclassified files=%s kind=%s", [row["id"] for row in rows], kind)
+        for row in rows:
+            self.audit("reclassify", "file", row["id"],
+                       before={"file_type": row["file_type"]}, after={"file_type": kind},
+                       reason="technician classificatie")
         return len(rows)
 
     def pair(self, original_id: int, tuned_id: int, confirmed: bool = False, confidence: float = 100) -> int:
@@ -903,6 +910,7 @@ class Repository(RepositoryV3Mixin):
         with self.db.connect() as db:
             if not db.execute("UPDATE file_pairs SET confirmed=1 WHERE id=?", (pair_id,)).rowcount:
                 raise ValueError("Onbekend pair-ID")
+        self.audit("confirm_pair", "file_pair", pair_id, after={"confirmed": True})
 
     def dashboard(self) -> dict:
         files = self.files()

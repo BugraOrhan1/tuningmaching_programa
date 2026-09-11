@@ -95,6 +95,38 @@ def main() -> None:
     lib_loc = sub.add_parser('library-locations', help='locaties zoeken in een library')
     lib_loc.add_argument('root_id', type=int)
     lib_loc.add_argument('term', nargs='?', default='')
+    lib_analyze = sub.add_parser('library-analyze', help='nieuwe library-content diep analyseren (hervatbaar)')
+    lib_analyze.add_argument('root_id', nargs='?', type=int, default=None)
+    lib_analyze.add_argument('--limit', type=int, default=None)
+    lib_analyze.add_argument('--no-resume', action='store_true')
+    lib_search = sub.add_parser('library-search', help='bibliotheekbreed zoeken (FTS5)')
+    lib_search.add_argument('term')
+    lib_watch = sub.add_parser('library-watch', help='watch-folder instellen (nooit auto Original/Tuned)')
+    lib_watch.add_argument('root_id', type=int)
+    lib_watch.add_argument('--off', action='store_true')
+    lib_watch.add_argument('--auto-analyze', action='store_true')
+    lib_watch.add_argument('--classify-duplicates', action='store_true',
+                           help='alleen exacte byte-duplicaten classificeren (bewijsregel)')
+    sub.add_parser('library-watch-run', help='watch-roots nu verwerken')
+    newbinlib = sub.add_parser('new-bin-library', help='New BIN multi-stage tegen de library (§40)')
+    newbinlib.add_argument('path')
+    newbinlib.add_argument('--threshold', type=float, default=70.0)
+    job_cmd = sub.add_parser('job', help='taak pauzeren/hervatten/annuleren/bekijken')
+    job_cmd.add_argument('action', choices=['pause', 'resume', 'cancel', 'show'])
+    job_cmd.add_argument('run_id', type=int)
+    sub.add_parser('audit', help='auditlog tonen (§63)')
+    backup_cmd = sub.add_parser('backup', help='database+kennis+audit backuppen (§64)')
+    backup_cmd.add_argument('--dir', default='')
+    restore_cmd = sub.add_parser('restore', help='backup terugzetten (maakt eerst veiligheidsbackup)')
+    restore_cmd.add_argument('path')
+    sub.add_parser('health', help='databasegezondheid controleren')
+    report_cmd = sub.add_parser('report', help='kennisrapport exporteren (json/csv/md/html)')
+    report_cmd.add_argument('kind', choices=['new_bin', 'ols', 'calibration_object',
+                                             'calibration_identity', 'tuning_dna', 'pattern',
+                                             'evidence', 'library', 'knowledge_build'])
+    report_cmd.add_argument('subject_id', nargs='?', type=int, default=None)
+    report_cmd.add_argument('--format', choices=['json', 'csv', 'md', 'html'], default='json')
+    report_cmd.add_argument('--out', default='')
     api = sub.add_parser('api')
     api.add_argument('--port', type=int, default=8765)
     args = parser.parse_args()
@@ -117,7 +149,7 @@ def main() -> None:
             from PySide6.QtWidgets import QApplication
             from app.ui.main_window import MainWindow
             application = QApplication(sys.argv[:1])
-            window = MainWindow(service)
+            window = MainWindow(service, first_run=True)
             window.show()
             sys.exit(application.exec())
         elif args.command == 'api':
@@ -186,6 +218,40 @@ def main() -> None:
             result = service.library.scan_root(args.root_id, resume=args.resume)
         elif args.command == 'library-locations':
             result = service.library.locations(args.root_id, args.term)
+        elif args.command == 'library-analyze':
+            result = service.library.analyze_pending(root_id=args.root_id, limit=args.limit,
+                                                     resume=not args.no_resume)
+        elif args.command == 'library-search':
+            result = service.library.search(args.term)
+        elif args.command == 'library-watch':
+            result = service.library.set_watch(
+                args.root_id, enabled=not args.off,
+                policy={'auto_analyze': args.auto_analyze,
+                        'classify_exact_duplicates': args.classify_duplicates})
+        elif args.command == 'library-watch-run':
+            result = service.library.process_watch()
+        elif args.command == 'new-bin-library':
+            result = service.new_bin_library_report(args.path, args.threshold)
+        elif args.command == 'job':
+            if args.action == 'pause':
+                result = service.job_pause(args.run_id)
+            elif args.action == 'resume':
+                result = service.job_resume(args.run_id)
+            elif args.action == 'cancel':
+                result = service.job_cancel(args.run_id)
+            else:
+                result = service.job(args.run_id)
+        elif args.command == 'audit':
+            result = {'entries': service.audit_log()}
+        elif args.command == 'backup':
+            result = service.backup(args.dir or None)
+        elif args.command == 'restore':
+            result = service.restore(args.path)
+        elif args.command == 'health':
+            result = service.health_check()
+        elif args.command == 'report':
+            result = service.export_report(args.kind, args.subject_id, args.format,
+                                           args.out or None)
         elif args.command == 'jobs':
             result = service.jobs()
         elif args.command == 'review-knowledge':

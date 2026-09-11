@@ -16,6 +16,26 @@ class LibraryRootRequest(BaseModel):
     path: str
     name: str | None = None
 
+class AnalyzePendingRequest(BaseModel):
+    root_id: int | None = None
+    limit: int | None = None
+    resume: bool = True
+
+
+class WatchRequest(BaseModel):
+    enabled: bool
+    policy: dict = {}
+
+
+class NewBinPathRequest(BaseModel):
+    path: str
+    threshold: float = 70.0
+
+
+class RestoreRequest(BaseModel):
+    path: str
+
+
 
 class V3ReviewRequest(BaseModel):
     action: str
@@ -385,5 +405,80 @@ def create_api(service: Service, token: str) -> FastAPI:
     @api.get('/contents/{content_id}/locations')
     def content_locations(content_id: int):
         return service.library.content_locations(content_id)
+
+    @api.get('/contents/{content_id}/analysis')
+    def content_analysis(content_id: int):
+        return {"content": service.library.content(content_id),
+                "analysis_link": service.library.analysis_link(content_id),
+                "locations": service.library.content_locations(content_id)}
+
+    @api.post('/contents/{content_id}/analyze')
+    def analyze_content(content_id: int):
+        return service.library.analyze_content(content_id)
+
+    @api.post('/library/analyze-pending')
+    def analyze_pending(body: AnalyzePendingRequest):
+        return service.library.analyze_pending(root_id=body.root_id, limit=body.limit,
+                                               resume=body.resume)
+
+    @api.get('/library/search')
+    def library_search(q: str = '', limit: int = 50):
+        return service.library.search(q, limit)
+
+    @api.post('/libraries/{root_id}/watch')
+    def set_watch(root_id: int, body: WatchRequest):
+        return service.library.set_watch(root_id, body.enabled, body.policy)
+
+    @api.post('/library/process-watch')
+    def process_watch():
+        return service.library.process_watch()
+
+    @api.post('/library/new-bin')
+    def new_bin_library(body: NewBinPathRequest):
+        return service.new_bin_library_report(body.path, body.threshold)
+
+    @api.post('/jobs/{run_id}/pause')
+    def job_pause(run_id: int):
+        return service.job_pause(run_id)
+
+    @api.post('/jobs/{run_id}/resume')
+    def job_resume(run_id: int):
+        return service.job_resume(run_id)
+
+    @api.post('/jobs/{run_id}/cancel')
+    def job_cancel(run_id: int):
+        return service.job_cancel(run_id)
+
+    @api.get('/jobs/{run_id}')
+    def job_detail(run_id: int):
+        row = service.job(run_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail='Onbekende taak')
+        return row
+
+    @api.get('/audit')
+    def audit(limit: int = 200, subject_type: str = ''):
+        return {'entries': service.audit_log(limit, subject_type or None)}
+
+    @api.post('/backup')
+    def backup(target_dir: str = ''):
+        return service.backup(target_dir or None)
+
+    @api.post('/restore')
+    def restore(body: RestoreRequest):
+        return service.restore(body.path)
+
+    @api.get('/health')
+    def health():
+        return service.health_check()
+
+    @api.get('/reports/{kind}/{subject_id}')
+    def export_report(kind: str, subject_id: int, format: str = 'json',
+                      path: str = ''):
+        return service.export_report(kind, subject_id, format, path or None)
+
+    @api.get('/reports/library')
+    def export_library_report(format: str = 'json', path: str = ''):
+        return service.export_report('library', None, format, path or None)
 
     return api

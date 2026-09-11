@@ -110,6 +110,8 @@ class ServiceV3Mixin:
             raise ValueError("batch_size moet minimaal 1 zijn")
         run = self.repo.resume_run("pattern_rebuild") if resume else None
         run_id = run["id"] if run else self.repo.start_run("pattern_rebuild", {"batch_size": batch_size})
+        if run:
+            self.repo.reopen_run(run_id)  # hervat: run is weer actief
         last_pair = run["checkpoint"].get("last_pair_id", 0) if run else 0
         stats = dict(run["stats"]) if run else {}
         for key in ("pairs", "regions", "errors"):
@@ -117,6 +119,14 @@ class ServiceV3Mixin:
         pairs = [p for p in self.repo.pairs() if p["confirmed"] and p["id"] > last_pair]
         for index in range(0, len(pairs), batch_size):
             batch = pairs[index:index + batch_size]
+            # jobcontrol (§51): pauzeren/annuleren tussen batches, checkpoint blijft geldig
+            state = self.repo.run_status(run_id)
+            if state == "paused":
+                self.repo.pause_run(run_id, {"last_pair_id": last_pair}, stats)
+                return {"run_id": run_id, "status": "paused", **stats}
+            if state == "cancelled":
+                self.repo.cancel_run(run_id, stats)
+                return {"run_id": run_id, "status": "cancelled", **stats}
             for pair in batch:
                 try:
                     report = self.diff(pair["id"])
@@ -132,6 +142,7 @@ class ServiceV3Mixin:
                 if progress:
                     progress(f"Regio's {stats['pairs']}/{len(pairs)}")
             self.repo.checkpoint_run(run_id, {"last_pair_id": batch[-1]["id"]}, stats)
+            last_pair = batch[-1]["id"]
 
         regions = self.repo.all_candidate_regions(confirmed_only=True)
         # checksum-kandidaten eerst: zelfde relatieve plaats, >=3 paren,
@@ -238,7 +249,8 @@ class ServiceV3Mixin:
         build_id = self.repo.create_knowledge_build(
             run_id, len({region["pair_id"] for region in regions}), pattern_count,
             len(self.repo.calibration_identities()), notes="deterministic V3 pattern rebuild")
-        return {"run_id": run_id, "build_id": build_id, "patterns": pattern_count, **stats}
+        return {"run_id": run_id, "status": "done", "build_id": build_id,
+                "patterns": pattern_count, **stats}
 
     def patterns_detail(self, status: str | None = None) -> list[dict]:
         return self.repo.patterns_v3(status)

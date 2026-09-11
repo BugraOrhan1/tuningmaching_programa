@@ -71,7 +71,7 @@ def test_gui_smoke(service, pair, monkeypatch, tmp_path):
     window = MainWindow(service)
     window.show()
     application.processEvents()
-    assert window.nav.count() == 25  # …+ Map Structuren + Alignment + Library (V5)
+    assert window.nav.count() == 27  # …+ Library (V5) + Jobs & Audit + Backup & Health
     assert window.file_table.rowCount() == 2
     project = tmp_path / 'gui-project.ols'
     project.write_bytes(b'OLS\x00GUI test project\x00')

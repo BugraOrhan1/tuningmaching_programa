@@ -1,4 +1,4 @@
-"""V5 Local Library Engine: indexeer 10+ TB bronbestanden ZEER ze te kopiëren.
+"""V5 Local Library Engine: indexeer 10+ TB bronbestanden ZONDER ze te kopiëren.
 
 WinOLS-achtige lokale projectbibliotheek: bronbestanden blijven op hun
 originele locatie; de database bewaart alleen pad, identiteit (SHA256) en
@@ -36,9 +36,10 @@ def file_type_for(extension: str) -> str:
 class LibraryEngine:
     """Werkt direct op de gedeelde SQLite-database van de Repository."""
 
-    def __init__(self, repo, config: dict | None = None):
+    def __init__(self, repo, config: dict | None = None, service=None):
         self.repo = repo
         self.config = dict(config or {})
+        self.service = service  # Knowledge-service voor deep analysis (Phase 3)
 
     # ------------------------------------------------------------------
     # roots en totalen
@@ -265,6 +266,7 @@ class LibraryEngine:
                         "SELECT COUNT(*) FROM file_locations WHERE root_id=? AND scan_status=?",
                         (root_id, status)).fetchone()[0]
             self._checkpoint(scan_id, str(root_path), stats, final=True)
+            self._refresh_search_index()
             with self.repo.db.connect() as db:
                 db.execute("""UPDATE library_roots SET status='ONLINE',
                     last_scan_at=CURRENT_TIMESTAMP,
@@ -343,3 +345,205 @@ class LibraryEngine:
         rows[0]["checkpoint"] = json.loads(rows[0]["checkpoint"])
         rows[0]["stats"] = json.loads(rows[0]["stats"])
         return rows[0]
+
+    def _refresh_search_index(self) -> None:
+        """FTS5-versnellingsindex (§41) bijwerken; LIKE-fallback bij afwezige FTS5."""
+        try:
+            with self.repo.db.connect() as db:
+                db.execute("INSERT INTO library_fts(library_fts) VALUES ('rebuild')")
+            self.fts_enabled = True
+        except Exception:
+            self.fts_enabled = False
+
+    def search(self, query: str, limit: int = 50) -> dict:
+        """Zoek in de bibliotheek op naam/pad/sha256 (FTS5, fallback LIKE)."""
+        if getattr(self, "fts_enabled", False):
+            try:
+                rows = self.repo.db.rows(
+                    """SELECT l.id, l.path, l.filename, l.size, l.scan_status,
+                              l.content_id, c.sha256
+                       FROM library_fts f JOIN file_locations l ON l.id=f.rowid
+                       LEFT JOIN content_objects c ON c.id=l.content_id
+                       WHERE library_fts MATCH ? LIMIT ?""", (query, limit))
+                return {"mode": "fts5", "results": rows, "count": len(rows)}
+            except Exception:
+                pass
+        like = f"%{query}%"
+        rows = self.repo.db.rows(
+            """SELECT l.id, l.path, l.filename, l.size, l.scan_status,
+                      l.content_id, c.sha256
+               FROM file_locations l LEFT JOIN content_objects c ON c.id=l.content_id
+               WHERE l.filename LIKE ? OR l.path LIKE ? OR c.sha256 LIKE ?
+               LIMIT ?""", (like, like, like, limit))
+        return {"mode": "like-fallback", "results": rows, "count": len(rows)}
+
+    # ------------------------------------------------------------------
+    # Phase 3: deep analysis koppeling (content → kennis, één keer per content)
+    # ------------------------------------------------------------------
+    def content(self, content_id: int) -> dict:
+        rows = self.repo.db.rows("SELECT * FROM content_objects WHERE id=?", (content_id,))
+        if not rows:
+            raise ValueError("Onbekend content-object")
+        return rows[0]
+
+    def analysis_link(self, content_id: int) -> dict | None:
+        rows = self.repo.db.rows(
+            "SELECT * FROM content_files WHERE content_id=? ORDER BY id LIMIT 1",
+            (content_id,))
+        return rows[0] if rows else None
+
+    def _online_location(self, content_id: int) -> dict | None:
+        rows = self.repo.db.rows(
+            """SELECT l.* FROM file_locations l JOIN library_roots r ON r.id=l.root_id
+               WHERE l.content_id=? AND r.status='ONLINE' ORDER BY l.id LIMIT 1""",
+            (content_id,))
+        return rows[0] if rows else None
+
+    def analyze_content(self, content_id: int) -> dict:
+        """Deep analysis voor ÉÉN content-object, precies één keer.
+
+        - Bestaat de kennis al (link of identieke sha in de analyse-store),
+          dan wordt die hergebruikt — geen dubbele analyse (§4).
+        - BIN/ORI worden geïmporteerd als 'unknown' (nooit automatisch
+          Original/Tuned; classificatie is bewijs- of technicuswerk).
+        - OLS wordt via de OLS-first pijplijn verwerkt (project/versies/
+          paren/DNA op bevestigde paren).
+        - De bron op schijf wordt alleen gelezen, nooit gewijzigd.
+        """
+        if self.service is None:
+            raise ValueError("Deep analysis vereist de knowledge-service")
+        content = self.content(content_id)
+        link = self.analysis_link(content_id)
+        if link:
+            return {"content_id": content_id, "status": "cached",
+                    "file_id": link["file_id"], "project_id": link["project_id"],
+                    "note": "Kennis bestond al: deep analysis is één keer per content."}
+        location = self._online_location(content_id)
+        if location is None:
+            return {"content_id": content_id, "status": "OFFLINE",
+                    "note": "Geen online locatie; inhoud blijft geïndexeerd zonder analyse."}
+        sha_rows = self.repo.db.rows(
+            "SELECT id FROM files WHERE sha256=? ORDER BY id LIMIT 1", (content["sha256"],))
+        if sha_rows:
+            file_id, project_id, kind, status = sha_rows[0]["id"], None, "existing", "linked"
+        elif content["file_type"] == "ols":
+            result = self.service.auto_process_ols(location["path"])
+            file_id, project_id, kind, status = None, result["project_id"], "ols", "analyzed"
+        else:
+            file_id = self.repo.import_file(Path(location["path"]), kind="unknown")
+            project_id, kind, status = None, "binary", "analyzed"
+        with self.repo.db.connect() as db:
+            db.execute("""INSERT OR IGNORE INTO content_files(content_id,file_id,kind,project_id)
+                          VALUES (?,?,?,?)""", (content_id, file_id, kind, project_id))
+            db.execute("UPDATE content_objects SET analysis_state='ANALYZED' WHERE id=?",
+                       (content_id,))
+            db.execute("""UPDATE file_locations SET analysis_state='ANALYZED'
+                          WHERE content_id=?""", (content_id,))
+        return {"content_id": content_id, "status": status, "file_id": file_id,
+                "project_id": project_id, "locations_updated": True}
+
+    def pending_contents(self, root_id: int | None = None, after_id: int = 0,
+                         limit: int | None = None) -> list[dict]:
+        query = """SELECT DISTINCT c.id, c.sha256, c.size, c.file_type
+                   FROM content_objects c JOIN file_locations l ON l.content_id=c.id
+                   WHERE c.analysis_state='NEW' AND c.id>? AND l.scan_status!='ERROR'"""
+        params: list = [after_id]
+        if root_id is not None:
+            query += " AND l.root_id=?"
+            params.append(root_id)
+        query += " ORDER BY c.id"
+        if limit:
+            query += " LIMIT ?"
+            params.append(limit)
+        return self.repo.db.rows(query, tuple(params))
+
+    def analyze_pending(self, root_id: int | None = None, limit: int | None = None,
+                        resume: bool = True, progress=None) -> dict:
+        """Hervatbare, pauzeerbare analysetaak over nieuwe content (§51).
+
+        Checkpoint per content-object; pauze/annulering wordt per object
+        gerespecteerd; fouten stoppen de taak niet (§52).
+        """
+        run = self.repo.resume_run("library_analysis") if resume else None
+        run_id = run["id"] if run else self.repo.start_run(
+            "library_analysis", {"root_id": root_id})
+        if run:
+            self.repo.reopen_run(run_id)  # hervat: run is weer actief
+        after_id = run["checkpoint"].get("last_content_id", 0) if run else 0
+        stats = dict(run["stats"]) if run else {"analyzed": 0, "cached": 0, "linked": 0,
+                                                "offline": 0, "errors": 0}
+        rows = self.pending_contents(root_id, after_id, limit)
+        total = len(rows)
+        for index, row in enumerate(rows):
+            state = self.repo.run_status(run_id)
+            if state == "paused":
+                self.repo.pause_run(run_id, {"last_content_id": after_id}, stats)
+                return {"run_id": run_id, "status": "paused", "remaining": total - index,
+                        **stats}
+            if state == "cancelled":
+                self.repo.cancel_run(run_id, stats)
+                return {"run_id": run_id, "status": "cancelled", **stats}
+            try:
+                result = self.analyze_content(row["id"])
+                stats[result["status"] if result["status"] in ("cached", "offline",
+                                                               "linked") else "analyzed"] += 1
+            except Exception as exc:  # één slecht bestand stopt de taak niet
+                stats["errors"] += 1
+                self.repo.db.rows("SELECT 1")  # verbinding gezond houden
+                if progress:
+                    progress(f"Fout bij content {row['id']}: {exc}")
+            after_id = row["id"]
+            self.repo.checkpoint_run(run_id, {"last_content_id": after_id}, stats)
+            if progress:
+                progress(f"Analyse {index + 1}/{total}")
+        self.repo.finish_run(run_id, "done", stats)
+        return {"run_id": run_id, "status": "done", **stats}
+
+    # ------------------------------------------------------------------
+    # Watch folders (§7): optioneel, nooit automatisch Original/Tuned
+    # ------------------------------------------------------------------
+    def set_watch(self, root_id: int, enabled: bool, policy: dict | None = None) -> dict:
+        root = self.root(root_id)
+        if root is None:
+            raise ValueError("Onbekende library root")
+        config = dict(root["config"])
+        config["watch"] = bool(enabled)
+        merged = {"auto_analyze": False, "classify_exact_duplicates": False}
+        merged.update(config.get("watch_policy") or {})
+        merged.update(policy or {})
+        config["watch_policy"] = merged
+        with self.repo.db.connect() as db:
+            db.execute("UPDATE library_roots SET config=? WHERE id=?",
+                       (json.dumps(config), root_id))
+        return self.root(root_id)
+
+    def process_watch(self, progress=None) -> dict:
+        """Scan watch-roots en verwerk nieuwe files volgens beleid.
+
+        Beleid (bewijsregel): auto_analyze analyzeert nieuwe content; er wordt
+        NOOIT automatisch Original/Tuned vastgesteld — uitsluitend de
+        exact-duplicate regel (byte-identiek + getypeerd bewijs) indien
+        expliciet ingeschakeld.
+        """
+        report = {"roots": [], "new": 0, "analyzed": 0, "classified": 0}
+        for root in self.roots():
+            if not root["config"].get("watch"):
+                continue
+            scan = self.scan_root(root["id"])
+            policy = root["config"].get("watch_policy", {})
+            entry = {"root_id": root["id"], "scan": scan["status"],
+                     "new": scan.get("new", 0), "analyzed": 0}
+            if isinstance(scan.get("new"), int):
+                report["new"] += scan["new"]
+            if policy.get("auto_analyze") and scan["status"] == "done":
+                analysis = self.analyze_pending(root_id=root["id"], progress=progress)
+                entry["analyzed"] = analysis.get("analyzed", 0) + analysis.get("linked", 0)
+                report["analyzed"] += entry["analyzed"]
+            if policy.get("classify_exact_duplicates"):
+                result = self.repo.auto_classify_exact_duplicates()
+                entry["classified"] = result.get("classified", 0)
+                report["classified"] += entry["classified"]
+            entry["note"] = ("Geen automatische Original/Tuned-rollen: rollen volgen "
+                             "uitsluitend bewijs of technicusbeslissing.")
+            report["roots"].append(entry)
+        return report

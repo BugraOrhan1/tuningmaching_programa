@@ -397,6 +397,8 @@ class RepositoryV3Mixin:
             if subject_type == "tuning_region" and action in {"approve", "reject"}:
                 db.execute("UPDATE tuning_regions SET status=? WHERE id=?",
                            ("verified" if action == "approve" else "rejected", int(subject_id)))
+        self.audit(action, subject_type, subject_id, actor=reviewer or "technician",
+                   after={"payload": payload or {}, "note": note}, reason=note)
         return {"subject_type": subject_type, "subject_id": subject_id, "action": action,
                 "note": note, "reviewer": reviewer}
 
@@ -416,8 +418,12 @@ class RepositoryV3Mixin:
             return cursor.lastrowid
 
     def checkpoint_run(self, run_id: int, checkpoint: dict, stats: dict | None = None) -> None:
+        """Checkpoint schrijven; een tussentijdse pauze/annulering blijft staan."""
         with self.db.connect() as db:
-            db.execute("""UPDATE analysis_runs SET checkpoint=?, stats=?, status='running',
+            db.execute("""UPDATE analysis_runs SET checkpoint=?, stats=?,
+                          status=CASE WHEN status IN ('paused','cancelled','cancel_requested',
+                                                      'done','interrupted')
+                                      THEN status ELSE 'running' END,
                           updated_at=CURRENT_TIMESTAMP WHERE id=?""",
                        (json.dumps(checkpoint), json.dumps(stats or {}), run_id))
 
@@ -427,7 +433,8 @@ class RepositoryV3Mixin:
                           WHERE id=?""", (status, json.dumps(stats or {}), run_id))
 
     def resume_run(self, run_type: str) -> dict | None:
-        rows = self.db.rows("""SELECT * FROM analysis_runs WHERE run_type=? AND status='interrupted'
+        rows = self.db.rows("""SELECT * FROM analysis_runs WHERE run_type=? AND status IN
+                               ('interrupted','paused')
                                ORDER BY id DESC LIMIT 1""", (run_type,))
         if not rows:
             return None
@@ -438,6 +445,50 @@ class RepositoryV3Mixin:
 
     def runs(self) -> list[dict]:
         return self.db.rows("SELECT * FROM analysis_runs ORDER BY id DESC LIMIT 100")
+
+    def run(self, run_id: int) -> dict | None:
+        rows = self.db.rows("SELECT * FROM analysis_runs WHERE id=?", (run_id,))
+        if rows:
+            rows[0]["checkpoint"] = json.loads(rows[0]["checkpoint"])
+            rows[0]["stats"] = json.loads(rows[0]["stats"])
+            rows[0]["config"] = json.loads(rows[0]["config"])
+        return rows[0] if rows else None
+
+    def run_status(self, run_id: int) -> str:
+        rows = self.db.rows("SELECT status FROM analysis_runs WHERE id=?", (run_id,))
+        return rows[0]["status"] if rows else "unknown"
+
+    def pause_run(self, run_id: int, checkpoint: dict, stats: dict | None = None) -> None:
+        """Checkpoint wegschrijven en de run PAUZEERD achterlaten."""
+        with self.db.connect() as db:
+            db.execute("""UPDATE analysis_runs SET checkpoint=?, stats=?, status='paused',
+                          updated_at=CURRENT_TIMESTAMP WHERE id=?""",
+                       (json.dumps(checkpoint), json.dumps(stats or {}), run_id))
+
+    def cancel_run(self, run_id: int, stats: dict | None = None) -> None:
+        self.finish_run(run_id, "cancelled", stats)
+
+    def reopen_run(self, run_id: int) -> None:
+        """Gepauzeerde/onderbroken run heropenen bij hervat (§51)."""
+        with self.db.connect() as db:
+            db.execute("""UPDATE analysis_runs SET status='running',
+                          updated_at=CURRENT_TIMESTAMP WHERE id=?""", (run_id,))
+
+    def audit(self, action: str, subject_type: str, subject_id, actor: str = "technician",
+              before=None, after=None, reason: str = "") -> None:
+        """Auditlog (§63): elke technicus-actie traceerbaar en backupbaar."""
+        with self.db.connect() as db:
+            db.execute("""INSERT INTO audit_log(actor,action,subject_type,subject_id,
+                before_state,after_state,reason) VALUES (?,?,?,?,?,?,?)""",
+                       (actor, action, subject_type, str(subject_id),
+                        json.dumps(before or {}, ensure_ascii=False, default=str),
+                        json.dumps(after or {}, ensure_ascii=False, default=str), reason))
+
+    def audit_log(self, limit: int = 200, subject_type: str | None = None) -> list[dict]:
+        if subject_type:
+            return self.db.rows("""SELECT * FROM audit_log WHERE subject_type=?
+                ORDER BY id DESC LIMIT ?""", (subject_type, limit))
+        return self.db.rows("SELECT * FROM audit_log ORDER BY id DESC LIMIT ?", (limit,))
 
     def create_knowledge_build(self, source_run_id: int | None, source_projects: int,
                                pattern_count: int, calibration_identity_count: int,

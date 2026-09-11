@@ -1,5 +1,9 @@
 """Shared application operations for desktop, CLI and local API."""
 import json
+import os
+import shutil
+import sqlite3
+from datetime import datetime
 from pathlib import Path
 import hashlib
 from app.database.repository import Repository
@@ -20,7 +24,7 @@ class Service(ServiceV3Mixin):
     def __init__(self, config: dict):
         self.repo = Repository(config)
         from app.library import LibraryEngine
-        self.library = LibraryEngine(self.repo, config)
+        self.library = LibraryEngine(self.repo, config, service=self)
 
     def analyze(self, path: str, progress=None) -> dict:
         query = read_binary(path, self.repo.config['max_file_mb'])
@@ -334,3 +338,198 @@ class Service(ServiceV3Mixin):
 
     def tune_candidates(self) -> list[dict]:
         return self.repo.tune_candidates()
+
+    # ------------------------------------------------------------------
+    # Job-manager (§51): pauzeren/hervatten/annuleren van achtergrondtaken
+    # ------------------------------------------------------------------
+    def job(self, run_id: int) -> dict | None:
+        return self.repo.run(run_id)
+
+    def job_pause(self, run_id: int) -> dict:
+        with self.repo.db.connect() as db:
+            cursor = db.execute("""UPDATE analysis_runs SET status='paused',
+                updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='running'""",
+                (run_id,))
+            if cursor.rowcount == 0:
+                raise ValueError("Taak is niet actief (alleen running taken kunnen gepauzeerd)")
+        return self.job(run_id)
+
+    def job_resume(self, run_id: int, progress=None) -> dict:
+        row = self.job(run_id)
+        if row is None:
+            raise ValueError("Onbekende taak")
+        if row["status"] not in ("paused", "interrupted"):
+            raise ValueError("Alleen gepauzeerde/onderbroken taken kunnen hervatten")
+        if row["run_type"] == "library_analysis":
+            return self.library.analyze_pending(resume=True, progress=progress)
+        if row["run_type"] == "pattern_rebuild":
+            return self.rebuild_patterns(resume=True, progress=progress)
+        raise ValueError(f"Taaktype {row['run_type']} kent geen hervat-padhérecke")
+
+    def job_cancel(self, run_id: int) -> dict:
+        row = self.job(run_id)
+        if row is None:
+            raise ValueError("Onbekende taak")
+        if row["status"] not in ("running", "paused"):
+            raise ValueError("Alleen running/paused taken kunnen geannuleerd")
+        # gepauzeerde taken zijn meteen definitief geannuleerd; een draaiende taak
+        # leest 'cancel_requested' tussen batches en sluit zichzelf netjes af
+        final = row["status"] == "paused"
+        with self.repo.db.connect() as db:
+            db.execute("""UPDATE analysis_runs SET status=?,
+                updated_at=CURRENT_TIMESTAMP WHERE id=?""",
+                       ("cancelled" if final else "cancel_requested", run_id))
+        return self.job(run_id)
+
+    # ------------------------------------------------------------------
+    # Backup/restore/health (§64): database + kennis + audit; NOOIT de bronbibliotheek
+    # ------------------------------------------------------------------
+    def backup(self, target_dir: str | None = None) -> dict:
+        base = Path(target_dir) if target_dir else self.repo.root / "backups"
+        base.mkdir(parents=True, exist_ok=True)
+        folder = base / f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        folder.mkdir()
+        db_target = folder / "tuning.db"
+        source = sqlite3.connect(str(self.repo.db.path))
+        destination = sqlite3.connect(str(db_target))
+        with destination:
+            source.backup(destination)
+        source.close()
+        destination.close()
+        for name in ("config.json",):
+            candidate = self.repo.root / name
+            if candidate.exists():
+                shutil.copy2(candidate, folder / name)
+        db_digest = hashlib.sha256(db_target.read_bytes()).hexdigest()
+        counts = {table: self.repo.db.rows(f"SELECT COUNT(*) AS n FROM {table}")[0]["n"]
+                  for table in ("files", "file_pairs", "tuning_patterns",
+                                "calibration_identities", "audit_log")}
+        manifest = {"created_at": datetime.now().isoformat(), "schema_user_version": 10,
+                    "database_sha256": db_digest, "row_counts": counts}
+        (folder / "manifest.json").write_text(json.dumps(manifest, indent=2))
+        return {"backup_path": str(folder), "manifest": manifest}
+
+    def restore(self, backup_path: str) -> dict:
+        folder = Path(backup_path)
+        if not (folder / "manifest.json").exists() or not (folder / "tuning.db").exists():
+            raise ValueError("Ongeldige backup: manifest.json of tuning.db ontbreekt")
+        manifest = json.loads((folder / "manifest.json").read_text())
+        digest = hashlib.sha256((folder / "tuning.db").read_bytes()).hexdigest()
+        if digest != manifest.get("database_sha256"):
+            raise ValueError("Backup geverifieerd tegen manifest: hash komt NIET overeen")
+        safety = self.backup()
+        temporary = self.repo.db.path.with_suffix(".restore.tmp")
+        shutil.copy2(folder / "tuning.db", temporary)
+        os.replace(temporary, self.repo.db.path)
+        sanity = self.repo.db.rows("SELECT COUNT(*) AS n FROM files")[0]["n"]
+        return {"restored_from": str(folder), "safety_backup": safety["backup_path"],
+                "manifest": manifest, "files_after_restore": sanity}
+
+    def health_check(self) -> dict:
+        with self.repo.db.connect() as db:
+            integrity = db.execute("PRAGMA integrity_check").fetchone()[0]
+            foreign_key_issues = len(db.execute("PRAGMA foreign_key_check").fetchall())
+        counts = {table: self.repo.db.rows(f"SELECT COUNT(*) AS n FROM {table}")[0]["n"]
+                  for table in ("files", "file_pairs", "tuning_regions", "tuning_patterns",
+                                "calibration_identities", "library_roots",
+                                "file_locations", "content_objects", "audit_log")}
+        orphans = {
+            "locations_without_root": self.repo.db.rows(
+                "SELECT COUNT(*) AS n FROM file_locations WHERE root_id NOT IN (SELECT id FROM library_roots)")[0]["n"],
+            "locations_without_content": self.repo.db.rows(
+                "SELECT COUNT(*) AS n FROM file_locations WHERE content_id IS NULL")[0]["n"],
+            "regions_without_pair": self.repo.db.rows(
+                "SELECT COUNT(*) AS n FROM tuning_regions WHERE pair_id NOT IN (SELECT id FROM file_pairs)")[0]["n"],
+        }
+        offline_roots = self.repo.db.rows(
+            "SELECT COUNT(*) AS n FROM library_roots WHERE status='OFFLINE'")[0]["n"]
+        warnings = [name for name, value in orphans.items() if value] + (
+            ["offline_roots"] if offline_roots else [])
+        return {"status": "OK" if not warnings and integrity == "ok" and not foreign_key_issues
+                else "WARNINGS", "integrity": integrity,
+                "foreign_key_issues": foreign_key_issues, "row_counts": counts,
+                "orphans": orphans, "offline_roots": offline_roots,
+                "database_bytes": self.repo.db.path.stat().st_size}
+
+    # ------------------------------------------------------------------
+    # New BIN over de library (§40): multi-stage retrieval
+    # ------------------------------------------------------------------
+    def new_bin_library_report(self, path: str, threshold: float = 70.0) -> dict:
+        """Multi-stage New BIN: goedkope filters eerst, dure vergelijking alleen
+        op de shortlist. Stage 1 (exacte SHA256) hergebruikt bestaande kennis
+        zonder heranalyse (§4/§10)."""
+        query = read_binary(path, self.repo.config["max_file_mb"])
+        digest = hashlib.sha256(query).hexdigest()
+        stages = [{"stage": 1, "name": "exact_sha256", "hits": 0}]
+        exact = self.repo.db.rows(
+            "SELECT id, sha256, size, file_type, analysis_state FROM content_objects WHERE sha256=?",
+            (digest,))
+        stages[0]["hits"] = len(exact)
+        if exact:
+            link = self.library.analysis_link(exact[0]["id"])
+            locations = self.library.content_locations(exact[0]["id"])
+            return {"stages": stages, "library_hit": exact[0], "locations": locations,
+                    "analysis_link": link, "filename": Path(path).name,
+                    "note": "Content exact bekend: bestaande kennis hergebruikt, "
+                            "geen dubbele deep analysis."}
+        size_hits = self.repo.db.rows(
+            "SELECT COUNT(DISTINCT c.id) AS n FROM content_objects c WHERE c.size=?",
+            (len(query),))
+        stages.append({"stage": 2, "name": "size_filter", "hits": size_hits[0]["n"]})
+        file_id = self.repo.import_file(Path(path), kind="unknown")
+        report = self.new_bin_report(file_id, threshold)
+        report["stages"] = stages + [
+            {"stage": 3, "name": "fingerprint_prefilter",
+             "hits": report.get("related_originals") and len(report["related_originals"]) or 0},
+            {"stage": 4, "name": "full_comparison_shortlist",
+             "hits": len(report.get("related_originals", []))},
+            {"stage": 5, "name": "knowledge_integration", "hits": 1}]
+        report["library_file_id"] = file_id
+        return report
+
+    # ------------------------------------------------------------------
+    # Audit (§63)
+    # ------------------------------------------------------------------
+    def audit(self, action: str, subject_type: str, subject_id, before=None,
+              after=None, reason: str = "", actor: str = "technician") -> None:
+        self.repo.audit(action, subject_type, subject_id, actor=actor,
+                        before=before, after=after, reason=reason)
+
+    def audit_log(self, limit: int = 200, subject_type: str | None = None) -> list[dict]:
+        return self.repo.audit_log(limit=limit, subject_type=subject_type)
+
+    # ------------------------------------------------------------------
+    # Rapportexport (§62): JSON/CSV/MD/HTML voor elk kennisrapport
+    # ------------------------------------------------------------------
+    def export_report(self, kind: str, subject_id: int | None, fmt: str,
+                      path: str | None = None) -> dict:
+        from app.reporting import export_report
+        builders = {
+            "new_bin": lambda: self.new_bin_report(int(subject_id)),
+            "ols": lambda: self.repo.project_structure_report(int(subject_id)),
+            "calibration_object": lambda: {"report": "calibration_object",
+                "objects": self.repo.calibration_objects_for_file(int(subject_id))[:200]},
+            "calibration_identity": lambda: {"report": "calibration_identity",
+                "identity": next((i for i in self.repo.calibration_identities()
+                                  if i["id"] == int(subject_id)), None)},
+            "tuning_dna": lambda: {"report": "tuning_dna",
+                "records": [d for d in self.tuning_dna()
+                            if subject_id is None or d["id"] == int(subject_id)][:200]},
+            "pattern": lambda: {"report": "tuning_pattern",
+                "patterns": [p for p in self.patterns_detail()
+                             if subject_id is None or p["id"] == int(subject_id)][:200]},
+            "evidence": lambda: {"report": "evidence",
+                "records": self.repo.evidence_for("file", str(subject_id))[:200]},
+            "library": lambda: {"report": "library_health", **self.library.storage_summary(),
+                                "roots": self.library.roots()},
+            "knowledge_build": lambda: {"report": "knowledge_build",
+                "build": self.repo.active_knowledge_build(),
+                "evaluations": self.repo.confidence_evaluations()[:50]},
+        }
+        if kind not in builders:
+            raise ValueError(f"Onbekend rapportsoort: {kind} "
+                             f"(kies uit {', '.join(sorted(builders))})")
+        report = builders[kind]()
+        report.setdefault("report", kind.replace("_", " ").title())
+        written = export_report(report, fmt, path)
+        return {"path": written, "format": fmt, "kind": kind}
