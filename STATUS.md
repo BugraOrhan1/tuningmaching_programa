@@ -103,24 +103,17 @@ De V2.7-kandidaatstroom (`generate_tune_candidate`) is **bevroren**:
 behouden met alle guards, niet uitgebreid; geen enkele BIN wordt door V3
 gewijzigd.
 
-## Nog open naar PRODUCTION READY (eerlijk, per master-spec)
+## Nog open naar PRODUCTION READY (eerlijk, eindstand)
 
-1. **Windows-packaging** (§40/41): PyInstaller/portable build + test op schone
-   Windows 10/11 — kan niet eerlijk worden gebouwd/gevalideerd vanuit deze
-   Linux-sandbox; bouwplan staat in DEPLOYMENT.md.
-2. **PHASE 3+ library-pijplijn**: OLS-projectverwerking bovenop de library-
-   index (project/versions/relations met parser-versie-cache), metadata- en
-   evidence-stages, O/T-kandidaat-pairing over library-content, diff/DNA/
-   identity/pattern-stages alleen op confirmed paren — de kennis-engine
-   bestaat al; de koppeling content → analyse moet nog worden doorverbonden.
-3. **Watch folders** (§10): directory-notificatie is nog niet geïmplementeerd.
-4. **Echte 10 TB-validatie** (§56): 100k/1M/5M-recordschaaltests op echte
-   hardware; de 10k-benchmark is geslaagd, grotere schalen zijn extrapolatie.
-5. **First-run wizard** (§43), **backup-systeem voor db/config/reports** (§39)
-   en **job-manager-UI met pauze** (§46): database/jobs-laag bestaat
-   (analysis_runs/library_scans), de volledige UI/automation nog niet.
-6. **ML/ranking-laag** (§24): bewust uitgesteld; deterministische evidence
-   first.
+1. **Windows-packaging**: spec/buildscript/installer klaar en gevalideerd op
+   imports + test-gate; het bouwen van de .exe en de schone-machine-test
+   vergen één keer een echte Windows-machine (zie WINDOWS_INSTALL.md).
+2. **Echte 10 TB inbedrijfsstelling**: alles voorbereid en op schaal bewezen;
+   de bedrijfsdata zelf staan buiten deze ontwikkelomgeving.
+3. **Confidence-kalibratie**: pas na >1.000 echte bevestigde paren
+   (`confidence/evaluate`); tot dan HEURISTIC CONFIDENCE (bewust).
+4. **ML-laag**: bewust uitgesteld (deterministisch eerst).
+Zie FINAL_IMPLEMENTATION_REPORT.md voor de volledige vier-kleuren afweging.
 
 ## Eindstatus
 
@@ -153,7 +146,7 @@ De applicatie werkt betrouwbaar voor: import van raw `.bin`/`.ori`, het automati
 Volledige testsuite met de project-`.venv` (incl. GUI-tests in offscreen-modus):
 
 ```text
-89 passed, 2 warnings
+100 passed, 2 warnings
 ```
 
 De warnings komen uit FastAPI/Starlette/httpx-deprecations en veroorzaken geen testfout.

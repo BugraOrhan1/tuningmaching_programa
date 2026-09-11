@@ -126,3 +126,13 @@ contradicties) plus de gebruikte formule — allemaal opvraagbaar via
   gelijke mapfunctie" (V2-noot, overgenomen).
 - Geen ML/embeddings: alle features zijn uitlegbaar en deterministisch;
   een ML-laag komt pas als de dataset dat rechtvaardigt (V3-§32, ROADMAP).
+
+
+## Audit als evidence (V5, §63)
+
+Elke technicus-actie (approve/reject/correct/merge/split/mark_* op
+patronen, regio's, identiteiten; OLS-objectrollen; pair-bevestiging;
+herclassificatie) schrijft naast de review-record ook een regel in
+`audit_log`: actor, actie, subject, before/after-state, reden, tijdstip.
+De auditlog is backupbaar en herstelbaar (onderdeel van `backup`) —
+conclusies blijven zo ook na restore verifieerbaar.

@@ -385,6 +385,6 @@ V10_SCHEMA = """
 -- aangemaakt als SQLite met FTS5 is gebouwd; zoekfunctie valt terug op LIKE).
 """
 FTS_DDL = """
-CREATE VIRTUAL TABLE IF NOT EXISTS library_fts USING fts5(filename, path, sha256, content='file_locations', content_rowid='id');
+CREATE VIRTUAL TABLE IF NOT EXISTS library_fts USING fts5(filename, path, sha256, content='');
 """
 

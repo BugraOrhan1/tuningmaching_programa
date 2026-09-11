@@ -198,6 +198,25 @@ API-routes zijn `GET /winols-projects/{id}/objects`, `GET /winols-projects/{id}/
 
 Elk exportbestand krijgt een UUID-naam en wordt exclusief aangemaakt: JSON met volledige analyse, CSV met diffgebieden en pair-ID's, en een SHA256-manifest van beide rapporten. Input-SHA256's staan in de JSON. Er wordt geen gewijzigde BIN gegenereerd. Een analyzerexport bevat ook de bekende diffs in CSV. Rapporten zonder diffgebieden leveren alleen een CSV-header. CSV is een leesbaar controlerapport, geen beloofd WinOLS-importformaat. De app leest geen `.ols`-projecten en bestuurt geen WinOLS-executable.
 
+## V5-productlaag (jobs, audit, backup, rapporten)
+
+- **Library analyseren**: `library-analyze` (hervatbaar/pauzeerbaar),
+  GUI-knop op de Library-pagina; content wordt per SHA256 precies één keer
+  diep geanalyseerd.
+- **New BIN tegen de library**: `new-bin-library <pad>` — multi-stage
+  (exacte SHA256 → grootte → fingerprint → shortlist → kennis); een exacte
+  hit hergebruikt bestaande kennis zonder heranalyse.
+- **Watch folders**: `library-watch <root_id> --on [--auto-analyze]` —
+  NOOIT automatische Original/Tuned-rollen (alleen exact-duplicate
+  bewijsregel, expliciet aan te zetten).
+- **Job-manager**: `job pause|resume|cancel|show <id>` + GUI Jobs & Audit.
+- **Auditlog**: elke review/correctie/bevestiging wordt gelogd (§63) en
+  meegebacket.
+- **Backup/restore/health**: `backup --dir D`, `restore <map>` (met
+  SHA256-manifestverificatie + veiligheidsbackup), `health`.
+- **Rapportexport**: `report new_bin <id> --format md` (json/csv/md/html).
+- **Zoeken**: `library-search <term>` (FTS5, hash-prefix wordt ondersteund).
+
 ## API
 
 De desktop gebruikt de servicelaag rechtstreeks; een API-server is optioneel:

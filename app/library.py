@@ -347,10 +347,19 @@ class LibraryEngine:
         return rows[0]
 
     def _refresh_search_index(self) -> None:
-        """FTS5-versnellingsindex (§41) bijwerken; LIKE-fallback bij afwezige FTS5."""
+        """FTS5-versnellingsindex (§41) vullen; LIKE-fallback bij afwezige FTS5.
+
+        Contentless-index: alleen tokens + rowid, geen gekopieerde tekst — de
+        zoekresultaten joinen altijd live op file_locations.
+        """
         try:
             with self.repo.db.connect() as db:
-                db.execute("INSERT INTO library_fts(library_fts) VALUES ('rebuild')")
+                db.execute("DELETE FROM library_fts")
+                db.execute("""INSERT INTO library_fts(rowid, filename, path, sha256)
+                              SELECT l.id, l.filename, l.normalized_path,
+                                     COALESCE(c.sha256, '')
+                              FROM file_locations l
+                              LEFT JOIN content_objects c ON c.id = l.content_id""")
             self.fts_enabled = True
         except Exception:
             self.fts_enabled = False
@@ -358,16 +367,29 @@ class LibraryEngine:
     def search(self, query: str, limit: int = 50) -> dict:
         """Zoek in de bibliotheek op naam/pad/sha256 (FTS5, fallback LIKE)."""
         if getattr(self, "fts_enabled", False):
-            try:
-                rows = self.repo.db.rows(
-                    """SELECT l.id, l.path, l.filename, l.size, l.scan_status,
-                              l.content_id, c.sha256
-                       FROM library_fts f JOIN file_locations l ON l.id=f.rowid
-                       LEFT JOIN content_objects c ON c.id=l.content_id
-                       WHERE library_fts MATCH ? LIMIT ?""", (query, limit))
-                return {"mode": "fts5", "results": rows, "count": len(rows)}
-            except Exception:
-                pass
+            # FTS5-syntaxis: elke term als veilige quoted-phrase (punt van 'a.bin'
+            # is anders een kolomfilter)
+            tokens = [token.replace('"', "") for token in query.split()
+                      if token.replace('"', "")]
+            safe = " ".join(f'"{token}"' for token in tokens)
+            # enkele hex-achtige term (hash-prefix): FTS5-prefix-zoekopdracht
+            prefix = f'"{tokens[0]}"*' if len(tokens) == 1 else ""
+            if safe:
+                for candidate in (safe, prefix):
+                    if not candidate:
+                        continue
+                    try:
+                        rows = self.repo.db.rows(
+                            """SELECT l.id, l.path, l.filename, l.size, l.scan_status,
+                                      l.content_id, c.sha256
+                               FROM library_fts f JOIN file_locations l ON l.id=f.rowid
+                               LEFT JOIN content_objects c ON c.id=l.content_id
+                               WHERE library_fts MATCH ? LIMIT ?""",
+                            (candidate, limit))
+                        if rows:
+                            return {"mode": "fts5", "results": rows, "count": len(rows)}
+                    except Exception:
+                        break
         like = f"%{query}%"
         rows = self.repo.db.rows(
             """SELECT l.id, l.path, l.filename, l.size, l.scan_status,
