@@ -85,6 +85,16 @@ def main() -> None:
     review_cmd.add_argument('subject_id', type=int)
     review_cmd.add_argument('action')
     review_cmd.add_argument('--note', default='')
+    lib_add = sub.add_parser('library-add', help='library root registreren (bron blijft staan)')
+    lib_add.add_argument('path')
+    lib_add.add_argument('--name', default='')
+    sub.add_parser('library-list', help='library roots tonen')
+    lib_scan = sub.add_parser('library-scan', help='library incrementeel/resumabel scannen')
+    lib_scan.add_argument('root_id', type=int)
+    lib_scan.add_argument('--resume', action='store_true')
+    lib_loc = sub.add_parser('library-locations', help='locaties zoeken in een library')
+    lib_loc.add_argument('root_id', type=int)
+    lib_loc.add_argument('term', nargs='?', default='')
     api = sub.add_parser('api')
     api.add_argument('--port', type=int, default=8765)
     args = parser.parse_args()
@@ -168,6 +178,14 @@ def main() -> None:
             result = service.search(args.term)
         elif args.command == 'ols-graph':
             result = service.ols_graph(args.project_id)
+        elif args.command == 'library-add':
+            result = service.library.add_root(args.path, args.name or None)
+        elif args.command == 'library-list':
+            result = {'roots': service.library.roots(), 'storage': service.library.storage_summary()}
+        elif args.command == 'library-scan':
+            result = service.library.scan_root(args.root_id, resume=args.resume)
+        elif args.command == 'library-locations':
+            result = service.library.locations(args.root_id, args.term)
         elif args.command == 'jobs':
             result = service.jobs()
         elif args.command == 'review-knowledge':

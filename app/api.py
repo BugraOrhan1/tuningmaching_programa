@@ -12,6 +12,11 @@ class ImportRequest(BaseModel):
     kind: str = 'auto'
 
 
+class LibraryRootRequest(BaseModel):
+    path: str
+    name: str | None = None
+
+
 class V3ReviewRequest(BaseModel):
     action: str
     reviewer: str | None = None
@@ -355,5 +360,30 @@ def create_api(service: Service, token: str) -> FastAPI:
     @api.get('/confidence/evaluations')
     def confidence_evaluations():
         return service.repo.confidence_evaluations()
+
+    # ---------------- V5 Local Library ----------------
+    @api.get('/libraries')
+    def libraries():
+        return {'roots': service.library.roots(), 'storage': service.library.storage_summary()}
+
+    @api.post('/libraries')
+    def add_library(body: LibraryRootRequest):
+        return service.library.add_root(body.path, body.name)
+
+    @api.post('/libraries/{root_id}/scan')
+    def scan_library(root_id: int, resume: bool = False):
+        return service.library.scan_root(root_id, resume=resume)
+
+    @api.get('/libraries/{root_id}/locations')
+    def library_locations(root_id: int, q: str = '', limit: int = 200):
+        return service.library.locations(root_id, q, limit)
+
+    @api.get('/libraries/{root_id}/scans')
+    def library_scans(root_id: int):
+        return service.library.scans(root_id)
+
+    @api.get('/contents/{content_id}/locations')
+    def content_locations(content_id: int):
+        return service.library.content_locations(content_id)
 
     return api

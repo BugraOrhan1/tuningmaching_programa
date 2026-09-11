@@ -80,6 +80,7 @@ class MainWindow(QMainWindow):
         self.build_new_bin()
         self.build_ols_explorer()
         self.build_search()
+        self.build_library()
         self.build_learning()
         self.build_winols()
         self.build_ols_review()
@@ -807,6 +808,63 @@ class MainWindow(QMainWindow):
         lines.extend(['', graph['note']])
         self.ols_graph_output.setPlainText('\n'.join(lines))
 
+    def build_library(self):
+        layout = self.page('Library (V5)', 'WinOLS-achtige lokale bibliotheek: bronbestanden '
+                           'blijven op hun eigen schijf; de database bewaart alleen pad, SHA256 '
+                           'en status. Identieke content op meerdere locaties wordt gedeeld '
+                           '(dedup). Scans zijn incrementeel en hervatbaar.')
+        self.library_root_table = self.table(layout, ['ID', 'Naam', 'Pad', 'Status', 'Files',
+                                                      'Contents', 'Laatste scan', 'Health'])
+        row = QHBoxLayout()
+        add_btn = QPushButton('Library root toevoegen…')
+        add_btn.clicked.connect(self.add_library_root)
+        row.addWidget(add_btn)
+        self.library_scan_btn = QPushButton('Geselecteerde root scannen')
+        self.library_scan_btn.clicked.connect(self.scan_selected_library)
+        row.addWidget(self.library_scan_btn)
+        resume_btn = QPushButton('Onderbroken scan hervatten')
+        resume_btn.clicked.connect(lambda: self.scan_selected_library(resume=True))
+        row.addWidget(resume_btn)
+        layout.addLayout(row)
+        self.library_storage = QLabel('Opslag: nog geen library geïndexeerd.')
+        self.library_storage.setWordWrap(True)
+        layout.addWidget(self.library_storage)
+        self.library_loc_table = self.table(layout, ['ID', 'Bestand', 'Pad', 'Type', 'Bytes',
+                                                     'Scan-status', 'SHA256'])
+        self.button(layout, 'Locaties vernieuwen / zoeken', self.refresh_library_locations)
+        self.library_query = QLineEdit()
+        self.library_query.setPlaceholderText('Zoek op bestandsnaam, pad of SHA256…')
+        self.library_query.returnPressed.connect(self.refresh_library_locations)
+        layout.addWidget(self.library_query)
+
+    def add_library_root(self):
+        folder = QFileDialog.getExistingDirectory(self, 'Library root kiezen (bron blijft staan)')
+        if not folder:
+            return
+        self.safe(lambda: (self.service.library.add_root(folder), self.safe(self.refresh)))
+
+    def scan_selected_library(self, resume: bool = False):
+        root_id = self.selected_id(self.library_root_table)
+        self.run_job(lambda progress: self.service.library.scan_root(root_id, resume=resume,
+                                                                     progress=progress),
+                     callback=lambda _result: self.safe(self.refresh))
+
+    def refresh_library_locations(self):
+        if not self.library_root_table.rowCount():
+            return
+        item = self.library_root_table.item(self.library_root_table.currentRow(), 0) \
+            if self.library_root_table.currentRow() >= 0 else self.library_root_table.item(0, 0)
+        if item is None:
+            return
+        root_id = int(item.text())
+        rows = self.service.library.locations(root_id, self.library_query.text())
+        self.populate(self.library_loc_table,
+                      [{'id': row['id'], 'filename': row['filename'], 'path': row['path'],
+                        'file_type': row['file_type'], 'size': row['size'],
+                        'scan_status': row['scan_status'],
+                        'sha256': (row['sha256'] or '')[:16]} for row in rows],
+                      ['id', 'filename', 'path', 'file_type', 'size', 'scan_status', 'sha256'])
+
     def build_search(self):
         layout = self.page('Zoeken', 'Doorzoek bestanden, patronen, OLS-projecten en regio\'s op ECU, '
                            'HW/SW/CAL, project, stage, SHA256, bestandsnaam en signatures.')
@@ -915,6 +973,22 @@ class MainWindow(QMainWindow):
             self.populate(self.explorer_table, self.repo.projects(),
                           ['id', 'filename', 'file_size', 'sha256'])
             self.refresh_alignment_table()
+            library_rows = []
+            for root in self.service.library.roots():
+                library_rows.append({'id': root['id'], 'name': root['name'], 'path': root['path'],
+                                     'status': root['status'], 'file_count': root['file_count'],
+                                     'content_count': root['content_count'],
+                                     'last_scan_at': root['last_scan_at'] or 'nooit',
+                                     'health': root['health']})
+            self.populate(self.library_root_table, library_rows,
+                          ['id', 'name', 'path', 'status', 'file_count', 'content_count',
+                           'last_scan_at', 'health'])
+            storage = self.service.library.storage_summary()
+            self.library_storage.setText(
+                f"Opslag: {storage['locations']} locaties · {storage['unique_contents']} unieke "
+                f"contents · {storage['indexed_bytes'] / 1e9:.2f} GB geïndexeerd · "
+                f"{storage['duplicate_bytes'] / 1e9:.2f} GB duplicaten · database "
+                f"{storage['database_bytes'] / 1e6:.1f} MB")
             self.populate(self.map_file_table,
                           [{'id': row['id'], 'filename': row['filename'], 'file_type': row['file_type'],
                             'file_size': row['file_size']} for row in self.repo.files()],

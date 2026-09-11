@@ -163,7 +163,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS tune_candidates_identity
  ON tune_candidates(target_file_id, IFNULL(pair_id, 0), sha256, status);
 """
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 
 class Database:
@@ -174,6 +174,7 @@ class Database:
             db.execute("PRAGMA journal_mode=WAL")
             db.executescript(SCHEMA)
             db.executescript(V3_SCHEMA)
+            db.executescript(LIBRARY_SCHEMA)
             # additieve kolommigrale veiligheid voor reeds aangemaakte V3-tabellen
             expected = {
                 "tuning_regions": {"original_region_context_hash", "checksum_status"},
@@ -326,4 +327,38 @@ CREATE TABLE IF NOT EXISTS knowledge_reviews (
  action TEXT NOT NULL, payload TEXT NOT NULL DEFAULT '{}',
  reviewer TEXT, note TEXT NOT NULL DEFAULT '', created_at TEXT DEFAULT CURRENT_TIMESTAMP);
 CREATE INDEX IF NOT EXISTS knowledge_reviews_subject ON knowledge_reviews(subject_type, subject_id);
+"""
+
+
+LIBRARY_SCHEMA = """
+CREATE TABLE IF NOT EXISTS library_roots (
+ id INTEGER PRIMARY KEY, name TEXT NOT NULL, path TEXT NOT NULL UNIQUE,
+ status TEXT NOT NULL DEFAULT 'ONLINE', last_scan_at TEXT,
+ file_count INTEGER NOT NULL DEFAULT 0, content_count INTEGER NOT NULL DEFAULT 0,
+ health TEXT NOT NULL DEFAULT 'OK', config TEXT NOT NULL DEFAULT '{}',
+ created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS content_objects (
+ id INTEGER PRIMARY KEY, sha256 TEXT NOT NULL UNIQUE, md5 TEXT, crc32 TEXT,
+ size INTEGER NOT NULL, file_type TEXT NOT NULL DEFAULT 'unknown',
+ analysis_state TEXT NOT NULL DEFAULT 'NEW', metadata TEXT NOT NULL DEFAULT '{}',
+ first_seen TEXT DEFAULT CURRENT_TIMESTAMP);
+CREATE INDEX IF NOT EXISTS content_objects_sha ON content_objects(sha256);
+CREATE INDEX IF NOT EXISTS content_objects_type_size ON content_objects(file_type, size);
+CREATE TABLE IF NOT EXISTS file_locations (
+ id INTEGER PRIMARY KEY, root_id INTEGER NOT NULL REFERENCES library_roots(id),
+ content_id INTEGER REFERENCES content_objects(id),
+ path TEXT NOT NULL, normalized_path TEXT NOT NULL, filename TEXT NOT NULL,
+ extension TEXT NOT NULL, size INTEGER NOT NULL, mtime REAL, ctime REAL,
+ scan_status TEXT NOT NULL DEFAULT 'NEW', analysis_state TEXT NOT NULL DEFAULT 'NEW',
+ metadata TEXT NOT NULL DEFAULT '{}', last_seen_scan_id INTEGER,
+ created_at TEXT DEFAULT CURRENT_TIMESTAMP, UNIQUE(root_id, normalized_path));
+CREATE INDEX IF NOT EXISTS file_locations_content ON file_locations(content_id);
+CREATE INDEX IF NOT EXISTS file_locations_root_status ON file_locations(root_id, scan_status);
+CREATE INDEX IF NOT EXISTS file_locations_filename ON file_locations(filename);
+CREATE TABLE IF NOT EXISTS library_scans (
+ id INTEGER PRIMARY KEY, root_id INTEGER NOT NULL REFERENCES library_roots(id),
+ started_at TEXT DEFAULT CURRENT_TIMESTAMP, finished_at TEXT, updated_at TEXT,
+ status TEXT NOT NULL DEFAULT 'running', checkpoint TEXT NOT NULL DEFAULT '{}',
+ stats TEXT NOT NULL DEFAULT '{}', config TEXT NOT NULL DEFAULT '{}');
+CREATE INDEX IF NOT EXISTS library_scans_root ON library_scans(root_id, status);
 """

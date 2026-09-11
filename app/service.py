@@ -19,6 +19,8 @@ from app.learning.evaluation import evaluate_confidence
 class Service(ServiceV3Mixin):
     def __init__(self, config: dict):
         self.repo = Repository(config)
+        from app.library import LibraryEngine
+        self.library = LibraryEngine(self.repo, config)
 
     def analyze(self, path: str, progress=None) -> dict:
         query = read_binary(path, self.repo.config['max_file_mb'])
