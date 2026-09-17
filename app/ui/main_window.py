@@ -31,6 +31,131 @@ class Worker(QThread):
             self.error.emit(str(exc))
 
 
+MANUAL_HTML = """
+<h1>Handleiding — hoe werkt alles in deze app</h1>
+<p><b>Gouden regel:</b> je bronbestanden (BIN/ORI/OLS) worden <b>nooit</b> gewijzigd.
+De app leest, analyseert en leert — schrijven doet hij alleen naar nieuwe
+kandidaatbestanden die jij expliciet laat bouwen.</p>
+
+<h2>De hoofdlijn (zo leer en bouw je tuning-kennis)</h2>
+<ol>
+<li><b>Bronnen binnenhalen</b> — Library (hele schijven, zonder kopiëren) of Files
+(losse BIN/ORI) of WinOLS (OLS-projecten).</li>
+<li><b>Paren vormen</b> — Original + Tuned bij elkaar bevestigen. Dit is de
+belangrijkste klik in de hele app: <u>alleen bevestigde paren leren de app iets bij</u>.</li>
+<li><b>Kennis bouwen</b> — Patronen opbouwen vanuit alle bevestigde paren
+(herhaalde wijzigingen over softwarevarianten heen).</li>
+<li><b>Nieuwe BIN analyseren</b> — New BIN-rapport met match, kennis en bewijs.</li>
+<li><b>Tuned kandidaat bouwen</b> — Tune Bouwer: stage + add-ons kiezen → nieuw
+kandidaatbestand (checksums niet gecorrigeerd: eerst WinOLS-controle).</li>
+</ol>
+
+<h2>Elke pagina uitgelegd</h2>
+
+<h3>START</h3>
+<p><b>Dashboard</b> — live status (roots online, bestanden/contents, kennis, taken) en
+de genummerde snelstart. Begin hier.<br>
+<b>Uitleg &amp; Handleiding</b> — dit document.</p>
+
+<h3>BIBLIOTHEEK</h3>
+<p><b>Files</b> — jouw BIN/ORI-werkbestanden. Kies bovenin het type
+(<i>auto</i> = uit naam/map; <i>original</i>/<i>tuned</i> = expliciet;
+<i>unknown</i> = nog onbekend), importeer daarna één bestand of een hele map.
+Onder de tabel: selecteer rijen en zet ze alsnog op Original of Tuned
+(Ctrl+klik = meerdere). Metadata (ECU/SW/HW/stage/klant) bewerk je per rij.<br>
+<b>Library (V5)</b> — registreer hele bronmappen/schijven (D:\Tuning, E:\WinOLS…).
+Bestanden blijven op hun plek; de app indexeert pad + SHA256. Scans zijn
+incrementeel (alleen nieuwe/gewijzigde files worden opnieuw gelezen) en hervatten
+na onderbreking. Daarna "analyseren" verwerkt nieuwe content één keer per unieke
+inhoud.<br>
+<b>WinOLS</b> — importeer een .ols-project (één bestand). De app leest versies,
+extraheert bewezen binaries naar Files, bepaalt Original/Tuned-rollen uit
+expliciete WinOLS-labels en stelt paren voor bij gelijke werkelijke
+imagegrootte.<br>
+<b>OLS Explorer</b> — kijk ín een project: versies, rollen, binaries, bewijs per
+relatie.<br>
+<b>OLS Object Review</b> — objecten waar de app niets van durft te zeggen blijf
+UNKNOWN tot jij ze beoordeelt (technicus-bewijs wint altijd).</p>
+
+<h3>ANALYSE</h3>
+<p><b>Analyze BIN</b> — exacte bytevergelijking van een nieuwe BIN met alle
+originals; laat matching + bekende wijzigingen zien met scores en bewijs.<br>
+<b>New BIN Analyse (V3)</b> — het volledige rapport: herkenning, gerelateerde
+projecten, identiteiten, patronen, alle scoreonderdelen (geen zwarte doos).
+Hier staat ook de WHY-tabel: waarom dit percentage.<br>
+<b>Tune Bouwer (V7)</b> — origineel erin, getunede kandidaat terug: kies stage
+en add-ons (pops &amp; bang, vmax, …). Recepten komen uitsluitend uit bevestigde
+paren; elke regio alleen met regionaal bewijs. Output = nieuw bestand +
+waarschuwingen (checksums NIET gecorrigeerd — eerst WinOLS-controle).<br>
+<b>Diff Viewer</b> — byte-voor-byte verschil tussen een bevestigd paar, met
+hex-venster. Oranje = gewijzigd.<br>
+<b>Region Viewer</b> — de wijzigingsregio's van een paar met context, klasse
+(calibratie/checksum/code) en bewijs.<br>
+<b>Vergelijk A|B (V6)</b> — twee bestanden naast elkaar: zelfde ECU-image?
+Corresponderende structuren? Original→Tuned-ketting van beide kanten.<br>
+<b>Zoeken</b> — doorzoek alles op ECU, SW/HW, namen.</p>
+
+<h3>KENNIS</h3>
+<p><b>Original/Tuned Pairs</b> — het hart van het leren. Bevestig alleen paren
+die je gecontroleerd hebt; bevestigd = lesmateriaal voor patronen en de Tune
+Bouwer.<br>
+<b>Change Clusters</b> — welke wijzigingen komen vaker voor? Groepering op
+relatieve offset/lengte/dichtheid — functioneel-neutraal, geen mapnamen.<br>
+<b>Tuning DNA</b> — de digitale vingerafdruk van een tuning (bevestigd paar →
+regio's → kenmerken).<br>
+<b>Patronen (V3)</b> — herhaalde tuningpatronen over meerdere paren/projecten.
+Stage-verdeling, confidence, status (kandidaat t/m verified — alleen jij maakt
+iets verified).<br>
+<b>Calibration Identities</b> — dezelfde logische kalibratie herkend over
+verschillende softwarevarianten (met verschillende offsets).<br>
+<b>ECU Images (V6)</b> — technisch hetzelfde ECU-image herkend over OLS/BIN/ORI/
+backups heen (op inhoudelijk bewijs; grootteverschil wordt nooit samengevoegd).<br>
+<b>Cross Software Alignment</b> — patronen/identiteiten tussen softwarevarianten
+uitlijnen met positief én negatief bewijs.<br>
+<b>Map Structuren</b> — structuurkandidaten (dimensies/assen) in een bestand.
+Structuur ≠ functie: namen zoals Boost/Torque komen er NOOIT zonder bronbewijs.<br>
+<b>Knowledge Review</b> — jij bent de leraar: goedkeuren/afkeuren/corrigeren.
+Elke actie wordt gelogd (audit) en telt mee.</p>
+
+<h3>FAMILIES &amp; LEARNING</h3>
+<p><b>ECU Families</b> — groepen ECU's op bewijs; alleen goedgekeurde families
+filteren de matching.<br>
+<b>Software Families</b> — softwarevarianten herkend uit zichtbare
+software-identifiers.<br>
+<b>Calibration Families</b> — kalibratiegroepen per softwarefamilie.<br>
+<b>Signatures</b> — bytehandtekeningen (minimaal 3 bestanden, pas verified na
+jouw goedkeuring) om herkenning te versnellen.<br>
+<b>Learning</b> — experimenteel: nabijheid op byteverdelingen. De exacte
+analyzer blijft leidend.</p>
+
+<h3>SYSTEEM</h3>
+<p><b>Jobs &amp; Audit</b> — achtergrondtaken (scans/analyses/patronen) met
+pauze/hervat/annuleer; onderin de auditlog van alle technische acties.<br>
+<b>Backup &amp; Health</b> — backup van database+kennis+config (NOOIT je brondata),
+herstellen met verificatie, health-check van de database.<br>
+<b>Settings</b> — config.json-instellingen. Belangrijkst: <b>max_file_mb</b>
+(512 MB; verhoog naar 2048 voor zeer grote OLS-bestanden).</p>
+
+<h2>Veiligheidsregels</h2>
+<ul>
+<li>Bronbestanden worden nooit gewijzigd, verplaatst of verwijderd.</li>
+<li>UNKNOWN is een echt antwoord: geen bewijs = geen conclusie.</li>
+<li>Niets wordt automatisch Original/Tuned — classificatie is bewijs of jouw
+beslissing.</li>
+<li>Kandidaatoutput is altijd "ANALYSIS ONLY FOR TECHNICIAN REVIEW" en heeft
+NOOIT gecorrigeerde checksums. Flashen doet deze app niet.</li>
+</ul>
+
+<h2>Bekende fouten &amp; oplossingen</h2>
+<p><b>"WinOLS-project groter dan ingestelde limiet"</b> — zet
+<i>max_file_mb</i> hoger in config.json (bijv. 2048) en herstart.<br>
+<b>"Beheerde kopie ontbreekt op schijf"</b> — de database komt van een andere
+computer. Importeer het bronbestand opnieuw of gebruik Library-mode.<br>
+<b>"Er draait nog een taak"</b> — kijk onderin het venster; 'Klaar' = volgende
+taak mag. Grote taken kun je pauzeren via Jobs &amp; Audit.</p>
+"""
+
+
 class MainWindow(QMainWindow):
     def __init__(self, service, first_run=False):
 
@@ -74,6 +199,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(root)
         self.nav_section('START')
         self.build_dashboard()
+        self.build_manual()
         self.nav_section('BIBLIOTHEEK')
         self.build_files()
         self.build_library()
@@ -260,6 +386,15 @@ class MainWindow(QMainWindow):
             raise ValueError('Selecteer eerst één of meer rijen.')
         return ids
 
+    def build_manual(self):
+        layout = self.page('Uitleg & Handleiding', 'Hoe werkt alles in deze app? Elke '
+                           'pagina hieronder één voor één uitgelegd, plus de veiligheids'
+                           'regels en oplossingen voor veelvoorkomende fouten.')
+        browser = QTextBrowser()
+        browser.setOpenExternalLinks(False)
+        browser.setHtml(MANUAL_HTML)
+        layout.addWidget(browser)
+
     def build_dashboard(self):
         layout = self.page('Dashboard', 'Welkom. Werk van links naar rechts door de '
                            'snelstart: bronmappen registreren (bestanden blijven op '
@@ -301,18 +436,43 @@ class MainWindow(QMainWindow):
         layout.addStretch()
 
     def build_files(self):
-        layout = self.page('Files', 'Importeer recursief .bin/.ori en .ols. Selecteer onbekende BINs met Ctrl+klik om ze in één keer te classificeren.')
+        layout = self.page('Files', 'Alle BIN/ORI-bestanden die je hier importeert krijgen een '
+                           'veilige beheerkopie in de database (bronbestand blijft ongewijzigd) '
+                           'en worden automatisch herkend (ECU/SW/HW). Kies eerst het type, '
+                           'importeer daarna één bestand of een hele map. Twijfel je over het '
+                           'type? Kies dan \'unknown\' — je kunt later altijd herclasseren met '
+                           'de knoppen onder de tabel.')
         self.search = QLineEdit()
         self.search.setPlaceholderText('Zoek voertuig, ECU, SW/HW, stage, klant of project…')
         self.search.returnPressed.connect(self.refresh)
         layout.addWidget(self.search)
+        kind_row = QHBoxLayout()
+        kind_row.addWidget(QLabel('Type bij import:'))
         self.kind = QComboBox()
         self.kind.addItems(['auto', 'original', 'tuned', 'unknown'])
-        layout.addWidget(self.kind)
+        kind_tooltips = [
+            'Type automatisch bepalen uit map- of bestandsnaam (original/stage/tuned).',
+            'Expliciet als origineel registreren (fabriekssoftware).',
+            'Expliciet als getunede versie registreren.',
+            'Nog onbekend — later classificeren met de knoppen hieronder.']
+        model = self.kind.model()
+        for index, tooltip in enumerate(kind_tooltips):
+            model.item(index).setToolTip(tooltip)
+        kind_row.addWidget(self.kind)
+        kind_row.addStretch(1)
+        layout.addLayout(kind_row)
         self.file_hint = QLabel()
         self.file_hint.setWordWrap(True)
         layout.addWidget(self.file_hint)
-        self.button(layout, 'Map importeren', self.import_folder)
+        import_row = QHBoxLayout()
+        one_btn = QPushButton('BIN/ORI importeren (één bestand)…')
+        one_btn.clicked.connect(self.import_single_file)
+        import_row.addWidget(one_btn)
+        folder_btn = QPushButton('Hele map importeren…')
+        folder_btn.clicked.connect(self.import_folder)
+        import_row.addWidget(folder_btn)
+        import_row.addStretch(1)
+        layout.addLayout(import_row)
         self.button(layout, 'Zoeken / vernieuwen', self.refresh)
         self.file_table = self.table(layout, ['ID', 'Bestand', 'Type', 'Bytes', 'ECU', 'SW', 'HW', 'Stage', 'Klant', 'Project'])
         self.button(layout, 'Selectie → Original', lambda: self.reclassify_selected('original'))
@@ -322,11 +482,63 @@ class MainWindow(QMainWindow):
         self.button(layout, 'Metadata geselecteerd bestand wijzigen', self.edit_metadata)
 
     def import_folder(self):
-        folder = QFileDialog.getExistingDirectory(self, 'Databasebron kiezen')
+        folder = QFileDialog.getExistingDirectory(self, 'Map met BIN/ORI/OLS kiezen')
         kind = self.kind.currentText()
         if folder:
             self.run_job(lambda progress: self.repo.import_folder(folder, kind, progress),
-                         lambda result: QMessageBox.information(self, 'Import', json.dumps(result, ensure_ascii=False, indent=2)))
+                         lambda result: self.safe(lambda: self.show_import_result(result)))
+
+    def import_single_file(self):
+        """Eén BIN/ORI-bestand importeren met het gekozen type."""
+        path, _filter = QFileDialog.getOpenFileName(
+            self, 'BIN/ORI-bestand kiezen', '', 'ECU-bestanden (*.bin *.ori);;Alle bestanden (*)')
+        if not path:
+            return
+        kind = self.kind.currentText()
+
+        def operation(progress):
+            file_id = self.repo.import_file(Path(path), kind)
+            return self.repo.file(file_id)
+
+        self.run_job(operation, job_name='bestand importeren',
+                     callback=lambda row: self.safe(
+                         lambda: self.show_single_import(row)))
+
+    def show_single_import(self, row):
+        self.refresh()
+        known = [f"{field}: {row[field]}" for field in
+                 ('ecu_family', 'hardware_number', 'software_number',
+                  'calibration_number') if row.get(field)]
+        QMessageBox.information(
+            self, 'Import gelukt',
+            f"'{row['filename']}' is geïmporteerd als bestand ID {row['id']} "
+            f"(type: {row['file_type']}, {row['file_size']} bytes).\n\n"
+            + ('Automatisch herkend:\n  ' + '\n  '.join(known) if known else
+               'Geen automatische herkenning — vul eventueel metadata in via '
+               "'Metadata bewerken', of classificeer met de knoppen onder de tabel.")
+            + '\n\nTip: bevestigde Original→Tuned-paren zijn de brandstof voor '
+              'patronen en de Tune Bouwer.')
+
+    def show_import_result(self, result):
+        self.refresh()
+        error_count = len(result.get('errors') or [])
+        if error_count:
+            first_errors = '\n'.join(
+                f"  • {item['path']}: {item['error']}"
+                for item in (result['errors'][:5]))
+            error_block = f"\n\nFouten ({error_count}, eerste {min(5, error_count)}):\n{first_errors}"
+        else:
+            error_block = '\n\nGeen fouten.'
+        summary = (f"Import klaar.\n\n"
+                   f"BIN/ORI verwerkt: {result.get('processed', 0)} · "
+                   f"OLS-projecten: {result.get('projects', 0)} · "
+                   f"overgeslagen (al gedaan): {result.get('skipped', 0)}"
+                   f"{error_block}\n\n"
+                   "Bestanden staan nu in de tabel. Classificeer 'unknown' met de "
+                   "knoppen onder de tabel, of laat auto-classificatie op het "
+                   "dashboard draaien (alleen uniek bewijs wordt automatisch "
+                   "toegepast).")
+        QMessageBox.information(self, 'Mapimport', summary)
 
     def edit_metadata(self):
         file_id = self.selected_id(self.file_table)
@@ -524,10 +736,10 @@ class MainWindow(QMainWindow):
                       'Original → Tuned-paren plus kandidaat-DNA opgebouwd. De bron-OLS blijft altijd ongewijzigd.')
         text.setWordWrap(True)
         layout.addWidget(text)
-        self.button(layout, 'WinOLS .ols-project importeren', self.import_project)
+        self.button(layout, 'OLS-project importeren (één bestand)…', self.import_project)
         self.project_table = self.table(layout, ['ID', 'Project', 'Voorgesteld', 'Reden', 'Bytes', 'SHA256', 'Geïmporteerd'])
         self.button(layout, 'Geselecteerd project veilig inspecteren', self.inspect_project)
-        self.button(layout, 'Geselecteerd project volledig automatisch verwerken', self.auto_process_selected)
+        self.button(layout, 'Geselecteerd project volledig automatisch verwerken (extract + paren + DNA)', self.auto_process_selected)
         self.project_output = QPlainTextEdit()
         self.project_output.setReadOnly(True)
         layout.addWidget(self.project_output)

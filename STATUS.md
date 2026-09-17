@@ -2,7 +2,24 @@
 
 Datum: 2026-09-10 (bijgewerkt na V3-ronde)
 
-## V7-status (Tune Bouwer) — actueel
+## V7.1-status (professionele import + in-app handleiding) — actueel
+
+**133/133 tests groen.**
+
+- **BIN/ORI 1-voor-1 import** via de Files-pagina: bestandskeuzedialoog met
+  expliciete typekeuze (auto/original/tuned/unknown, met uitleg per optie);
+  na import een heldere melding met bestands-ID, herkende metadata en de
+  vervolgstap.
+- **OLS 1-voor-1 import** via de WinOLS-pagina (bestaand, nu duidelijker
+  benoemd) met volledige verwerkingsmelding (versies/rollen/paren/DNA).
+- Mapimport-rapport toont nu BIN-count, OLS-count, overgeslagen en fouten
+  met concrete paden.
+- **Nieuwe pagina "Uitleg & Handleiding"** (START-groep): de complete
+  in-app handleiding — de hoofdlijn in 5 stappen, élke pagina één voor één
+  uitgelegd (31 pagina's), veiligheidsregels, en oplossingen voor bekende
+  fouten (limiet, ontbrekende kopieën, taak bezig).
+
+## V7-status (Tune Bouwer)
 
 **133/133 tests groen** (12 nieuwe Tune Bouwer-tests). De eindstap van de
 keten is er: **origineel erin → getunede KANDIDAAT terug**, met stage- en
