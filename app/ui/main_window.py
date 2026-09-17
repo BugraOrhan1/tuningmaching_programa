@@ -77,25 +77,22 @@ inhoud. Alles wat een scan vindt, verschijnt óók onderaan de Files-pagina.<br>
 extraheert bewezen binaries naar Files, bepaalt Original/Tuned-rollen uit
 expliciete WinOLS-labels en stelt paren voor bij gelijke werkelijke
 imagegrootte.<br>
-<b>OLS Explorer</b> — kijk ín een project: versies, rollen, binaries, bewijs per
-relatie.<br>
-<b>OLS Object Review</b> — objecten waar de app niets van durft te zeggen blijf
+<b>OLS Explorer &amp; Review</b> — kijk ín een project (versies, rollen,
+binaries, bewijs per relatie) én beoordeel onbekende objecten: die blijven
 UNKNOWN tot jij ze beoordeelt (technicus-bewijs wint altijd).</p>
 
 <h3>ANALYSE</h3>
-<p><b>Analyze BIN</b> — exacte bytevergelijking van een nieuwe BIN met alle
-originals; laat matching + bekende wijzigingen zien met scores en bewijs.<br>
-<b>New BIN Analyse (V3)</b> — het volledige rapport: herkenning, gerelateerde
-projecten, identiteiten, patronen, alle scoreonderdelen (geen zwarte doos).
-Hier staat ook de WHY-tabel: waarom dit percentage.<br>
+<p><b>BIN Analyseren (V3)</b> — élke BIN-analyse op één pagina: bovenin de
+snelle bytevergelijking met alle originals, daaronder het volledige rapport
+(herkenning, DNA-matches, identiteiten, alle scoreonderdelen en de WHY-tabel:
+waarom dit percentage).<br>
 <b>Tune Bouwer (V7)</b> — origineel erin, getunede kandidaat terug: kies stage
 en add-ons (pops &amp; bang, vmax, …). Recepten komen uitsluitend uit bevestigde
 paren; elke regio alleen met regionaal bewijs. Output = nieuw bestand +
 waarschuwingen (checksums NIET gecorrigeerd — eerst WinOLS-controle).<br>
-<b>Diff Viewer</b> — byte-voor-byte verschil tussen een bevestigd paar, met
-hex-venster. Oranje = gewijzigd.<br>
-<b>Region Viewer</b> — de wijzigingsregio's van een paar met context, klasse
-(calibratie/checksum/code) en bewijs.<br>
+<b>Diff &amp; Regio's</b> — één bevestigd paar volledig bekijken: byte-voor-byte
+verschil met hex-venster (oranje = gewijzigd) én de wijzigingsregio's met
+klasse (calibratie/checksum/code), entropie en bewijs.<br>
 <b>Vergelijk A|B (V6)</b> — twee bestanden naast elkaar: zelfde ECU-image?
 Corresponderende structuren? Original→Tuned-ketting van beide kanten.<br>
 <b>Zoeken</b> — doorzoek alles op ECU, SW/HW, namen.</p>
@@ -123,11 +120,10 @@ Structuur ≠ functie: namen zoals Boost/Torque komen er NOOIT zonder bronbewijs
 Elke actie wordt gelogd (audit) en telt mee.</p>
 
 <h3>FAMILIES &amp; LEARNING</h3>
-<p><b>ECU Families</b> — groepen ECU's op bewijs; alleen goedgekeurde families
-filteren de matching.<br>
-<b>Software Families</b> — softwarevarianten herkend uit zichtbare
-software-identifiers.<br>
-<b>Calibration Families</b> — kalibratiegroepen per softwarefamilie.<br>
+<p><b>Families (ECU / Software / Calibratie)</b> — alle familiakennis op één
+pagina: ECU-families uit BIN-bewijs (alleen goedgekeurd filtert de matching),
+softwarefamilies uit zichtbare identifiers, calibration families als
+goedgekeurde databasekennis.<br>
 <b>Signatures</b> — bytehandtekeningen (minimaal 3 bestanden, pas verified na
 jouw goedkeuring) om herkenning te versnellen.<br>
 <b>Learning</b> — experimenteel: nabijheid op byteverdelingen. De exacte
@@ -210,12 +206,9 @@ class MainWindow(QMainWindow):
         self.build_library()
         self.build_winols()
         self.build_ols_explorer()
-        self.build_ols_review()
         self.nav_section('ANALYSE')
         self.build_analyzer()
-        self.build_new_bin()
-        self.build_diff()
-        self.build_region_viewer()
+        self.build_diff_regions()
         self.build_compare_workspace()
         self.build_tune_builder()
         self.build_search()
@@ -230,9 +223,7 @@ class MainWindow(QMainWindow):
         self.build_map_structures()
         self.build_knowledge_review()
         self.nav_section('FAMILIES & LEARNING')
-        self.build_ecu_families()
-        self.build_software_families()
-        self.build_calibration_families()
+        self.build_families()
         self.build_signatures()
         self.build_learning()
         self.nav_section('SYSTEEM')
@@ -424,8 +415,8 @@ class MainWindow(QMainWindow):
                     self.auto_process_project)
         self.button(layout, '4 — Paren bevestigen en patronen bouwen',
                     lambda: self.navigate('Original/Tuned Pairs'))
-        self.button(layout, '5 — Nieuwe BIN analyseren met kennis (New BIN-rapport)',
-                    lambda: self.navigate('New BIN Analyse (V3)'))
+        self.button(layout, '5 — Nieuwe BIN analyseren met kennis (rapport + WHY)',
+                    lambda: self.navigate('BIN Analyseren (V3)'))
         self.button(layout, '6 — Getunede kandidaat bouwen (stage + add-ons)',
                     lambda: self.navigate('Tune Bouwer (V7)'))
         self.button(layout, '7 — Onbekende bestanden automatisch classificeren (bewijsregel)',
@@ -693,13 +684,28 @@ class MainWindow(QMainWindow):
         self.run_job(lambda p: self.service.strategies(ids))
 
     def build_analyzer(self):
-        layout = self.page('Analyze BIN', 'Exacte bytevergelijking met alle originals. Bekende wijzigingen worden uitsluitend uit bevestigde paren getoond.')
-        self.button(layout, 'Nieuwe BIN kiezen en analyseren', self.analyze)
+        layout = self.page('BIN Analyseren (V3)', 'Één pagina voor élke BIN-analyse: '
+                           'bovenin de snelle bytevergelijking met alle originals (bekende '
+                           'wijzigingen alleen uit bevestigde paren), daaronder het volledige '
+                           'V3-rapport met herkenning, DNA-matches, identiteiten en WHY-uitleg. '
+                           'Analyse-only; geen BIN wordt gewijzigd.')
+        self.button(layout, 'Nieuwe BIN kiezen en analyseren (snel: bytevergelijking)', self.analyze)
         self.match_table = self.table(layout, ['ID', 'Original', 'Overall %', 'Binary %', 'Compatibiliteit %', 'Status'])
         self.output = QPlainTextEdit()
         self.output.setReadOnly(True)
         layout.addWidget(self.output)
         self.button(layout, 'Huidig rapport exporteren (JSON + CSV)', self.export)
+        layout.addWidget(QLabel('— VOLLEDIG RAPPORT (V3): herkenning, gerelateerde '
+                                'projecten/originals, Tuning DNA-matches, structuurkandidaten '
+                                'en alle onderliggende scores —'))
+        self.button(layout, 'Geselecteerd bestand uit Files volledig analyseren', self.run_new_bin_report)
+        self.new_bin_output = QTextBrowser()
+        self.new_bin_output.setOpenExternalLinks(False)
+        layout.addWidget(self.new_bin_output)
+        layout.addWidget(QLabel('WHY THIS MATCH? (component × gewicht = bijdrage, met '
+                                'bewijsaantallen en negatieve aftrek):'))
+        self.why_table = self.table(layout, ['Component', 'Waarde', 'Gewicht',
+                                             'Bijdrage', 'Bewijs (n)', 'Rol'])
 
     def analyze(self):
         path, _ = QFileDialog.getOpenFileName(self, 'Analyze New BIN', '', 'Raw BIN (*.bin *.ori)')
@@ -713,7 +719,7 @@ class MainWindow(QMainWindow):
         if 'matches' in report:
             count = sum(m['compatibility_confidence'] >= 90 for m in report['matches'])
             self.last_confidence.setText(f'High Confidence Matches: {count} in laatste analyse (≥ 90; heuristisch)')
-        self.nav.setCurrentRow(3)
+        self.navigate('BIN Analyseren (V3)')
 
     def export(self, report=None):
         report = self.report if report is None else report
@@ -724,8 +730,12 @@ class MainWindow(QMainWindow):
             result = export_report(report, Path(folder))
             QMessageBox.information(self, 'Rapport opgeslagen', '\n'.join(result.values()))
 
-    def build_diff(self):
-        layout = self.page('Diff Viewer', 'Offsets zijn [start, end): het eindadres telt niet mee. Oranje bytes zijn gewijzigd; -- betekent ontbrekend.')
+    def build_diff_regions(self):
+        layout = self.page("Diff & Regio's", 'Alles over één bevestigd paar op één pagina. '
+                           'Bovenin het byteverschil: offsets zijn [start, end) — het eindadres '
+                           'telt niet mee, oranje bytes zijn gewijzigd, -- betekent ontbrekend. '
+                           'Onderin de TuningRegions met klasse, entropie en evidence; '
+                           'checksum-kandidaten zijn gemarkeerd en nooit tuninggebied.')
         self.diff_table = self.table(layout, ['Start', 'Einde exclusief', 'Lengte', 'Gewijzigde bytes', '%'])
         self.diff_table.cellClicked.connect(lambda row, col: self.safe(lambda: self.jump_diff(row)))
         self.offset = QLineEdit('0x0')
@@ -734,6 +744,15 @@ class MainWindow(QMainWindow):
         self.hex_view = QTextBrowser()
         layout.addWidget(self.hex_view)
         self.button(layout, 'Diffrapport exporteren', self.export_diff)
+        layout.addWidget(QLabel("— REGIO'S (TuningRegions met klasse/entropie/evidence) —"))
+        self.region_pair_table = self.table(layout, ['Pair-ID', 'Naam', 'Bevestigd'])
+        self.button(layout, "Regio's van geselecteerd paar laden", self.load_pair_regions)
+        self.region_table = self.table(layout, ['ID', 'Start', 'Einde', 'Lengte', 'Gewijzigd',
+                                                'Klasse', 'Entropy o→n', 'Confidence', 'Status'])
+        self.region_detail = QPlainTextEdit()
+        self.region_detail.setReadOnly(True)
+        layout.addWidget(self.region_detail)
+        self.region_table.selectionModel().currentRowChanged.connect(self.show_region_detail)
 
     def export_diff(self):
         if self.diff_report is None:
@@ -748,7 +767,7 @@ class MainWindow(QMainWindow):
             self.populate(self.diff_table, [{**b, 'start': hex(b['start_offset']), 'end': hex(b['end_offset'])} for b in report['blocks']], ['start', 'end', 'length', 'changed_bytes', 'change_percentage'])
             self.offset.setText(hex(report['blocks'][0]['start_offset']) if report['blocks'] else '0x0')
             self.show_hex()
-            self.nav.setCurrentRow(4)
+            self.navigate("Diff & Regio's")
         self.run_job(lambda p: self.service.diff(pair_id), ready)
 
     def jump_diff(self, row):
@@ -775,20 +794,20 @@ class MainWindow(QMainWindow):
         self.button(layout, 'Clusters opnieuw berekenen', lambda: self.run_job(self.service.clusters))
         layout.addStretch()
 
-    def build_ecu_families(self):
-        layout = self.page('ECU Families', 'Alleen door een technicus goedgekeurde ECU-families filteren de hiërarchische matcher.')
+    def build_families(self):
+        layout = self.page('Families (ECU / Software / Calibratie)', 'Alle familiakennis op '
+                           'één pagina, met per soort eigen bewijs: ECU-families uit BIN-bewijs '
+                           '(alleen goedgekeurd = matcher-filter), softwarefamilies uit '
+                           'herhaalde zichtbare identifiers, calibration families als '
+                           'goedgekeurde databasekennis. Niets wordt automatisch verified.')
+        layout.addWidget(QLabel('— ECU-FAMILIES (alleen goedgekeurd filtert de matcher) —'))
         self.button(layout, 'Familievoorstellen genereren uit BIN-bewijs', lambda: self.run_job(lambda p: self.repo.propose_families(), self.show_report))
         self.ecu_family_table = self.table(layout, ['ID', 'Familie', 'Type', 'Verified', 'Files', 'Original', 'Tuned'])
         self.button(layout, 'Signature-candidates voor geselecteerde ECU-family', self.discover_signatures)
-
-    def build_software_families(self):
-        layout = self.page('Software Families', 'Softwarefamilies worden voorgesteld uit herhaalde, zichtbare software-identifiers.')
+        layout.addWidget(QLabel('— SOFTWARE-FAMILIES (herhaalde, zichtbare software-identifiers) —'))
         self.software_family_table = self.table(layout, ['ID', 'Familie', 'Pattern', 'Bytes', 'Verified', 'Files'])
         self.button(layout, 'Signature-candidates voor geselecteerde software-family', self.discover_software_signatures)
-        layout.addStretch()
-
-    def build_calibration_families(self):
-        layout = self.page('Calibration Families', 'V2 houdt calibration families als goedgekeurde databasekennis bij; change clusters blijven functioneel-neutraal.')
+        layout.addWidget(QLabel('— CALIBRATION-FAMILIES (goedgekeurde databasekennis) —'))
         self.calibration_family_table = self.table(layout, ['ID', 'Naam', 'Software family', 'Verified'])
         layout.addStretch()
 
@@ -903,15 +922,6 @@ class MainWindow(QMainWindow):
         folder = QFileDialog.getExistingDirectory(self, 'WinOLS-projectmap')
         if folder:
             open_project_folder(folder)
-
-    def build_ols_review(self):
-        layout = self.page('OLS Object Review', 'Controleer onbekende interne OLS-objecten. De bron-OLS blijft altijd ongewijzigd.')
-        self.ols_object_table = self.table(layout, ['ID', 'Project', 'Interne naam', 'Type', 'Bytes', 'Rol', 'Confidence', 'Evidence'])
-        self.ols_review_role = QComboBox()
-        self.ols_review_role.addItems(['original', 'tuned', 'other', 'unknown'])
-        layout.addWidget(self.ols_review_role)
-        self.button(layout, 'Geselecteerd object bevestigen', self.review_ols_object)
-        layout.addStretch()
 
     def review_ols_object(self):
         object_id = self.selected_id(self.ols_object_table)
@@ -1123,19 +1133,6 @@ class MainWindow(QMainWindow):
                              f"contra {alignment['contradicting_evidence']})")
         self.pattern_detail.setPlainText('\n'.join(lines))
 
-    def build_region_viewer(self):
-        layout = self.page('Region Viewer', 'Inspecteer TuningRegions van een bevestigd paar: hex '
-                           'voor/na, signatures, entropie, klasse en evidence. Checksum-kandidaten '
-                           'zijn gemarkeerd en nooit tuninggebied.')
-        self.region_pair_table = self.table(layout, ['Pair-ID', 'Naam', 'Bevestigd'])
-        self.button(layout, 'Regio\'s van geselecteerd paar laden', self.load_pair_regions)
-        self.region_table = self.table(layout, ['ID', 'Start', 'Einde', 'Lengte', 'Gewijzigd',
-                                                'Klasse', 'Entropy o→n', 'Confidence', 'Status'])
-        self.region_detail = QPlainTextEdit()
-        self.region_detail.setReadOnly(True)
-        layout.addWidget(self.region_detail)
-        self.region_table.selectionModel().currentRowChanged.connect(self.show_region_detail)
-
     def load_pair_regions(self):
         pair_id = self.selected_id(self.region_pair_table)
         self.regions = self.service.regions(pair_id)['regions']
@@ -1175,19 +1172,6 @@ class MainWindow(QMainWindow):
             lines.extend(['', 'In patronen: ' + ', '.join(
                 f"#{p['id']} ({p['status']})" for p in detail['patterns'])])
         self.region_detail.setPlainText('\n'.join(lines))
-
-    def build_new_bin(self):
-        layout = self.page('New BIN Analyse (V3)', 'Volledig rapport: herkenning, gerelateerde '
-                           'projecten/originals, Tuning DNA-matches, structuurkandidaten en alle '
-                           'onderliggende scores. Analyse-only; geen BIN wordt gewijzigd.')
-        self.button(layout, 'Geselecteerd bestand uit Files volledig analyseren', self.run_new_bin_report)
-        self.new_bin_output = QTextBrowser()
-        self.new_bin_output.setOpenExternalLinks(False)
-        layout.addWidget(self.new_bin_output)
-        layout.addWidget(QLabel('WHY THIS MATCH? (component × gewicht = bijdrage, met '
-                                'bewijsaantallen en negatieve aftrek):'))
-        self.why_table = self.table(layout, ['Component', 'Waarde', 'Gewicht',
-                                             'Bijdrage', 'Bewijs (n)', 'Rol'])
 
     def run_new_bin_report(self):
         file_id = self.selected_id(self.file_table)
@@ -1234,12 +1218,22 @@ class MainWindow(QMainWindow):
         self.new_bin_output.setPlainText('\n'.join(lines))
 
     def build_ols_explorer(self):
-        layout = self.page('OLS Explorer', 'Project → versies → binaries → objecten, met per relatie '
-                           'confidence en bewijs. Relaties zonder bewijs staan expliciet als UNKNOWN.')
+        layout = self.page('OLS Explorer & Review', 'Alles over OLS-projecten op één pagina: '
+                           'project → versies → binaries → objecten met per relatie confidence '
+                           'en bewijs (zonder bewijs expliciet UNKNOWN), en onderin de review '
+                           'van onbekende objecten — jouw beoordeling is definitief bewijs. '
+                           'De bron-OLS blijft altijd ongewijzigd.')
         self.explorer_table = self.table(layout, ['ID', 'Project', 'Bytes', 'SHA256'])
         self.button(layout, 'Graph van geselecteerd project tonen', self.show_ols_graph)
         self.ols_graph_output = QTextBrowser()
         layout.addWidget(self.ols_graph_output)
+        layout.addWidget(QLabel('— OBJECT REVIEW: onbekende interne objecten zelf beoordelen —'))
+        self.ols_object_table = self.table(layout, ['ID', 'Project', 'Interne naam', 'Type', 'Bytes', 'Rol', 'Confidence', 'Evidence'])
+        self.ols_review_role = QComboBox()
+        self.ols_review_role.addItems(['original', 'tuned', 'other', 'unknown'])
+        layout.addWidget(self.ols_review_role)
+        self.button(layout, 'Geselecteerd object bevestigen', self.review_ols_object)
+        layout.addStretch()
 
     def show_ols_graph(self):
         project_id = self.selected_id(self.explorer_table)

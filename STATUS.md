@@ -2,7 +2,23 @@
 
 Datum: 2026-09-10 (bijgewerkt na V3-ronde)
 
-## V7.4-status (Library (V5) zichtbaar op Files) — actueel
+## V7.5-status (pagina-consolidatie: dubbele pagina's samengevoegd) — actueel
+
+**136/136 tests groen. 31 → 26 pagina's (nav 37 → 32), alle functies behouden.**
+
+- **BIN Analyseren (V3)** = oude "Analyze BIN" + "New BIN Analyse (V3)" op één
+  pagina: snel-match tabel + rapport + WHY-tabel samen.
+- **Diff & Regio's** = "Diff Viewer" + "Region Viewer": byteverschil + hex +
+  TuningRegions met klasse/entropie/evidence op één pagina.
+- **OLS Explorer & Review** = "OLS Explorer" + "OLS Object Review".
+- **Families (ECU / Software / Calibratie)** = drie familiepagina's samen.
+- Nav-sprongen (show_report/open_diff/dashboard-snelstart) gebruiken nu
+  navigate()-op-naam i.p.v. vaste rij-indexen (robuust tegen paginavolgorde).
+- Widget-attributen ongewijzigd → alle acties/refresh-methodes werken
+  onveranderd; handleiding bijgewerkt; navigatie-tests dekken de nieuwe
+  namen én dat de oude namen weg zijn.
+
+## V7.4-status (Library (V5) zichtbaar op Files)
 
 **136/136 tests groen.**
 

@@ -72,18 +72,23 @@ def test_gui_smoke(service, pair, monkeypatch, tmp_path):
     window = MainWindow(service)
     window.show()
     application.processEvents()
-    assert window.page_count == 31  # …+ Tune Bouwer (V7) + Uitleg & Handleiding
-    assert window.nav.count() == 37  # 31 pagina's + 6 groepskoppen
+    assert window.page_count == 26  # na consolidatie: dubbele pagina's samengevoegd
+    assert window.nav.count() == 32  # 26 pagina's + 6 groepskoppen
     assert window.navigate('Uitleg & Handleiding') is True
     # gebruikersvriendelijkheid: direct navigeren en paginazoeker werken
     assert window.navigate('Library (V5)') is True
+    assert window.navigate('BIN Analyseren (V3)') is True
+    assert window.navigate("Diff & Regio's") is True
+    assert window.navigate('OLS Explorer & Review') is True
+    assert window.navigate('Families (ECU / Software / Calibratie)') is True
+    assert window.navigate('Analyze BIN') is False  # samengevoegd in BIN Analyseren
     assert window.navigate('Bestaat Niet') is False
     window.filter_nav('OLS')
     visible = [window.nav.item(row).text() for row in range(window.nav.count())
                if not window.nav.item(row).isHidden()
                and window.nav.item(row).data(Qt.ItemDataRole.UserRole) == 'page']
     window.filter_nav('')
-    assert {'WinOLS', 'OLS Explorer'} <= set(visible)
+    assert {'WinOLS', 'OLS Explorer & Review'} <= set(visible)
 
     assert window.file_table.rowCount() == 2
     project = tmp_path / 'gui-project.ols'
