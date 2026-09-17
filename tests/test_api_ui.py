@@ -100,6 +100,29 @@ def test_gui_smoke(service, pair, monkeypatch, tmp_path):
     window.close()
 
 
+def test_files_page_shows_library_locations(service, pair, monkeypatch, tmp_path):
+    """Library (V5)-locaties zijn ook op de Files-pagina zichtbaar en
+    selecteerbaar voor import naar Files."""
+    monkeypatch.setenv('QT_QPA_PLATFORM', 'offscreen')
+    from PySide6.QtWidgets import QApplication
+    from app.ui.main_window import MainWindow
+    application = QApplication.instance() or QApplication([])
+    source = tmp_path / 'LibGUI'
+    source.mkdir()
+    (source / 'lib_test.bin').write_bytes(b'X' * 512)
+    (source / 'lib_test.ols').write_bytes(b'OLS\x00gui')
+    root = service.library.add_root(str(source), 'GuiRoot')
+    service.library.scan_root(root['id'])
+    window = MainWindow(service)
+    window.refresh()
+    assert window.location_table.rowCount() == 2
+    window.location_table.selectRow(0)
+    selected = window._selected_locations()
+    assert len(selected) == 1 and selected[0]['path'].endswith('.bin')
+    assert '2 locatie(s)' in window.location_hint.text()
+    window.close()
+
+
 def test_first_run_wizard_pages(service, monkeypatch):
     """Regressie voor de Windows-exe-crash: PySide6 6.11+ heeft geen
     QWizard.registerField meer. De eerste-start-wizard moet op élke

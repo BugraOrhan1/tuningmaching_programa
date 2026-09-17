@@ -1,6 +1,7 @@
 """V5 Local Library Engine: content identity, locations, dedup, incremental,
 resume, offline — bronbestanden blijven altijd onaangeroerd."""
 import hashlib
+from pathlib import Path
 
 import pytest
 
@@ -167,3 +168,37 @@ def test_ols_indexed_as_first_class_type(lib):
     ols_rows = [row for row in service.library.locations(root["id"], "b.ols")]
     assert ols_rows and ols_rows[0]["file_type"] == "ols"
     assert len(ols_rows[0]["sha256"]) == 64
+
+
+def test_all_locations_over_roots_and_import_to_files(lib):
+    """Files-pagina-integratie: élke Library-locatie is over alle roots heen
+    zichtbaar en kan één voor één als beheerkopie naar Files worden gehaald
+    (bronbestand blijft onaangeroerd)."""
+    service, source, before = lib
+    root = service.library.add_root(str(source), "Lib")
+    service.library.scan_root(root["id"])
+
+    all_rows = service.library.all_locations()
+    assert len(all_rows) == 4
+    assert {row["root_name"] for row in all_rows} == {"Lib"}
+    by_name = {row["filename"]: row for row in all_rows}
+    assert by_name["a.bin"]["extension"] == ".bin"
+    assert by_name["b.ols"]["file_type"] == "ols"
+    assert len(by_name["a.bin"]["sha256"]) == 64
+
+    # zoeken werkt op de verenigde lijst
+    assert len(service.library.all_locations(query="BMW")) == 2  # pad-match
+    assert len(service.library.all_locations(query="a.bin")) == 1
+    assert len(service.library.all_locations(query="a_copy")) == 1
+    assert len(service.library.all_locations(query="b.ols")) == 1
+    assert service.library.all_locations(query="b.ols")[0]["root_name"] == "Lib"
+
+    # één voor één naar Files (beheerkopie), bron blijft bestaan
+    file_id = service.repo.import_file(
+        Path(by_name["a.bin"]["path"]), "original")
+    row = service.repo.file(file_id)
+    assert row["filename"] == "a.bin" and row["file_type"] == "original"
+    assert Path(by_name["a.bin"]["path"]).exists()
+    assert Path(by_name["a.bin"]["path"]).read_bytes() == b"A" * 4096
+
+

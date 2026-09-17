@@ -2,7 +2,24 @@
 
 Datum: 2026-09-10 (bijgewerkt na V3-ronde)
 
-## V7.3-status (wizard-crash gefixt — de echte exe-oorzaak) — actueel
+## V7.4-status (Library (V5) zichtbaar op Files) — actueel
+
+**136/136 tests groen.**
+
+- **Files-pagina toont nu ook de Library (V5)-bestanden**: tweede tabel met
+  élke `file_locations`-rij over élke root (bestand, root, type, bytes,
+  SHA-8, status), gevuld bij elke refresh (met paginazoeker-filter).
+- Overgang Library → Files in één klik, één voor één:
+  "Selectie → Files (BIN/ORI, type hierboven)" maakt beheerkopieën met de
+  gekozen type-instelling (bronbestand blijft onaangeroerd);
+  "Selectie → WinOLS verwerken (.ols)" verwerkt een geselecteerd
+  .ols-project volledig (versies/paren/DNA).
+- Nieuw: `LibraryEngine.all_locations(query, limit)` (join met
+  `library_roots` + `content_objects`); tests in `test_library.py` +
+  `test_api_ui.py` (GUI-integratie).
+- Handleiding (Files/Library-sectie) bijgewerkt.
+
+## V7.3-status (wizard-crash gefixt — de echte exe-oorzaak)
 
 **134/134 tests groen.**
 

@@ -62,12 +62,17 @@ de genummerde snelstart. Begin hier.<br>
 (<i>auto</i> = uit naam/map; <i>original</i>/<i>tuned</i> = expliciet;
 <i>unknown</i> = nog onbekend), importeer daarna één bestand of een hele map.
 Onder de tabel: selecteer rijen en zet ze alsnog op Original of Tuned
-(Ctrl+klik = meerdere). Metadata (ECU/SW/HW/stage/klant) bewerk je per rij.<br>
+(Ctrl+klik = meerdere). Metadata (ECU/SW/HW/stage/klant) bewerk je per rij.
+<b>Onderaan deze pagina staan ook de Library-bestanden (V5)</b>: alles wat de
+Library-scans op je bronmappen vonden, met root, type, grootte en SHA-8.
+Selecteer rijen en gebruik "Selectie → Files (BIN/ORI)" om ze één voor één
+naar Files te halen (bron blijft altijd staan), of "→ WinOLS verwerken"
+voor .ols-projecten.<br>
 <b>Library (V5)</b> — registreer hele bronmappen/schijven (D:\Tuning, E:\WinOLS…).
 Bestanden blijven op hun plek; de app indexeert pad + SHA256. Scans zijn
 incrementeel (alleen nieuwe/gewijzigde files worden opnieuw gelezen) en hervatten
 na onderbreking. Daarna "analyseren" verwerkt nieuwe content één keer per unieke
-inhoud.<br>
+inhoud. Alles wat een scan vindt, verschijnt óók onderaan de Files-pagina.<br>
 <b>WinOLS</b> — importeer een .ols-project (één bestand). De app leest versies,
 extraheert bewezen binaries naar Files, bepaalt Original/Tuned-rollen uit
 expliciete WinOLS-labels en stelt paren voor bij gelijke werkelijke
@@ -480,6 +485,23 @@ class MainWindow(QMainWindow):
         self.button(layout, 'Selectie → Unknown', lambda: self.reclassify_selected('unknown'))
         self.button(layout, 'Unknown automatisch classificeren op evidence', self.auto_classify)
         self.button(layout, 'Metadata geselecteerd bestand wijzigen', self.edit_metadata)
+        layout.addWidget(QLabel(
+            'Library-bestanden (V5) — alles wat de Library-scans op je geregistreerde '
+            'bronmappen vonden. De schijf blijft ongewijzigd; selecteer rij(en) '
+            '(Ctrl+klik = meerdere) om ze hieronder alsnog naar Files te halen.'))
+        self.location_table = self.table(layout, ['ID', 'Bestand', 'Root', 'Type', 'Bytes', 'SHA-8', 'Status'])
+        lib_row = QHBoxLayout()
+        lib_bin_btn = QPushButton('Selectie → Files (BIN/ORI, type hierboven)')
+        lib_bin_btn.clicked.connect(self.import_location_files)
+        lib_row.addWidget(lib_bin_btn)
+        lib_ols_btn = QPushButton('Selectie → WinOLS verwerken (.ols, één voor één)')
+        lib_ols_btn.clicked.connect(self.import_location_ols)
+        lib_row.addWidget(lib_ols_btn)
+        lib_row.addStretch(1)
+        layout.addLayout(lib_row)
+        self.location_hint = QLabel()
+        self.location_hint.setWordWrap(True)
+        layout.addWidget(self.location_hint)
 
     def import_folder(self):
         folder = QFileDialog.getExistingDirectory(self, 'Map met BIN/ORI/OLS kiezen')
@@ -518,6 +540,87 @@ class MainWindow(QMainWindow):
                "'Metadata bewerken', of classificeer met de knoppen onder de tabel.")
             + '\n\nTip: bevestigde Original→Tuned-paren zijn de brandstof voor '
               'patronen en de Tune Bouwer.')
+
+    def _selected_locations(self) -> list[dict]:
+        rows = []
+        selection = self.location_table.selectionModel().selectedRows()
+        for index in selection:
+            location_id = int(self.location_table.item(index.row(), 0).text())
+            row = (getattr(self, '_location_rows', {}) or {}).get(location_id)
+            if row:
+                rows.append(row)
+        return rows
+
+    def import_location_files(self):
+        """Geselecteerde Library-locaties als beheerkopie naar Files halen."""
+        locations = self._selected_locations()
+        if not locations:
+            QMessageBox.information(
+                self, 'Library → Files',
+                'Selecteer eerst rij(en) in de Library-tabel onderaan '
+                '(Ctrl+klik = meerdere).')
+            return
+        binary = [row for row in locations
+                  if (row.get('extension') or '').lower() in ('.bin', '.ori')]
+        if not binary:
+            QMessageBox.information(
+                self, 'Library → Files',
+                'Geen BIN/ORI in de selectie. Gebruik '
+                "\u201cSelectie → WinOLS verwerken\u201d voor .ols-bestanden.")
+            return
+        skipped_ols = len(locations) - len(binary)
+        kind = self.kind.currentText()
+
+        def operation(progress):
+            imported, errors = [], []
+            for index, row in enumerate(binary):
+                try:
+                    file_id = self.repo.import_file(Path(row['path']), kind)
+                    imported.append({'id': file_id, 'filename': row['filename']})
+                except (OSError, ValueError) as exc:
+                    errors.append({'path': row['path'], 'error': str(exc)})
+                progress(f'Library-import {index + 1}/{len(binary)}')
+            return {'imported': imported, 'errors': errors,
+                    'skipped_ols': skipped_ols}
+
+        self.run_job(operation, job_name='Library-bestand(en) naar Files',
+                     callback=lambda result: self.safe(
+                         lambda: self.show_location_import(result)))
+
+    def show_location_import(self, result):
+        self.refresh()
+        imported = result.get('imported') or []
+        errors = result.get('errors') or []
+        lines = [f"Naar Files geïmporteerd: {len(imported)}"]
+        lines += [f"  • ID {item['id']}: {item['filename']}"
+                  for item in imported[:8]]
+        if errors:
+            lines.append(f"Fouten: {len(errors)}")
+            lines += [f"  • {item['path']}: {item['error']}"
+                      for item in errors[:5]]
+        if result.get('skipped_ols'):
+            lines.append(f"Overgeslagen .ols: {result['skipped_ols']} — gebruik "
+                         "'Selectie → WinOLS verwerken'.")
+        QMessageBox.information(self, 'Library → Files', '\n'.join(lines))
+
+    def import_location_ols(self):
+        """Eén geselecteerd .ols-bestand uit de Library als WinOLS-project verwerken."""
+        locations = self._selected_locations()
+        projects = [row for row in locations
+                    if (row.get('extension') or '').lower() == '.ols']
+        if not projects:
+            QMessageBox.information(
+                self, 'Library → WinOLS',
+                'Selecteer een .ols-rij in de Library-tabel.')
+            return
+        if len(projects) > 1:
+            QMessageBox.information(
+                self, 'Library → WinOLS',
+                f"{len(projects)} projecten geselecteerd — één voor één: nu "
+                f"eerst '{projects[0]['filename']}'. Daarna de rest selecteren.")
+        path = projects[0]['path']
+        self.run_job(lambda progress: self.service.auto_process_ols(path),
+                     self.show_auto_process_result)
 
     def show_import_result(self, result):
         self.refresh()
@@ -1643,6 +1746,23 @@ class MainWindow(QMainWindow):
         self.refresh()
 
     def refresh(self):
+        try:
+            if hasattr(self, 'location_table'):
+                rows = self.service.library.all_locations(
+                    self.search.text() if hasattr(self, 'search') else '')
+                self._location_rows = {row['id']: row for row in rows}
+                self.populate(self.location_table,
+                              [dict(row, sha8=(row.get('sha256') or '')[:8],
+                                    status=row.get('analysis_state')
+                                    or row.get('scan_status') or '')
+                               for row in rows],
+                              ['id', 'filename', 'root_name', 'extension',
+                               'size', 'sha8', 'status'])
+                self.location_hint.setText(
+                    f"{len(rows)} locatie(s) zichtbaar (max 500). Status NEW = "
+                    "nog niet geanalyseerd in de Library.")
+        except Exception:
+            pass
         try:
             if hasattr(self, 'dashboard_status'):
                 roots = self.service.library.roots()

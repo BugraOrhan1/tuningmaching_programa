@@ -326,6 +326,19 @@ class LibraryEngine:
                WHERE l.root_id=? AND (l.filename LIKE ? OR l.path LIKE ? OR c.sha256 LIKE ?)
                ORDER BY l.path LIMIT ?""", (root_id, like, like, like, limit))
 
+    def all_locations(self, query: str = "", limit: int = 500) -> list[dict]:
+        """Alle locaties over élke root heen — voor de Files-pagina."""
+        like = f"%{query}%"
+        return self.repo.db.rows(
+            """SELECT l.id, l.path, l.filename, l.extension, l.size,
+                      l.scan_status, l.analysis_state, l.content_id,
+                      c.sha256, c.file_type, r.name AS root_name
+               FROM file_locations l
+               LEFT JOIN content_objects c ON c.id = l.content_id
+               LEFT JOIN library_roots r ON r.id = l.root_id
+               WHERE l.filename LIKE ? OR l.path LIKE ? OR c.sha256 LIKE ?
+               ORDER BY l.path LIMIT ?""", (like, like, like, limit))
+
     def content_locations(self, content_id: int) -> list[dict]:
         return self.repo.db.rows(
             "SELECT * FROM file_locations WHERE content_id=? ORDER BY path", (content_id,))
