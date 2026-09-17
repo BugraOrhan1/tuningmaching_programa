@@ -626,14 +626,16 @@ class MainWindow(QMainWindow):
         else:
             error_block = '\n\nGeen fouten.'
         summary = (f"Import klaar.\n\n"
-                   f"BIN/ORI verwerkt: {result.get('processed', 0)} · "
+                   f"BIN/ORI nieuw geïmporteerd: {result.get('processed', 0)} · "
                    f"OLS-projecten: {result.get('projects', 0)} · "
-                   f"overgeslagen (al gedaan): {result.get('skipped', 0)}"
+                   f"al aanwezig (overgeslagen zonder lezen): {result.get('skipped_existing', 0)} · "
+                   f"overgeslagen (checkpoint): {result.get('skipped', 0)}"
                    f"{error_block}\n\n"
                    "Bestanden staan nu in de tabel. Classificeer 'unknown' met de "
                    "knoppen onder de tabel, of laat auto-classificatie op het "
                    "dashboard draaien (alleen uniek bewijs wordt automatisch "
-                   "toegepast).")
+                   "toegepast).\n\nTip: dezelfde map nog eens importeren? Alles wat "
+                   "al veilig staat wordt overgeslagen zonder het te lezen.")
         QMessageBox.information(self, 'Mapimport', summary)
 
     def edit_metadata(self):

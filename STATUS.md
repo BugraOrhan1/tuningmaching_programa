@@ -2,7 +2,25 @@
 
 Datum: 2026-09-10 (bijgewerkt na V3-ronde)
 
-## V7.6-status (10TB-snelheid: parallelle scan + chunked writes + GUI-paginering) — actueel
+## V7.7-status (10TB deel 2: her-import 20× sneller + scandir-ontdekking + scan-snelheid) — actueel
+
+**143/143 tests groen. Benchmark:** her-import zelfde map (400×256KB) =
+**29,1 s → 1,5 s (20×)** door skip-zonder-lezen; 30.000 bestanden ontdekken =
+**190 ms** (os.scandir-walk, gratis stat op Windows/UNC).
+
+- **import_folder**: al-geïmporteerde bestanden (zelfde source_path + grootte +
+  aanwezige beheerkopie) worden overgeslagen ZONDER lezen (`skipped_existing`);
+  resultaat-melding toont dit; crash-resume-contract (per-bestand checkpoint)
+  bewaard en getest.
+- **import_file**: hash + beheerkopie in één leesbeurt; duplicaat-controle via
+  grootte-match i.p.v. volledige herlezing (fallback op volledige check bij
+  mismatch); extensie-validatie behouden.
+- **library._discover**: os.scandir-recursie i.p.v. rglob+is_file+stat
+  (helft van de systeemaanroepen; gesorteerd = deterministisch resume).
+- **Scan-voortgang** toont doorvoersnelheid (MB/s) voor 10TB-planning;
+  stats tellen `bytes_hashed`.
+
+## V7.6-status (10TB-snelheid: parallelle scan + chunked writes + GUI-paginering)
 
 **139/139 tests groen. Benchmark (sandbox, 1200×256KB random):** hashen met
 4 workers = **1,9× sneller**; herscan 1200 bestanden = **84 ms** (ongewijzigd-

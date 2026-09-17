@@ -271,3 +271,37 @@ def test_new_bin_library_multistage(service, tmp_path):
     fresh = service.new_bin_library_report(str(tmp_path / "fresh.bin"))
     assert fresh["stages"][0]["hits"] == 0
     assert any(stage["name"] == "fingerprint_prefilter" for stage in fresh["stages"])
+
+
+def test_import_folder_skips_existing_without_reading(service, tmp_path):
+    """Herhaald importeren van dezelfde map moet de al-aanwezige bestanden
+    overslaan ZONDER ze te lezen (10TB-proof herladen)."""
+    source = tmp_path / "bron"
+    source.mkdir()
+    for index in range(5):
+        (source / f"f{index}.bin").write_bytes(b"\\x00HEAD" + bytes([index]) * 512)
+    first = service.repo.import_folder(str(source))
+    assert first["processed"] == 5 and first["skipped_existing"] == 0
+    ids_before = [row["id"] for row in service.repo.files(limit=0)]
+    # bestand op schijf aanpassen van mtime: mag de skip niet breken
+    for path in source.glob("*.bin"):
+        import os as _os
+        _os.utime(path, (0, 0))
+    second = service.repo.import_folder(str(source))
+    assert second["processed"] == 0
+    assert second["skipped_existing"] == 5
+    ids_after = [row["id"] for row in service.repo.files(limit=0)]
+    assert ids_before == ids_after
+
+
+def test_import_file_duplicate_size_mismatch_is_rejected(service, tmp_path):
+    """Een gecorrumpeerde beheerkopie (andere grootte) wordt gevonden en
+    geweigerd — de goedkope grootte-check valt terug op volledige controle."""
+    source = tmp_path / "dup.bin"
+    source.write_bytes(b"\\x00HEAD" + b"A" * 1024)
+    service.repo.import_file(source, "original")
+    import glob
+    managed = glob.glob(str(service.repo.root / "originals" / "*.bin"))[0]
+    Path(managed).write_bytes(b"kort")  # corrumpeer: andere grootte
+    with pytest.raises(ValueError):
+        service.repo.import_file(source, "original")

@@ -1,6 +1,7 @@
 """V5 Local Library Engine: content identity, locations, dedup, incremental,
 resume, offline — bronbestanden blijven altijd onaangeroerd."""
 import hashlib
+import os
 from pathlib import Path
 
 import pytest
@@ -251,3 +252,29 @@ def test_repeat_scan_is_fast_unchanged_cache(lib):
     assert second["unchanged"] == 4 and second["new"] == 0
     third = service.library.scan_root(root["id"], progress=lambda _msg: None)
     assert third["hashed"] == 0 and third["unchanged"] == 4
+
+
+def test_discover_matches_walk_and_is_sorted(lib):
+    """scandir-walk vindt exact dezelfde bestanden als een os.walk-vergelijking
+    (geen dubbele/ontbrekende entries, miljoenen-bestanden-veilig)."""
+    service, source, before = lib
+    _write(source / "sub" / "diep" / "x.bin", b"X" * 128)
+    root = service.library.add_root(str(source), "Lib")
+    service.library.scan_root(root["id"])
+    found = {str(row["path"]) for row in service.library.locations(root["id"], limit=1000)}
+    expected = set()
+    for base, _dirs, files in os.walk(source):
+        for name in files:
+            expected.add(str(Path(base) / name))
+    assert found == expected
+
+
+def test_scan_progress_reports_speed(lib):
+    """De voortgangsmelding noemt nu ook doorvoersnelheid (MB/s) — belangrijk
+    om een 10TB-eerstescan te kunnen plannen."""
+    service, source, before = lib
+    root = service.library.add_root(str(source), "Lib")
+    calls = []
+    service.library.scan_root(root["id"], progress=calls.append)
+    assert any("MB/s" in message for message in calls)
+    assert service.library.storage_summary()["locations"] == 4

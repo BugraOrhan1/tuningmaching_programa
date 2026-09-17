@@ -10,6 +10,8 @@ opgebouwd. Scans zijn incrementeel (size+mtime-hashcache) en hervatbaar
 from __future__ import annotations
 
 import hashlib
+import time
+import os
 from concurrent.futures import ThreadPoolExecutor
 import json
 import zlib
@@ -22,7 +24,8 @@ SCAN_BATCH = 500
 SCAN_CHUNK = 64          # bestanden per hash/workwrite-chunk (checkpoint + 1 transactie)
 PRESET_HASH_WORKERS = {"LOW": 1, "BALANCED": 3, "HIGH": 6}
 STAT_KEYS = ("discovered", "hashed", "new", "unchanged", "modified", "moved",
-             "missing", "duplicate", "errors", "skipped_by_resume")
+             "missing", "duplicate", "errors", "skipped_by_resume",
+             "bytes_hashed")
 
 
 def file_type_for(extension: str) -> str:
@@ -138,14 +141,33 @@ class LibraryEngine:
     # scanning
     # ------------------------------------------------------------------
     def _discover(self, root_path: Path) -> list[dict]:
+        """os.scandir-walk: op Windows/UNC komt de stat gratis mee uit de
+        mapinlezing (één systeemaanroep per map i.p.v. twee per bestand) —
+        merkbaar bij miljoenen bestanden op 10TB-bronnen. Gesorteerd op
+        pad zodat resume-checkpoints deterministisch blijven."""
         found = []
-        for path in sorted(root_path.rglob("*"), key=lambda item: str(item).casefold()):
-            if not path.is_file():
-                continue
+
+        def walk(directory: Path):
             try:
-                found.append({"path": path, "stat": path.stat()})
+                with os.scandir(directory) as entries:
+                    for entry in entries:
+                        try:
+                            if entry.is_dir(follow_symlinks=False):
+                                walk(Path(entry.path))
+                            elif entry.is_file(follow_symlinks=False):
+                                try:
+                                    found.append({"path": Path(entry.path),
+                                                  "stat": entry.stat()})
+                                except OSError:
+                                    found.append({"path": Path(entry.path),
+                                                  "stat": None})
+                        except OSError:
+                            continue
             except OSError:
-                found.append({"path": path, "stat": None})
+                pass  # ontoegankelijke submap: overslaan, rest blijft geldig
+
+        walk(root_path)
+        found.sort(key=lambda item: str(item["path"]).casefold())
         return found
 
     def _hash_many(self, jobs: list[tuple], workers: int, progress=None) -> list[dict]:
@@ -251,6 +273,7 @@ class LibraryEngine:
         for key in STAT_KEYS:
             stats.setdefault(key, 0)
         stats["skipped_by_resume"] = 0
+        scan_started = time.monotonic()
         try:
             discovered = self._discover(root_path)
             stats["discovered"] = len(discovered)
@@ -269,9 +292,12 @@ class LibraryEngine:
                 if force or processed % chunk_size == 0:
                     self._checkpoint(scan_id, visited_last, stats)
                     if progress:
+                        elapsed = max(time.monotonic() - scan_started, 0.001)
+                        speed = stats["bytes_hashed"] / elapsed / (1024 * 1024)
                         progress(f"Scan {stats['discovered'] - stats['skipped_by_resume']}"
                                  f"/{stats['discovered']} "
-                                 f"(nieuw {stats['new']}, gelijk {stats['unchanged']})")
+                                 f"(nieuw {stats['new']}, gelijk {stats['unchanged']}, "
+                                 f"gehasht {stats['hashed']}) · {speed:.0f} MB/s")
 
             # planning: skip-resume filter en daarna chunks
             planned = []
@@ -318,6 +344,7 @@ class LibraryEngine:
                                                "metadata": {"error": result["error"]}})
                                 continue
                             stats["hashed"] += 1
+                            stats["bytes_hashed"] += stat_result.st_size
                             content_id = self._content_id(db, result["digests"],
                                                           file_path, stat_result)
                             if previous_row is None:

@@ -1,7 +1,10 @@
 """Managed immutable snapshots, searchable metadata, explicit pair review."""
+import hashlib
 import json
 import logging
+import os
 import re
+import zlib
 from pathlib import Path
 from app.database.database import Database
 from app.analysis.binary_reader import read_binary
@@ -569,8 +572,29 @@ class Repository(RepositoryV3Mixin):
 
     def import_file(self, path: Path, kind: str = "auto") -> int:
         path = path.resolve()
-        data = read_binary(path, self.config["max_file_mb"])
-        digest = hashes(data)
+        if path.suffix.lower() not in {".bin", ".ori"}:
+            raise ValueError("Alleen raw .bin en .ori worden ondersteund; converteer Intel HEX eerst.")
+        # één leesbeurt: hashen én beheerkopie tegelijk schrijven (10TB-proof)
+        size_limit = self.config["max_file_mb"] * 1024 * 1024
+        sha = hashlib.sha256()
+        md5 = hashlib.md5(usedforsecurity=False)
+        crc = 0
+        buffer = bytearray()
+        with path.open("rb") as stream:
+            while True:
+                chunk = stream.read(1024 * 1024)
+                if not chunk:
+                    break
+                if len(buffer) + len(chunk) > size_limit:
+                    raise ValueError(f"Bestand groter dan ingestelde limiet: {path.name}")
+                sha.update(chunk)
+                md5.update(chunk)
+                crc = zlib.crc32(chunk, crc)
+                buffer += chunk
+        if not buffer:
+            raise ValueError(f"Leeg bestand: {path.name}")
+        data = bytes(buffer)
+        digest = {"sha256": sha.hexdigest(), "md5": md5.hexdigest(), "crc32": f"{crc:08x}"}
         if kind == "auto":
             kind = infer_type(path)
             if kind == "unknown":
@@ -581,12 +605,17 @@ class Repository(RepositoryV3Mixin):
             raise ValueError("Ongeldig bestandstype")
         folder = "originals" if kind == "original" else kind
         target = self.root / folder / (digest["sha256"] + ".bin")
-        try:
-            with target.open("xb") as stream:
+        if target.exists():
+            # inhoudsadressering: grootte-match is al vrijwel zeker; bij
+            # afwijking pas volledig controleren (scheelt een volledige herlezing)
+            if target.stat().st_size != len(data):
+                if hashes(target.read_bytes())["sha256"] != digest["sha256"]:
+                    raise ValueError("Bestaande beheerde kopie heeft onjuiste hash")
+        else:
+            temp = target.with_suffix(".tmp")
+            with temp.open("wb") as stream:
                 stream.write(data)
-        except FileExistsError:
-            if hashes(target.read_bytes())["sha256"] != digest["sha256"]:
-                raise ValueError("Bestaande beheerde kopie heeft onjuiste hash")
+            os.replace(temp, target)
         row = dict(filename=path.name, filepath=str(target.resolve()), source_path=str(path),
                    file_type=kind, file_size=len(data), **digest, **extract_metadata(data))
         with self.db.connect() as db:
@@ -881,6 +910,11 @@ class Repository(RepositoryV3Mixin):
 
     def import_folder(self, folder: str, kind: str = "auto", progress=None,
                       resume: bool = False) -> dict:
+        """Import met fast-path: bestanden die al in de database staan (zelfde
+        source_path + ongewijzigde grootte + aanwezige beheerkopie) worden
+        overgeslagen ZONDER ze te lezen — herhaald importeren van grote
+        bronnen kost daardoor bijna geen tijd. Per bestand wordt een
+        checkpoint gezet zodat een crash exact kan hervatten."""
         source = Path(folder).resolve()
         if not source.is_dir():
             raise ValueError("Importmap bestaat niet")
@@ -902,6 +936,7 @@ class Repository(RepositoryV3Mixin):
         result = dict(run["stats"] if run else {})
         result.setdefault("processed", 0)
         result.setdefault("projects", 0)
+        result.setdefault("skipped_existing", 0)
         result.setdefault("errors", [])
         result["skipped"] = start_index
         try:
@@ -912,6 +947,8 @@ class Repository(RepositoryV3Mixin):
                     if path.suffix.lower() == '.ols':
                         self.import_project(path)
                         result["projects"] += 1
+                    elif self._already_imported(path, kind):
+                        result["skipped_existing"] += 1
                     else:
                         self.import_file(path, kind)
                         result["processed"] += 1
@@ -921,7 +958,9 @@ class Repository(RepositoryV3Mixin):
                 self.checkpoint_run(run_id, {"next_index": index + 1,
                                              "last_path": str(path)}, result)
                 if progress:
-                    progress(f"Import {index+1}/{len(paths)}: {path.name}")
+                    progress(f"Import {index + 1}/{len(paths)} "
+                             f"(nieuw {result['processed']}, "
+                             f"al aanwezig {result['skipped_existing']})")
         except Exception:
             self.checkpoint_run(run_id, {"next_index": index,
                                          "last_path": str(paths[index]) if paths else None}, result)
@@ -930,6 +969,23 @@ class Repository(RepositoryV3Mixin):
         self.finish_run(run_id, "done", result)
         result["run_id"] = run_id
         return result
+
+    def _already_imported(self, path: Path, kind: str) -> bool:
+        """True als dit bronbestand al veilig staat: zelfde source_path,
+        zelfde grootte en de beheerkopie bestaat nog op schijf."""
+        try:
+            size = path.stat().st_size
+        except OSError:
+            return False
+        rows = self.db.rows(
+            "SELECT id, file_size, filepath, file_type FROM files WHERE source_path=?",
+            (str(path),))
+        for row in rows:
+            if row["file_size"] != size or kind not in ("auto", row["file_type"]):
+                continue
+            if Path(row["filepath"]).exists():
+                return True
+        return False
 
     def update_metadata(self, file_id: int, values: dict) -> None:
         self.file(file_id)
