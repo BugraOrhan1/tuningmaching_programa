@@ -54,6 +54,16 @@ class ReadoutRequest(BaseModel):
     note: str = ''
 
 
+class TuneBuildRequest(BaseModel):
+    original_path: str = ''
+    original_file_id: int | None = None
+    stage: str | None = None
+    addons: list[str] = []
+    intensity: int | None = None
+    threshold: float = 85.0
+    dry_run: bool = True
+
+
 
 
 class V3ReviewRequest(BaseModel):
@@ -571,6 +581,19 @@ def create_api(service: Service, token: str) -> FastAPI:
     @api.get('/readouts')
     def readouts(q: str = ''):
         return {'readouts': service.readouts(q)}
+
+    # ---------------- V7 Tune Bouwer ----------------
+    @api.get('/tune-recipes')
+    def tune_recipes():
+        return service.tune_recipes()
+
+    @api.post('/tune-build')
+    def tune_build(body: TuneBuildRequest):
+        return service.build_tune(original_path=body.original_path or None,
+                                  original_file_id=body.original_file_id,
+                                  stage=body.stage, addons=body.addons,
+                                  intensity=body.intensity,
+                                  threshold=body.threshold, dry_run=body.dry_run)
 
     @api.post('/readouts')
     def add_readout(body: ReadoutRequest):

@@ -86,6 +86,7 @@ class MainWindow(QMainWindow):
         self.build_diff()
         self.build_region_viewer()
         self.build_compare_workspace()
+        self.build_tune_builder()
         self.build_search()
         self.nav_section('KENNIS')
         self.build_pairs()
@@ -285,7 +286,9 @@ class MainWindow(QMainWindow):
                     lambda: self.navigate('Original/Tuned Pairs'))
         self.button(layout, '5 — Nieuwe BIN analyseren met kennis (New BIN-rapport)',
                     lambda: self.navigate('New BIN Analyse (V3)'))
-        self.button(layout, '6 — Onbekende bestanden automatisch classificeren (bewijsregel)',
+        self.button(layout, '6 — Getunede kandidaat bouwen (stage + add-ons)',
+                    lambda: self.navigate('Tune Bouwer (V7)'))
+        self.button(layout, '7 — Onbekende bestanden automatisch classificeren (bewijsregel)',
                     self.auto_classify)
         self.ols_status = QLabel()
         self.ols_status.setWordWrap(True)
@@ -1271,6 +1274,110 @@ class MainWindow(QMainWindow):
 
         self.run_job(lambda progress: self.service.compare_workspace(left, right),
                      callback=done)
+
+    def build_tune_builder(self):
+        layout = self.page('Tune Bouwer (V7)', 'Origineel erin → getunede KANDIDAAT '
+                           'terug. Kies stage en add-ons; alleen recepten uit '
+                           'bevestigde kennis worden gebouwd, elke regio met '
+                           'regionaal bewijs (≥98%). Output is een NIEUW bestand '
+                           'met checksum-waarschuwing: NIET flash-klaar zonder '
+                           'technicus-review in WinOLS. Bronbestanden blijven '
+                           'altijd ongewijzigd.')
+        row = QHBoxLayout()
+        row.addWidget(QLabel('Origineel (BIN):'))
+        self.tune_path = QLineEdit()
+        self.tune_path.setPlaceholderText('Pad naar het originele bestand…')
+        row.addWidget(self.tune_path, 1)
+        browse_btn = QPushButton('Bladeren…')
+        browse_btn.clicked.connect(self.choose_tune_original)
+        row.addWidget(browse_btn)
+        layout.addLayout(row)
+        options = QHBoxLayout()
+        options.addWidget(QLabel('Stage:'))
+        self.tune_stage = QComboBox()
+        options.addWidget(self.tune_stage)
+        options.addWidget(QLabel('Add-on:'))
+        self.tune_addon = QComboBox()
+        options.addWidget(self.tune_addon)
+        options.addWidget(QLabel('Intensiteit:'))
+        self.tune_intensity = QComboBox()
+        options.addWidget(self.tune_intensity)
+        layout.addLayout(options)
+        self.tune_dry = QCheckBox('Alleen bekijken (dry-run, niets wegschrijven)')
+        self.tune_dry.setChecked(True)
+        layout.addWidget(self.tune_dry)
+        self.button(layout, 'Recepten vernieuwen', self.refresh_tune_builder)
+        self.button(layout, 'Kandidaat bouwen', self.run_tune_build)
+        self.tune_output = QLabel('Kies een origineel en een recept. De builder '
+                                  'gebruikt alléén bevestigde kennis.')
+        self.tune_output.setWordWrap(True)
+        layout.addWidget(self.tune_output)
+
+    def choose_tune_original(self):
+        chosen, _filter = QFileDialog.getOpenFileName(
+            self, 'Origineel BIN kiezen', '', 'ECU-bestanden (*.bin *.ori);;Alle bestanden (*)')
+        if chosen:
+            self.tune_path.setText(chosen)
+
+    def refresh_tune_builder(self):
+        self.run_job(lambda progress: self.service.tune_recipes(),
+                     callback=self._tune_recipes_loaded, job_name='recepten ophalen')
+
+    def _tune_recipes_loaded(self, options):
+        def apply():
+            self.tune_stage.clear()
+            self.tune_stage.addItem('(geen voorkeur)', None)
+            for stage in options['stages']:
+                self.tune_stage.addItem(stage, stage)
+            self.tune_addon.clear()
+            self.tune_addon.addItem('(geen)', None)
+            for addon in options['addons']:
+                self.tune_addon.addItem(addon, addon)
+            self.tune_intensity.clear()
+            self.tune_intensity.addItem('(beschikbaar)', None)
+            for intensity in options['intensities']:
+                self.tune_intensity.addItem(f'{intensity}%', intensity)
+            self.tune_output.setText(
+                f"{len(options['recipes'])} bouwbare recepten · stages: "
+                f"{', '.join(options['stages']) or '—'} · add-ons: "
+                f"{', '.join(options['addons']) or '—'}\n{options['note']}")
+        self.safe(apply)
+
+    def run_tune_build(self):
+        path = self.tune_path.text().strip()
+        if not path:
+            self.tune_output.setText('Kies eerst een origineel bestand.')
+            return
+        stage = self.tune_stage.currentData()
+        addon = self.tune_addon.currentData()
+        intensity = self.tune_intensity.currentData()
+        addons = [addon] if addon else []
+        dry = self.tune_dry.isChecked()
+
+        def operation(progress):
+            return self.service.build_tune(original_path=path, stage=stage,
+                                           addons=addons, intensity=intensity,
+                                           dry_run=dry)
+
+        self.run_job(operation, job_name='kandidaat bouwen',
+                     callback=lambda result: self.safe(
+                         lambda: self._tune_build_done(result)))
+
+    def _tune_build_done(self, result):
+        status = result.get('status')
+        lines = [f"STATUS: {status}"]
+        if result.get('recipe', {}).get('selected'):
+            lines.append(f"Recept: {result['recipe']['selected']} "
+                         f"(match {result.get('match_score', 0):.1f}%)")
+        if result.get('output_path'):
+            lines.append(f"Output: {result['output_path']}")
+            lines.append(f"Rapport: {result.get('report_path')}")
+        lines.append(f"Toegepaste regio's: {len(result.get('applied_regions', []))} · "
+                     f"overgeslagen: {len(result.get('skipped_regions', []))}")
+        lines.extend(result.get('warnings', []))
+        if result.get('note'):
+            lines.append(result['note'])
+        self.tune_output.setText('\n'.join(lines))
 
     def build_search(self):
         layout = self.page('Zoeken', 'Doorzoek bestanden, patronen, OLS-projecten en regio\'s op ECU, '

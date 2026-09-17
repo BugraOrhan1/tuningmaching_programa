@@ -144,6 +144,15 @@ def main() -> None:
     negative_cmd.add_argument('--reason', default='')
     reparse_cmd = sub.add_parser('reparse-ols', help='OLS her-interpreteren (parser-versie §19)')
     reparse_cmd.add_argument('project_id', type=int)
+    sub.add_parser('tune-recipes', help='welke stage/add-on-recepten zijn bouwbaar?')
+    build_cmd = sub.add_parser('tune-build', help='origineel → getunede KANDIDAAT (dry-run standaard)')
+    build_cmd.add_argument('path')
+    build_cmd.add_argument('--stage', default=None)
+    build_cmd.add_argument('--addon', action='append', default=[])
+    build_cmd.add_argument('--intensity', type=int, default=None)
+    build_cmd.add_argument('--threshold', type=float, default=85.0)
+    build_cmd.add_argument('--write', action='store_true',
+                           help='echt schrijven (zonder dit: dry-run)')
     api = sub.add_parser('api')
     api.add_argument('--port', type=int, default=8765)
     args = parser.parse_args()
@@ -285,6 +294,12 @@ def main() -> None:
                 reason=args.reason)
         elif args.command == 'reparse-ols':
             result = service.repo.reparse_project(args.project_id)
+        elif args.command == 'tune-recipes':
+            result = service.tune_recipes()
+        elif args.command == 'tune-build':
+            result = service.build_tune(original_path=args.path, stage=args.stage,
+                                        addons=args.addon, intensity=args.intensity,
+                                        threshold=args.threshold, dry_run=not args.write)
         elif args.command == 'jobs':
             result = service.jobs()
         elif args.command == 'review-knowledge':

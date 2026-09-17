@@ -72,8 +72,8 @@ def test_gui_smoke(service, pair, monkeypatch, tmp_path):
     window = MainWindow(service)
     window.show()
     application.processEvents()
-    assert window.page_count == 29  # alle pagina's blijven bestaan
-    assert window.nav.count() == 35  # 29 pagina's + 6 groepskoppen
+    assert window.page_count == 30  # …+ Tune Bouwer (V7)
+    assert window.nav.count() == 36  # 30 pagina's + 6 groepskoppen
     # gebruikersvriendelijkheid: direct navigeren en paginazoeker werken
     assert window.navigate('Library (V5)') is True
     assert window.navigate('Bestaat Niet') is False

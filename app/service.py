@@ -25,8 +25,10 @@ class Service(ServiceV3Mixin):
         self.repo = Repository(config)
         from app.library import LibraryEngine
         from app.knowledge_model import KnowledgeModelEngine
+        from app.tune_builder import TuneBuilder
         self.library = LibraryEngine(self.repo, config, service=self)
         self.km = KnowledgeModelEngine(self)
+        self.tune_builder = TuneBuilder(self)
 
     def analyze(self, path: str, progress=None) -> dict:
         query = read_binary(path, self.repo.config['max_file_mb'])
@@ -708,6 +710,25 @@ class Service(ServiceV3Mixin):
         return self.repo.db.rows(
             """SELECT * FROM readouts WHERE customer LIKE ? OR vehicle LIKE ?
                OR stage LIKE ? ORDER BY id DESC LIMIT 200""", (like, like, like))
+
+    # ------------------------------------------------------------------
+    # V7: Tune Bouwer — origineel erin, kandidaat terug (stage + add-ons)
+    # ------------------------------------------------------------------
+    def tune_recipes(self) -> dict:
+        """Welke stage/add-on-recepten zijn bouwbaar volgens bevestigde kennis?"""
+        return self.tune_builder.available_options()
+
+    def build_tune(self, original_path: str | None = None,
+                   original_file_id: int | None = None, stage: str | None = None,
+                   addons: list[str] | None = None, intensity: int | None = None,
+                   threshold: float = 85.0, dry_run: bool = True) -> dict:
+        """Kandidaat bouwen. Standaard dry_run: toont wat er zou gebeuren.
+        Bij dry_run=False wordt een NIEUW bestand in exports/candidates
+        geschreven; bronbestanden blijven altijd ongewijzigd."""
+        return self.tune_builder.build(
+            original_path=original_path, original_file_id=original_file_id,
+            stage=stage, addons=addons, intensity=intensity,
+            threshold=threshold, dry_run=dry_run)
 
     # ------------------------------------------------------------------
     # Rapportexport (§62): JSON/CSV/MD/HTML voor elk kennisrapport

@@ -2,7 +2,31 @@
 
 Datum: 2026-09-10 (bijgewerkt na V3-ronde)
 
-## V6.1-status (gebruiksvriendelijkheid + echte-PC-fixes) — actueel
+## V7-status (Tune Bouwer) — actueel
+
+**133/133 tests groen** (12 nieuwe Tune Bouwer-tests). De eindstap van de
+keten is er: **origineel erin → getunede KANDIDAAT terug**, met stage- en
+add-onkeuze (pagina *Tune Bouwer (V7)*, `tune-build` CLI, `POST /tune-build`).
+
+- Recepten komen uitsluitend uit **bevestigde** paren; stage/add-ons
+  (pops_bang, vmax, dpf/egr/adblue-off, …) worden gelezen van expliciete
+  labels (stage-metadata, WinOLS-versienaam, bestandsnaam).
+- Elke toegepaste regio vereist **regionaal bewijs** (≥98% gelijk aan de
+  bekende original op díe regio); afwijkende regio's worden overgeslagen
+  en gerapporteerd.
+- Intensiteiten (-15/-30/-45) bestaan alléén als er kennis met dat label
+  is; anders expliciet UNKNOWN met lijst van wat er wél beschikbaar is —
+  nooit verzinnen.
+- Output = altijd een NIEUW bestand in `exports/candidates` + JSON-rapport
+  (provenance, regio's, keten, 4 waarschuwingen); bronbestanden blijven
+  byte-voor-byte ongewijzigd (getest); duplicate-kandidaten delen één
+  candidate-ID; dry-run is de standaard.
+- **Checksums worden NIET gecorrigeerd** — het bestand is pas na
+  technicuscontrole in WinOLS geschikt voor gebruik; dat blijft een harde
+  waarschuwing in elke output.
+- Dashboard-snelstart heeft nu stap 6: kandidaat bouwen.
+
+## V6.1-status (gebruiksvriendelijkheid + echte-PC-fixes)
 
 **121/121 tests groen.** Gebaseerd op de echte test-log van de
 Windows-productie-PC (`data/app.log`, commit `6e69a07`):
