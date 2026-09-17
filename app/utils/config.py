@@ -6,7 +6,7 @@ from pathlib import Path
 
 def load_config() -> dict:
     path = Path(os.environ.get("TUNING_CONFIG", "config.json")).resolve()
-    defaults = dict(data_dir="data", max_file_mb=64, top_matches=10, candidate_pool=250,
+    defaults = dict(data_dir="data", max_file_mb=512, top_matches=10, candidate_pool=250,
                     block_size=4096, diff_merge_gap=8)
     if path.exists():
         defaults.update(json.loads(path.read_text(encoding="utf-8")))

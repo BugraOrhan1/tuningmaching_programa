@@ -2,7 +2,30 @@
 
 Datum: 2026-09-10 (bijgewerkt na V3-ronde)
 
-## V6-status (FINAL PRODUCT COMPLETION) — actueel
+## V6.1-status (gebruiksvriendelijkheid + echte-PC-fixes) — actueel
+
+**121/121 tests groen.** Gebaseerd op de echte test-log van de
+Windows-productie-PC (`data/app.log`, commit `6e69a07`):
+
+- **16× "WinOLS-project groter dan ingestelde limiet"** → `max_file_mb`
+  verhoogd naar 512 MB (config.json + default) en de foutmelding noemt nu
+  de oplossing i.p.v. alleen het probleem.
+- **5× crash op Linux-paden** (`/home/user/...` in de meegeleverde
+  database) → database niet langer meegeleverd (uit git + .gitignore);
+  auto-classificatie slaat onleesbare beheerkopieën over met foutmelding
+  i.p.v. te crashen; `data()` geeft een uitleggende fout met hersteladvies.
+- **4× onvriendelijk "Wacht tot de huidige taak klaar is"** → melding noemt
+  nu welke taak draait en waar de voortgang staat.
+- **Gecomitte rommel** (`__pycache__`, app.log, database) uit git verwijderd
+  en voortaan genegeerd.
+- **GUI gebruiksvriendelijk gemaakt**: navigatie in 6 gegroepeerde secties
+  (START · BIBLIOTHEEK · ANALYSE · KENNIS · FAMILIES & LEARNING · SYSTEEM),
+  zoekvak dat de pagina's direct filtert, en een echt Dashboard met live
+  status (roots online, locaties/contents, kennis, taken) en genummerde
+  snelstart die naar de juiste pagina springt. 29 pagina's zijn behouden.
+- Settings-pagina legt nu de belangrijkste instellingen uit.
+
+## V6-status (FINAL PRODUCT COMPLETION)
 
 **119/119 tests groen** (incl. 19 V6-completiontests en de Golden Dataset
 met 9/9 cases, ook de echte-OLS-case). Zie

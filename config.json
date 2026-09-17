@@ -1,6 +1,6 @@
 {
   "data_dir": "data",
-  "max_file_mb": 64,
+  "max_file_mb": 512,
   "top_matches": 10,
   "candidate_pool": 250,
   "block_size": 4096,

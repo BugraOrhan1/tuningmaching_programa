@@ -103,7 +103,11 @@ def read_ols(path: str | Path, max_file_mb: int = 64) -> bytes:
     if not data:
         raise ValueError(f"Leeg WinOLS-project: {path.name}")
     if len(data) > max_file_mb * 1024 * 1024:
-        raise ValueError(f"WinOLS-project groter dan ingestelde limiet: {path.name}")
+        raise ValueError(
+            f"WinOLS-project groter dan ingestelde limiet van {max_file_mb} MB: "
+            f"{path.name}. Los dit op door \"max_file_mb\" in config.json te "
+            f"vergroten (bijv. 2048) en de app te herstarten. Het bestand is "
+            f"niets weggeschreven en blijft ongewijzigd.")
     return data
 
 

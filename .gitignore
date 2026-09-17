@@ -10,3 +10,8 @@ data/originals/
 data/tuned/
 data/unknown/
 data/winols_projects/
+data/database.sqlite
+data/app.log
+data/backups/
+exports/
+*.restore.tmp

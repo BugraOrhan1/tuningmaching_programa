@@ -2,9 +2,9 @@
 import json
 import logging
 from pathlib import Path
-from PySide6.QtCore import QThread, Signal
+from PySide6.QtCore import QThread, Signal, Qt
 from PySide6.QtWidgets import (QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QListWidget,
-    QStackedWidget, QLabel, QPushButton, QLineEdit, QComboBox, QTableWidget,
+    QListWidgetItem, QStackedWidget, QLabel, QPushButton, QLineEdit, QComboBox, QTableWidget,
     QTableWidgetItem, QFileDialog, QMessageBox, QPlainTextEdit, QTextBrowser,
     QInputDialog, QAbstractItemView, QWizard, QWizardPage, QCheckBox)
 from app.analysis.metadata import FIELDS
@@ -37,6 +37,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.service, self.repo = service, service.repo
         self.worker = None
+        self.worker_job_name = None
         self.report = None
         self.diff_report = None
         self.pair_id = None
@@ -53,51 +54,70 @@ class MainWindow(QMainWindow):
             QTableWidget { gridline-color: #374151; alternate-background-color: #182234; }
             QHeaderView::section { background: #263449; padding: 7px; }
         ''')
+        self.page_names: list[str] = []
+        self._stack_index: dict[str, int] = {}
         root = QWidget()
         layout = QHBoxLayout(root)
+        left = QWidget()
+        left_layout = QVBoxLayout(left)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        self.nav_filter = QLineEdit()
+        self.nav_filter.setPlaceholderText('Zoek pagina…')
+        self.nav_filter.setClearButtonEnabled(True)
+        left_layout.addWidget(self.nav_filter)
         self.nav = QListWidget()
         self.nav.setFixedWidth(220)
+        left_layout.addWidget(self.nav, 1)
         self.stack = QStackedWidget()
-        layout.addWidget(self.nav)
+        layout.addWidget(left)
         layout.addWidget(self.stack, 1)
         self.setCentralWidget(root)
+        self.nav_section('START')
         self.build_dashboard()
+        self.nav_section('BIBLIOTHEEK')
         self.build_files()
-        self.build_pairs()
+        self.build_library()
+        self.build_winols()
+        self.build_ols_explorer()
+        self.build_ols_review()
+        self.nav_section('ANALYSE')
         self.build_analyzer()
+        self.build_new_bin()
         self.build_diff()
-        self.build_ecu_families()
-        self.build_software_families()
-        self.build_calibration_families()
-        self.build_signatures()
-        self.build_knowledge_review()
+        self.build_region_viewer()
+        self.build_compare_workspace()
+        self.build_search()
+        self.nav_section('KENNIS')
+        self.build_pairs()
         self.build_clusters()
         self.build_tuning_dna()
         self.build_patterns()
         self.build_calibration_identities()
-        self.build_map_structures()
+        self.build_ecu_images()
         self.build_identity_alignment()
-        self.build_region_viewer()
-        self.build_new_bin()
-        self.build_ols_explorer()
-        self.build_search()
-        self.build_library()
+        self.build_map_structures()
+        self.build_knowledge_review()
+        self.nav_section('FAMILIES & LEARNING')
+        self.build_ecu_families()
+        self.build_software_families()
+        self.build_calibration_families()
+        self.build_signatures()
         self.build_learning()
-        self.build_winols()
-        self.build_ols_review()
-        self.build_settings()
+        self.nav_section('SYSTEEM')
         self.build_jobs_manager()
         self.build_backup()
-        self.build_ecu_images()
-        self.build_compare_workspace()
-        self.nav.currentRowChanged.connect(self.stack.setCurrentIndex)
-        self.nav.setCurrentRow(0)
+        self.build_settings()
+        self.nav.currentRowChanged.connect(self._nav_changed)
+        self.nav_filter.textChanged.connect(self.filter_nav)
+        self.navigate('Dashboard')
         self.refresh()
         if first_run:
             self.maybe_first_run()
 
     def page(self, name, subtitle):
-        self.nav.addItem(name)
+        page_item = QListWidgetItem(name)
+        page_item.setData(Qt.ItemDataRole.UserRole, 'page')
+        self.nav.addItem(page_item)
         page = QWidget()
         layout = QVBoxLayout(page)
         title = QLabel(name)
@@ -106,8 +126,73 @@ class MainWindow(QMainWindow):
         label = QLabel(subtitle)
         label.setWordWrap(True)
         layout.addWidget(label)
-        self.stack.addWidget(page)
+        index = self.stack.addWidget(page)
+        page_item.setData(Qt.ItemDataRole.UserRole + 1, index)
+        self.page_names.append(name)
+        self._stack_index[name] = index
         return layout
+
+    def nav_section(self, title):
+        """Niet-selecteerbare groepskop in de navigatie (gebruiksvriendelijke
+        indeling: START / BIBLIOTHEEK / ANALYSE / KENNIS / …)."""
+        item = QListWidgetItem(title)
+        item.setData(Qt.ItemDataRole.UserRole, 'section')
+        item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+        font = item.font()
+        font.setBold(True)
+        item.setFont(font)
+        item.setForeground(Qt.GlobalColor.darkCyan)
+        self.nav.addItem(item)
+
+    def _nav_changed(self, row):
+        item = self.nav.item(row)
+        if item is None:
+            return
+        index = item.data(Qt.ItemDataRole.UserRole + 1)
+        if isinstance(index, int):
+            self.stack.setCurrentIndex(index)
+
+    def navigate(self, name) -> bool:
+        """Direct naar een pagina springen op naam (o.a. dashboard-snelstart)."""
+        for row in range(self.nav.count()):
+            item = self.nav.item(row)
+            if item.text() == name and item.data(Qt.ItemDataRole.UserRole) == 'page':
+                self.nav.setCurrentRow(row)
+                return True
+        return False
+
+    @property
+    def page_count(self) -> int:
+        return len(self.page_names)
+
+    def filter_nav(self, text):
+        """Navigatie filteren op paginanaam; lege groepen verdwijnen mee."""
+        needle = text.strip().casefold()
+        sections = []
+        for row in range(self.nav.count()):
+            item = self.nav.item(row)
+            if item.data(Qt.ItemDataRole.UserRole) == 'section':
+                sections.append(item)
+                continue
+            item.setHidden(bool(needle) and needle not in item.text().casefold())
+        for section in sections:
+            row = self.nav.row(section)
+            has_visible = any(
+                not self.nav.item(r).isHidden()
+                and self.nav.item(r).data(Qt.ItemDataRole.UserRole) == 'page'
+                for r in range(row + 1, self.nav.count())
+                if self.nav.item(r).data(Qt.ItemDataRole.UserRole) != 'section'
+            ) if True else False
+            # stop bij de eerstvolgende sectie
+            has_visible = False
+            for r in range(row + 1, self.nav.count()):
+                item = self.nav.item(r)
+                if item.data(Qt.ItemDataRole.UserRole) == 'section':
+                    break
+                if not item.isHidden():
+                    has_visible = True
+                    break
+            section.setHidden(bool(needle) and not has_visible)
 
     def button(self, layout, title, callback):
         button = QPushButton(title)
@@ -122,9 +207,13 @@ class MainWindow(QMainWindow):
             logging.exception('UI operation failed')
             QMessageBox.warning(self, 'Actie niet uitgevoerd', str(exc))
 
-    def run_job(self, operation, callback=None):
+    def run_job(self, operation, callback=None, job_name=None):
         if self.worker is not None:
-            raise ValueError('Wacht tot de huidige taak klaar is.')
+            raise ValueError(
+                f"Even geduld — er draait nog een taak: '{self.worker_job_name}'. "
+                f"De voortgang staat onderin het venster. Probeer het opnieuw "
+                f"zodra er 'Klaar' staat.")
+        self.worker_job_name = job_name or 'actie'
         self.worker = Worker(operation, self)
         self.worker.progress.connect(self.statusBar().showMessage)
         self.worker.result.connect(callback or self.show_report)
@@ -136,6 +225,7 @@ class MainWindow(QMainWindow):
     def job_finished(self):
         self.worker.deleteLater()
         self.worker = None
+        self.worker_job_name = None
         self.refresh()
         self.statusBar().showMessage('Klaar')
 
@@ -170,17 +260,36 @@ class MainWindow(QMainWindow):
         return ids
 
     def build_dashboard(self):
-        layout = self.page('Quick Workflow', 'De hoofdworkflow voor OLS en BIN-bestanden. De bron-OLS blijft read-only.')
+        layout = self.page('Dashboard', 'Welkom. Werk van links naar rechts door de '
+                           'snelstart: bronmappen registreren (bestanden blijven op '
+                           'eigen schijf) → scannen/importeren → paren bevestigen → '
+                           'kennis bouwen → nieuwe BIN analyseren. Elke knop springt '
+                           'naar de juiste pagina.')
         self.stats = QLabel()
-        self.stats.setStyleSheet('font-size: 21px; padding: 25px;')
+        self.stats.setStyleSheet('font-size: 17px; padding: 12px;')
         layout.addWidget(self.stats)
+        self.dashboard_status = QLabel('Status wordt geladen…')
+        self.dashboard_status.setWordWrap(True)
+        self.dashboard_status.setStyleSheet('font-size: 15px; padding: 6px;')
+        layout.addWidget(self.dashboard_status)
+        quick = QLabel('SNELSTART')
+        quick.setStyleSheet('font-weight: bold; padding: 6px 0;')
+        layout.addWidget(quick)
+        self.button(layout, '1 — Bronmap registreren (library root, bestanden blijven staan)',
+                    lambda: self.navigate('Library (V5)'))
+        self.button(layout, '2 — Bestanden scannen of importeren',
+                    lambda: self.navigate('Files'))
+        self.button(layout, '3 — WinOLS-project automatisch verwerken (extract + paren + DNA)',
+                    self.auto_process_project)
+        self.button(layout, '4 — Paren bevestigen en patronen bouwen',
+                    lambda: self.navigate('Original/Tuned Pairs'))
+        self.button(layout, '5 — Nieuwe BIN analyseren met kennis (New BIN-rapport)',
+                    lambda: self.navigate('New BIN Analyse (V3)'))
+        self.button(layout, '6 — Onbekende bestanden automatisch classificeren (bewijsregel)',
+                    self.auto_classify)
         self.ols_status = QLabel()
         self.ols_status.setWordWrap(True)
         layout.addWidget(self.ols_status)
-        self.button(layout, '1. WinOLS-project volledig automatisch verwerken', self.auto_process_project)
-        self.button(layout, '2. Nieuwe BIN automatisch matchen + kandidaat-tune (≥70%)', self.auto_tune_file)
-        self.button(layout, '3. Raw BIN/ORI importeren', self.import_folder)
-        self.button(layout, '4. Unknown evidence-classificatie uitvoeren', self.auto_classify)
         self.last_confidence = QLabel('High Confidence Matches: nog geen analyse (drempel ≥ 90; heuristisch)')
         layout.addWidget(self.last_confidence)
         layout.addWidget(QLabel('Stap 1 extraheert bewezen binaries naar Files, koppelt Original/Tuned op '
@@ -494,7 +603,11 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f'OLS-object {object_id} opgeslagen als {role}.', 5000)
 
     def build_settings(self):
-        layout = self.page('Settings', 'Instellingen staan in config.json of TUNING_CONFIG. Herstart na wijzigen.')
+        layout = self.page('Settings', 'Instellingen staan in config.json (naast de app) of in '
+                           'de TUNING_CONFIG-omgevingsvariabele. Wijzig → herstart de app. '
+                           'Belangrijkste instelling voor grote WinOLS-bestanden: '
+                           'max_file_mb (standaard 512 MB; verhoog naar bijv. 2048 voor '
+                           'zeer grote OLS-projecten).')
         label = QLabel(json.dumps(self.repo.config, indent=2))
         label.setWordWrap(True)
         layout.addWidget(label)
@@ -1206,6 +1319,28 @@ class MainWindow(QMainWindow):
         self.refresh()
 
     def refresh(self):
+        try:
+            if hasattr(self, 'dashboard_status'):
+                roots = self.service.library.roots()
+                online = sum(1 for root in roots if root['status'] == 'ONLINE')
+                summary = self.service.library.storage_summary()
+                running = [job for job in self.service.jobs()
+                           if job['status'] in ('running', 'paused')]
+                identities = len(self.repo.calibration_identities())
+                images = self.repo.db.rows(
+                    'SELECT COUNT(*) AS n FROM ecu_image_identities')[0]['n']
+                patterns = len(self.service.patterns_detail())
+                parts = [f"Library: {len(roots)} root(s), {online} online · "
+                         f"{summary['locations']} locaties / "
+                         f"{summary['unique_contents']} unieke contents",
+                         f"Kennis: {patterns} patronen · {identities} identiteiten · "
+                         f"{images} ECU-images",
+                         ("Taken bezig: " + ", ".join(
+                             f"{job['run_type']} ({job['status']})"
+                             for job in running[:3])) if running else "Geen taken bezig"]
+                self.dashboard_status.setText('\n'.join(parts))
+        except Exception:
+            pass
         try:
             if hasattr(self, 'compare_left'):
                 current_left = self.compare_left.currentData()

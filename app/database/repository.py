@@ -54,6 +54,13 @@ class Repository(RepositoryV3Mixin):
 
     def data(self, file_id: int) -> bytes:
         row = self.file(file_id)
+        if not Path(row["filepath"]).exists():
+            raise OSError(
+                f"Beheerde kopie van '{row['filename']}' ontbreekt op schijf "
+                f"({row['filepath']}). Dit gebeurt bij een database die van een "
+                f"andere computer komt. Importeer het bronbestand opnieuw "
+                f"(bronpad: {row['source_path']}) of gebruik Library-mode, waar "
+                f"bestanden op hun eigen plek blijven staan.")
         data = read_binary(row["filepath"], self.config["max_file_mb"])
         if hashes(data)["sha256"] != row["sha256"]:
             raise ValueError(f"Integriteitsfout in beheerde kopie: {row['filename']}")
@@ -781,20 +788,29 @@ class Repository(RepositoryV3Mixin):
         """
         unknown = [row for row in self.files() if row["file_type"] == "unknown"]
         typed = [row for row in self.files() if row["file_type"] in {"original", "tuned"}]
-        updated, review, skipped = [], [], []
+        updated, review, skipped, errors = [], [], [], []
         for row in unknown:
             label = infer_path_type(Path(row["source_path"]))
             if label in {"original", "tuned"}:
-                reason = "expliciet label in bestandsnaam of map"
-                self.reclassify_files([row["id"]], label)
+                try:
+                    self.reclassify_files([row["id"]], label)
+                except (OSError, ValueError) as exc:
+                    errors.append({"id": row["id"], "filename": row["filename"],
+                                   "reason": f"classificatie onmogelijk: {exc}"})
+                    continue
                 updated.append({"id": row["id"], "filename": row["filename"], "kind": label,
-                                "confidence": 100.0, "reason": reason})
+                                "confidence": 100.0, "reason": "expliciet label in bestandsnaam of map"})
                 continue
 
             exact_types = {item["file_type"] for item in typed if item["sha256"] == row["sha256"]}
             if len(exact_types) == 1:
                 label = exact_types.pop()
-                self.reclassify_files([row["id"]], label)
+                try:
+                    self.reclassify_files([row["id"]], label)
+                except (OSError, ValueError) as exc:
+                    errors.append({"id": row["id"], "filename": row["filename"],
+                                   "reason": f"classificatie onmogelijk: {exc}"})
+                    continue
                 updated.append({"id": row["id"], "filename": row["filename"], "kind": label,
                                 "confidence": 100.0, "reason": "exacte SHA256-overeenkomst"})
                 continue
@@ -803,16 +819,38 @@ class Repository(RepositoryV3Mixin):
             if not same_size:
                 skipped.append({"id": row["id"], "reason": "geen bestand met dezelfde grootte"})
                 continue
-            data = self.data(row["id"])
+            try:
+                data = self.data(row["id"])
+            except (OSError, ValueError) as exc:
+                # zelfherstellend: beheerde kopie ontbreekt (bv. database van
+                # een andere machine) — overslaan, niet crashen
+                errors.append({"id": row["id"], "filename": row["filename"],
+                               "reason": f"beheerde kopie onleesbaar: {exc}"})
+                continue
             best_by_type = {}
             for item in same_size:
-                evidence = compare(data, self.data(item["id"]), row, item, self.config["block_size"])
+                try:
+                    evidence = compare(data, self.data(item["id"]), row, item,
+                                       self.config["block_size"])
+                except (OSError, ValueError):
+                    errors.append({"id": item["id"], "filename": item["filename"],
+                                   "reason": "beheerde kopie onleesbaar; overgeslagen"})
+                    continue
                 best_by_type[item["file_type"]] = max(best_by_type.get(item["file_type"], 0.0), evidence["match_score"])
+            if not best_by_type:
+                skipped.append({"id": row["id"],
+                                "reason": "geen vergelijkbare bestanden leesbaar"})
+                continue
             ranked = sorted(best_by_type.items(), key=lambda item: item[1], reverse=True)
             if (len(ranked) == 1 or ranked[0][1] - ranked[1][1] >= 2.0) and ranked[0][1] >= 99.5:
                 label, score = ranked[0]
                 confidence = round(min(99.0, 80.0 + (score - 99.5) * 4), 2)
-                self.reclassify_files([row["id"]], label)
+                try:
+                    self.reclassify_files([row["id"]], label)
+                except (OSError, ValueError) as exc:
+                    errors.append({"id": row["id"], "filename": row["filename"],
+                                   "reason": f"classificatie onmogelijk: {exc}"})
+                    continue
                 updated.append({"id": row["id"], "filename": row["filename"], "kind": label,
                                 "confidence": confidence, "reason": "unieke binary-match",
                                 "match_score": round(score, 4)})
@@ -822,6 +860,7 @@ class Repository(RepositoryV3Mixin):
                                               for kind, score in ranked],
                                "reason": "binary-match niet uniek genoeg"})
         return {"updated": updated, "review": review, "skipped": skipped,
+                "errors": errors,
                 "note": "Alleen eenduidige evidence is automatisch toegepast; reviewgevallen blijven unknown."}
 
     def import_folder(self, folder: str, kind: str = "auto", progress=None,

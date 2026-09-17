@@ -1,3 +1,4 @@
+from PySide6.QtCore import Qt
 from fastapi.testclient import TestClient
 from app.api import create_api
 
@@ -71,7 +72,17 @@ def test_gui_smoke(service, pair, monkeypatch, tmp_path):
     window = MainWindow(service)
     window.show()
     application.processEvents()
-    assert window.nav.count() == 29  # …+ Backup & Health + ECU Images (V6) + Vergelijk A|B (V6)
+    assert window.page_count == 29  # alle pagina's blijven bestaan
+    assert window.nav.count() == 35  # 29 pagina's + 6 groepskoppen
+    # gebruikersvriendelijkheid: direct navigeren en paginazoeker werken
+    assert window.navigate('Library (V5)') is True
+    assert window.navigate('Bestaat Niet') is False
+    window.filter_nav('OLS')
+    visible = [window.nav.item(row).text() for row in range(window.nav.count())
+               if not window.nav.item(row).isHidden()
+               and window.nav.item(row).data(Qt.ItemDataRole.UserRole) == 'page']
+    window.filter_nav('')
+    assert {'WinOLS', 'OLS Explorer'} <= set(visible)
     assert window.file_table.rowCount() == 2
     project = tmp_path / 'gui-project.ols'
     project.write_bytes(b'OLS\x00GUI test project\x00')

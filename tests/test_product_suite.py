@@ -5,6 +5,7 @@ uitkomst."""
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -221,6 +222,35 @@ def test_export_report_formats(service, tmp_path):
     assert "<script>" not in open(evil_path).read()
     with pytest.raises(ValueError):
         export_report({"report": "x"}, "pdf", str(tmp_path / "no.pdf"))
+
+
+def test_auto_classify_survives_missing_managed_copies(service, tmp_path):
+    """Echte-userfix: database van een andere machine (Linux-paden op Windows)
+    mag auto-classificatie niet meer laten crashen; fouten worden gerapporteerd."""
+    src_a = tmp_path / "miss_unknown.bin"
+    src_b = tmp_path / "miss_original.bin"
+    src_a.write_bytes(b"Z" * 256)
+    src_b.write_bytes(b"Z" * 256)
+    unknown_id = service.repo.import_file(src_a, "unknown")
+    original_id = service.repo.import_file(src_b, "original")
+    for file_id in (unknown_id, original_id):
+        Path(service.repo.file(file_id)["filepath"]).unlink()
+    result = service.repo.auto_classify_evidence()
+    # het unknown-bestand met ontbrekende kopie wordt gemeld, geen crash;
+    # getypeerde bestanden (original) worden door auto-classify niet gelezen
+    assert any(entry["id"] == unknown_id for entry in result["errors"])
+    assert service.repo.file(original_id)["file_type"] == "original"
+
+
+def test_data_missing_copy_has_friendly_error(service, tmp_path):
+    src = tmp_path / "gone.bin"
+    src.write_bytes(b"Y" * 64)
+    file_id = service.repo.import_file(src)
+    filepath = Path(service.repo.file(file_id)["filepath"])
+    filepath.unlink()
+    with pytest.raises(OSError) as excinfo:
+        service.repo.data(file_id)
+    assert "Library-mode" in str(excinfo.value)
 
 
 def test_new_bin_library_multistage(service, tmp_path):
