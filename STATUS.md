@@ -2,7 +2,22 @@
 
 Datum: 2026-09-10 (bijgewerkt na V3-ronde)
 
-## V7.1-status (professionele import + in-app handleiding) — actueel
+## V7.2-status (crash-handler voor de Windows-exe) — actueel
+
+**133/133 tests groen.**
+
+- **Crash-hook** (`app/main.py::_install_crash_hook`): een ongevangen fout
+  schrijft nu **crash.log** naast de exe, toont een Qt-dialoog met de fout
+  (incl. detail-tab met volledige traceback) en houdt de console open tot op
+  Enter is gedrukt — geen onleesbaar verdwijnend cmd-venster meer.
+- GUI-startup kreeg **log-breadcrumbs** in `data/app.log` ("Qt laden…",
+  "hoofdpagina opbouwen…", "venster zichtbaar") zodat de log toont hoe ver
+  de startup kwam.
+- Build-artifacts (`build/`, `dist/`) staan op de ignore-lijst; de mislukte
+  GUI-start van de gebruiker (lege database aanwezig, dus crash ná
+  Service-init) wordt met de hook diagnosticeerbaar.
+
+## V7.1-status (professionele import + in-app handleiding)
 
 **133/133 tests groen.**
 

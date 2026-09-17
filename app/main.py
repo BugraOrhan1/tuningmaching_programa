@@ -5,11 +5,61 @@ import logging
 import os
 import secrets
 import sys
+import traceback
+from datetime import datetime
 from pathlib import Path
 from app.utils.config import load_config
 
 
+def _install_crash_hook() -> None:
+    """Zorg dat een crash ALTIJD zichtbaar is: console, crash.log en dialoog.
+
+    Zonder deze hook sluit de console van de Windows-exe direct en is de
+    foutmelding onleesbaar. De hook schrijft het volledige traceback naar
+    crash.log naast de exe, probeert een Qt-dialoog te tonen en houdt de
+    console open tot de gebruiker op Enter drukt.
+    """
+    def hook(exc_type, exc_value, exc_tb):
+        text = ''.join(traceback.format_exception(exc_type, exc_value, exc_tb))
+        header = (f"[{datetime.now().isoformat(timespec='seconds')}] "
+                  "TuningMatching is gestopt met een fout\n")
+        try:
+            sys.stderr.write(header + text + '\n')
+            sys.stderr.flush()
+        except Exception:
+            pass
+        log_path = None
+        try:
+            log_path = Path.cwd() / 'crash.log'
+            with open(log_path, 'a', encoding='utf-8') as handle:
+                handle.write(header + text + '\n')
+        except Exception:
+            log_path = None
+        try:
+            from PySide6.QtWidgets import QApplication, QMessageBox
+            application = QApplication.instance() or QApplication(['TuningMatching'])
+            box = QMessageBox(
+                QMessageBox.Icon.Critical,
+                'TuningMatching — onverwachte fout',
+                f"De app is gestopt met een fout.\n\n"
+                f"{exc_type.__name__}: {exc_value}\n\n"
+                f"Volledige details staan in: {log_path or 'crash.log (programmamap)'}\n"
+                "Stuur dat bestand mee als je hulp vraagt.")
+            box.setDetailedText(text)
+            box.exec()
+        except Exception:
+            pass
+        if getattr(sys, 'frozen', False):
+            try:
+                input('Druk op Enter om dit venster te sluiten…')
+            except (EOFError, OSError):
+                pass
+
+    sys.excepthook = hook
+
+
 def main() -> None:
+    _install_crash_hook()
     parser = argparse.ArgumentParser(description='Tuning File AI Assistant')
     sub = parser.add_subparsers(dest='command')
     sub.add_parser('gui')
@@ -172,11 +222,15 @@ def main() -> None:
         from app.service import Service
         service = Service(config)
         if args.command in (None, 'gui'):
+            logger = logging.getLogger(__name__)
+            logger.info('GUI: Qt laden…')
             from PySide6.QtWidgets import QApplication
             from app.ui.main_window import MainWindow
             application = QApplication(sys.argv[:1])
+            logger.info('GUI: hoofdpagina opbouwen…')
             window = MainWindow(service, first_run=True)
             window.show()
+            logger.info('GUI: venster zichtbaar — eventloop start')
             sys.exit(application.exec())
         elif args.command == 'api':
             import uvicorn
