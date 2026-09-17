@@ -2,7 +2,25 @@
 
 Datum: 2026-09-10 (bijgewerkt na V3-ronde)
 
-## V7.2-status (crash-handler voor de Windows-exe) — actueel
+## V7.3-status (wizard-crash gefixt — de echte exe-oorzaak) — actueel
+
+**134/134 tests groen.**
+
+- **Oorzaak van de exe-crash gevonden en gefixt**: de gebruiker stuurde de
+  traceback — `AttributeError: 'QWizard' object has no attribute
+  'registerField'` in `_wizard_profile`. PySide6 6.11 (in de exe via
+  `PySide6>=6.8,<7`) heeft `registerField` niet meer; de eerste-start-wizard
+  start alleen op een lege database, dus de tests vingen het niet.
+- Fix: geen `registerField`/`field()` meer — `self._wizard_profile_combo` en
+  `self._wizard_start_checkbox` worden direct uitgelezen (werkt op élke
+  PySide6-versie).
+- Nieuwe regressietest `test_first_run_wizard_pages` bouwt alle drie de
+  wizardpagina's en leest de widgets uit (crashte situatie gedekt);
+  wizard gebruikt verder geen verwijderde API's (gecheckt).
+- Crash-hook (V7.2) werkte zoals bedoeld: `fout.txt` van de gebruiker maakte
+  de diagnose in één keer duidelijk.
+
+## V7.2-status (crash-handler voor de Windows-exe)
 
 **133/133 tests groen.**
 

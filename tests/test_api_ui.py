@@ -84,6 +84,7 @@ def test_gui_smoke(service, pair, monkeypatch, tmp_path):
                and window.nav.item(row).data(Qt.ItemDataRole.UserRole) == 'page']
     window.filter_nav('')
     assert {'WinOLS', 'OLS Explorer'} <= set(visible)
+
     assert window.file_table.rowCount() == 2
     project = tmp_path / 'gui-project.ols'
     project.write_bytes(b'OLS\x00GUI test project\x00')
@@ -97,6 +98,31 @@ def test_gui_smoke(service, pair, monkeypatch, tmp_path):
     window.show_hex()
     assert 'ORI' in window.hex_view.toPlainText()
     window.close()
+
+
+def test_first_run_wizard_pages(service, monkeypatch):
+    """Regressie voor de Windows-exe-crash: PySide6 6.11+ heeft geen
+    QWizard.registerField meer. De eerste-start-wizard moet op élke
+    PySide6-versie zonder AttributeError bouwen en uitleesbaar zijn."""
+    monkeypatch.setenv('QT_QPA_PLATFORM', 'offscreen')
+    from PySide6.QtWidgets import QApplication, QWizard
+    from app.ui.main_window import MainWindow
+    application = QApplication.instance() or QApplication([])
+    window = MainWindow(service)
+    wizard = QWizard()
+    wizard.addPage(window._wizard_welcome())
+    wizard.addPage(window._wizard_roots(wizard))
+    wizard.addPage(window._wizard_profile(wizard))  # crashte vroeger hier
+    combo = window._wizard_profile_combo
+    checkbox = window._wizard_start_checkbox
+    combo.setCurrentIndex(2)
+    assert combo.currentText() == 'HIGH'
+    assert checkbox.isChecked() is True
+    # roots-pagina verzamelt paden zonder registerField
+    window._wizard_root_list.addItem(r'D:\Tuning')
+    assert wizard.page(1).validatePage() is True
+    assert window._wizard_root_paths == [r'D:\Tuning']
+
 
 
 def test_gui_background_analysis(service, pair, monkeypatch):

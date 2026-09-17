@@ -1321,7 +1321,8 @@ class MainWindow(QMainWindow):
         wizard.addPage(self._wizard_roots(wizard))
         wizard.addPage(self._wizard_profile(wizard))
         if wizard.exec():
-            profile = wizard.field('profile') or 'BALANCED'
+            combo = getattr(self, '_wizard_profile_combo', None)
+            profile = str(combo.currentText()) if combo else 'BALANCED'
             self.service.library.config['resource_preset'] = profile
             self._persist_profile(profile)
             for path in getattr(self, '_wizard_root_paths', []):
@@ -1330,7 +1331,8 @@ class MainWindow(QMainWindow):
                 except ValueError:
                     pass  # dubbele root: overslaan
             self.safe(self.refresh)
-            if wizard.field('start_scan'):
+            checkbox = getattr(self, '_wizard_start_checkbox', None)
+            if checkbox is None or checkbox.isChecked():
                 for root in self.service.library.roots():
                     self.run_job(lambda progress, root_id=root['id']:
                                  self.service.library.scan_root(root_id, progress=progress),
@@ -1390,8 +1392,11 @@ class MainWindow(QMainWindow):
         layout.addWidget(QLabel('LOW = minste disk-I/O en CPU; HIGH = snelste scan.'))
         layout.addStretch(1)
         page.setLayout(layout)
-        wizard.registerField('profile*', combo, property='currentText')
-        wizard.registerField('start_scan', start)
+        # NB: QWizard.registerField bestaat niet meer in PySide6 6.11+; de
+        # widgets worden direct als attribuut bewaard en in maybe_first_run
+        # uitgelezen. Dit werkt op élke PySide6-versie.
+        self._wizard_profile_combo = combo
+        self._wizard_start_checkbox = start
         return page
 
     def build_ecu_images(self):
