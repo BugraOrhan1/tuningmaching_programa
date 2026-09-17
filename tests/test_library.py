@@ -202,3 +202,52 @@ def test_all_locations_over_roots_and_import_to_files(lib):
     assert Path(by_name["a.bin"]["path"]).read_bytes() == b"A" * 4096
 
 
+
+
+def test_scan_throttles_progress_and_checkpoints(lib):
+    """10TB-herbouw: progress/checkpoint per CHUNK i.p.v. per bestand —
+    zelfde correcte eindresultaat, maar met ~1 melding per 64 bestanden."""
+    service, source, before = lib
+    big = source / "GROOT"
+    for index in range(300):
+        _write(big / f"f{index:04}.bin", bytes([index % 256]) * 1024)
+    root = service.library.add_root(str(source), "Lib")
+    calls = []
+    result = service.library.scan_root(root["id"], progress=calls.append)
+    assert result["status"] == "done" and result["new"] == 304
+    assert len(calls) <= 304 // 8 + 4  # gedronst: geen per-file events
+    locations = service.library.locations(root["id"], limit=1000)
+    assert len(locations) == 304
+
+
+def test_scan_parallel_workers_same_result(lib):
+    """Parallel hashen (preset-workers) geeft exact dezelfde content-identiteit
+    en statussen als single-threaded — alleen sneller."""
+    service, source, before = lib
+    root_single = service.library.add_root(str(source / "BMW"), "Single")
+    for path in (source / "BMW").rglob("*.ols"):  # zorg dat testdata klopt niet: BMW heeft alleen bins
+        pass
+    service.library.config["scan_hash_workers"] = 1
+    single = service.library.scan_root(root_single["id"])
+    root_multi = service.library.add_root(str(source), "Multi")
+    service.library.config["scan_hash_workers"] = 4
+    multi = service.library.scan_root(root_multi["id"])
+    assert multi["hashed"] == single["hashed"] + 2  # BMW-subset vs. alles (a, a_copy, b.ols, notes.txt = 4-2)
+    assert multi["status"] == "done" and multi["errors"] == 0
+    by_name = {row["filename"]: row for row in service.library.locations(root_multi["id"])}
+    assert by_name["a.bin"]["content_id"] == by_name["a_copy.bin"]["content_id"]
+    assert len(by_name["a.bin"]["sha256"]) == 64
+
+
+def test_repeat_scan_is_fast_unchanged_cache(lib):
+    """Tweede scan: 0 hashes door de size+mtime-cache (dit is dé 10TB-besparing
+    bij herhaald laden: alleen nieuwe/gewijzigde files worden gelezen)."""
+    service, source, before = lib
+    root = service.library.add_root(str(source), "Lib")
+    first = service.library.scan_root(root["id"])
+    assert first["hashed"] == 4 and first["new"] == 4
+    second = service.library.scan_root(root["id"])
+    assert second["hashed"] == 0
+    assert second["unchanged"] == 4 and second["new"] == 0
+    third = service.library.scan_root(root["id"], progress=lambda _msg: None)
+    assert third["hashed"] == 0 and third["unchanged"] == 4

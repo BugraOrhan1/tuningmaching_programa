@@ -241,7 +241,7 @@ class Service(ServiceV3Mixin):
                                 'confidence': report['confidence']})
                 except (ValueError, OSError) as exc:
                     pairs[pairs.index(pair)]['dna_error'] = str(exc)
-        files = [row for row in self.repo.files() if str(row.get('source_path', '')).startswith('ols://')]
+        files = [row for row in self.repo.files(limit=0) if str(row.get('source_path', '')).startswith('ols://')]
         return {
             'project_id': project_id,
             'versions': [{'version_index': v['version_index'], 'name': v['version_name'], 'role': v['role'],

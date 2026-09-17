@@ -10,6 +10,7 @@ opgebouwd. Scans zijn incrementeel (size+mtime-hashcache) en hervatbaar
 from __future__ import annotations
 
 import hashlib
+from concurrent.futures import ThreadPoolExecutor
 import json
 import zlib
 from pathlib import Path
@@ -18,6 +19,8 @@ LIBRARY_EXTENSIONS = {".bin", ".ori", ".ols"}
 FUTURE_EXTENSIONS = {".hex", ".s19", ".mot", ".txt", ".csv", ".zip", ".7z"}
 RESOURCE_PRESETS = {"LOW": 1, "BALANCED": 2, "HIGH": 4}
 SCAN_BATCH = 500
+SCAN_CHUNK = 64          # bestanden per hash/workwrite-chunk (checkpoint + 1 transactie)
+PRESET_HASH_WORKERS = {"LOW": 1, "BALANCED": 3, "HIGH": 6}
 STAT_KEYS = ("discovered", "hashed", "new", "unchanged", "modified", "moved",
              "missing", "duplicate", "errors", "skipped_by_resume")
 
@@ -145,11 +148,81 @@ class LibraryEngine:
                 found.append({"path": path, "stat": None})
         return found
 
+    def _hash_many(self, jobs: list[tuple], workers: int, progress=None) -> list[dict]:
+        """Hash een chunk bestanden parallel (hashlib geeft de GIL vrij tijdens
+        update(), dus threads overlapping I/O en CPU echt). Resultaat in
+        zelfde volgorde als de invoer; per bestand {"ok":..., ...}."""
+        if workers <= 1 or len(jobs) <= 1:
+            out = []
+            for path, max_file_mb in jobs:
+                try:
+                    out.append({"ok": True, "digests": self._hash_file(path, max_file_mb)})
+                except (OSError, ValueError) as exc:
+                    out.append({"ok": False, "error": str(exc)})
+            return out
+        with ThreadPoolExecutor(max_workers=min(workers, len(jobs))) as pool:
+            futures = [pool.submit(self._hash_file, path, max_file_mb)
+                       for path, max_file_mb in jobs]
+            out = []
+            for future in futures:
+                try:
+                    out.append({"ok": True, "digests": future.result()})
+                except (OSError, ValueError) as exc:
+                    out.append({"ok": False, "error": str(exc)})
+        return out
+
+    def _content_id(self, db, digests: dict, file_path: Path, stat_result) -> int:
+        """Content-identiteit binnen een open transactie (geen nieuwe verbinding)."""
+        rows = db.execute("SELECT id FROM content_objects WHERE sha256=?",
+                          (digests["sha256"],)).fetchall()
+        if rows:
+            return rows[0]["id"]
+        cursor = db.execute(
+            """INSERT INTO content_objects(sha256,md5,crc32,size,file_type)
+               VALUES (?,?,?,?,?)""",
+            (digests["sha256"], digests["md5"], digests["crc32"],
+             stat_result.st_size, file_type_for(file_path.suffix)))
+        return cursor.lastrowid
+
+    def _record_batch(self, db, root_id: int, scan_id: int, entries: list[dict]) -> None:
+        """Alle locatie-writes van één chunk in ééN transactie (één commit)."""
+        for entry in entries:
+            file_path = entry["path"]
+            stat_result = entry["stat"]
+            previous_row = entry.get("previous_row")
+            if previous_row:
+                db.execute("""UPDATE file_locations SET content_id=?, size=?, mtime=?, ctime=?,
+                    scan_status=?, analysis_state='NEW', metadata=?, last_seen_scan_id=?
+                    WHERE id=?""",
+                           (entry["content_id"], stat_result.st_size, stat_result.st_mtime,
+                            stat_result.st_ctime, entry["scan_status"],
+                            json.dumps(entry.get("metadata") or {}, ensure_ascii=False),
+                            scan_id, previous_row["id"]))
+            else:
+                db.execute("""INSERT INTO file_locations
+                    (root_id, content_id, path, normalized_path, filename, extension,
+                     size, mtime, ctime, scan_status, analysis_state, metadata,
+                     last_seen_scan_id)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                           (root_id, entry["content_id"], str(file_path),
+                            str(file_path.resolve()), file_path.name,
+                            file_path.suffix.lower(),
+                            stat_result.st_size, stat_result.st_mtime,
+                            stat_result.st_ctime, entry["scan_status"], "NEW",
+                            json.dumps(entry.get("metadata") or {}, ensure_ascii=False),
+                            scan_id))
+
     def scan_root(self, root_id: int, resume: bool = False, progress=None) -> dict:
-        """Incrementeel en hervatbaar. Ongewijzigde bestanden (zelfde
-        size+mtime) worden niet opnieuw gehasht; na een onderbreking gaat de
-        scan vanaf het checkpoint verder en wordt NIET aangenomen dat files
-        gelijk zijn — elk bezocht bestand wordt opnieuw gecontroleerd."""
+        """Incrementeel, hervatbaar en geschaald voor very grote bronnen
+        (10TB+). Snelheid door drie principes:
+        1. ongewijzigde bestanden (zelfde size+mtime) worden nooit opnieuw
+           gehasht;
+        2. gehasht wordt PARALLEL met een worker-pool (preset-gestuurd);
+        3. database-writes, checkpoints en progress-meldingen gebeuren per
+           CHUNK (SCAN_CHUNK bestanden) in ééN transactie — niet per bestand.
+        Na een onderbreking gaat de scan vanaf het checkpoint verder en wordt
+        NIET aangenomen dat files gelijk zijn — elk bezocht bestand wordt
+        opnieuw gecontroleerd."""
         root = self.root(root_id)
         if root is None:
             raise ValueError("Onbekende library root")
@@ -162,12 +235,16 @@ class LibraryEngine:
             return {"scan_id": None, "status": "OFFLINE",
                     "note": "Schijf/map niet bereikbaar; database blijft bruikbaar en "
                             "bestaande locaties worden NIET als MISSING gemarkeerd."}
+        workers = int(self.config.get(
+            "scan_hash_workers", PRESET_HASH_WORKERS.get(preset, 3)))
+        chunk_size = max(8, int(self.config.get("scan_chunk", SCAN_CHUNK)))
         batch_limit = int(self.config.get("scan_batch", SCAN_BATCH))
         previous = self.interrupted_scan(root_id) if resume else None
         with self.repo.db.connect() as db:
             cursor = db.execute(
                 "INSERT INTO library_scans(root_id,config) VALUES (?,?)",
-                (root_id, json.dumps({"preset": preset})))
+                (root_id, json.dumps({"preset": preset, "hash_workers": workers,
+                                      "chunk": chunk_size})))
             scan_id = cursor.lastrowid
         start_after = previous["checkpoint"].get("last_path") if previous else None
         stats = dict(previous["stats"]) if previous else {}
@@ -181,71 +258,102 @@ class LibraryEngine:
                              self.repo.db.rows(
                                  "SELECT * FROM file_locations WHERE root_id=?", (root_id,))}
             seen: set[str] = set()
-            batch = 0
+            visited_last = None
+            processed = 0
+
+            def report(force: bool = False):
+                """Checkpoint + progress, maar max ~1x per chunk i.p.v. per bestand."""
+                nonlocal processed
+                if visited_last is None:
+                    return
+                if force or processed % chunk_size == 0:
+                    self._checkpoint(scan_id, visited_last, stats)
+                    if progress:
+                        progress(f"Scan {stats['discovered'] - stats['skipped_by_resume']}"
+                                 f"/{stats['discovered']} "
+                                 f"(nieuw {stats['new']}, gelijk {stats['unchanged']})")
+
+            # planning: skip-resume filter en daarna chunks
+            planned = []
             for item in discovered:
                 file_path, stat_result = item["path"], item["stat"]
                 if start_after and str(file_path).casefold() <= str(start_after).casefold():
                     stats["skipped_by_resume"] += 1
                     continue
-                if stat_result is None:
-                    stats["errors"] += 1
-                    continue
-                normalized = str(file_path.resolve())
-                seen.add(normalized.casefold())
-                previous_row = previous_rows.get(normalized.casefold())
-                content_id = None
-                scan_status = "NEW"
-                if (previous_row and previous_row["size"] == stat_result.st_size
-                        and previous_row["mtime"] == stat_result.st_mtime
-                        and previous_row["content_id"]):
-                    # hash-cache: ongewijzigd volgens size+mtime, niet opnieuw hashen
-                    content_id = previous_row["content_id"]
-                    scan_status = "UNCHANGED"
-                    stats["unchanged"] += 1
-                else:
-                    try:
-                        content_id = self._ensure_content(file_path, stat_result,
-                                                          max_file_mb, stats)
-                    except (OSError, ValueError) as exc:
-                        stats["errors"] += 1
-                        self._record_location(root_id, scan_id, file_path, stat_result,
-                                              None, "ERROR", {"error": str(exc)},
-                                              previous_row)
-                        continue
-                    if previous_row is None:
-                        scan_status = "NEW"
-                        stats["new"] += 1
-                    elif previous_row["content_id"] == content_id:
-                        scan_status = "UNCHANGED"  # timestamps gewijzigd, inhoud gelijk
-                        stats["unchanged"] += 1
-                    else:
-                        scan_status = "MODIFIED"
-                        stats["modified"] += 1
-                self._record_location(root_id, scan_id, file_path, stat_result,
-                                      content_id, scan_status, {}, previous_row)
-                batch += 1
-                if progress:
-                    # interactieve scan: checkpoint per bestand zodat een crash
-                    # (ook van buitenaf) altijd exact kan hervatten
-                    self._checkpoint(scan_id, str(file_path), stats)
-                    batch = 0
-                    progress(f"Scan {stats['discovered'] - stats['skipped_by_resume']}"
-                             f"/{stats['discovered']}")
-                elif batch >= batch_limit:
-                    self._checkpoint(scan_id, str(file_path), stats)
-                    batch = 0
+                planned.append((item["path"], item["stat"]))
+            with self.repo.db.connect() as db:
+                for chunk_start in range(0, len(planned), chunk_size):
+                    chunk = planned[chunk_start:chunk_start + chunk_size]
+                    hash_jobs, hash_items = [], []
+                    writes = []
+                    for file_path, stat_result in chunk:
+                        if stat_result is None:
+                            stats["errors"] += 1
+                            continue
+                        normalized = str(file_path.resolve())
+                        seen.add(normalized.casefold())
+                        visited_last = str(file_path)
+                        previous_row = previous_rows.get(normalized.casefold())
+                        if (previous_row and previous_row["size"] == stat_result.st_size
+                                and previous_row["mtime"] == stat_result.st_mtime
+                                and previous_row["content_id"]):
+                            # hash-cache: ongewijzigd volgens size+mtime
+                            writes.append({"path": file_path, "stat": stat_result,
+                                           "previous_row": previous_row,
+                                           "content_id": previous_row["content_id"],
+                                           "scan_status": "UNCHANGED"})
+                            stats["unchanged"] += 1
+                        else:
+                            hash_jobs.append((file_path, max_file_mb))
+                            hash_items.append((file_path, stat_result, previous_row))
+                    if hash_jobs:
+                        results = self._hash_many(hash_jobs, workers)
+                        for (file_path, stat_result, previous_row), result in zip(hash_items, results):
+                            if not result["ok"]:
+                                stats["errors"] += 1
+                                writes.append({"path": file_path, "stat": stat_result,
+                                               "previous_row": previous_row,
+                                               "content_id": None,
+                                               "scan_status": "ERROR",
+                                               "metadata": {"error": result["error"]}})
+                                continue
+                            stats["hashed"] += 1
+                            content_id = self._content_id(db, result["digests"],
+                                                          file_path, stat_result)
+                            if previous_row is None:
+                                scan_status = "NEW"
+                                stats["new"] += 1
+                            elif previous_row["content_id"] == content_id:
+                                scan_status = "UNCHANGED"
+                                stats["unchanged"] += 1
+                            else:
+                                scan_status = "MODIFIED"
+                                stats["modified"] += 1
+                            writes.append({"path": file_path, "stat": stat_result,
+                                           "previous_row": previous_row,
+                                           "content_id": content_id,
+                                           "scan_status": scan_status})
+                    self._record_batch(db, root_id, scan_id, writes)
+                    db.commit()
+                    processed += len(chunk)
+                    report()
+                report(force=True)
 
             # MISSING: bekende paden die deze scan niet zag (en niet waren overgeslagen)
+            missing_rows = []
             for key, row in previous_rows.items():
                 if row["scan_status"] == "MISSING":
                     continue
                 if start_after and key <= str(start_after).casefold():
                     continue  # nog niet bezocht in hervatte scan: niets concluderen
                 if key not in seen:
-                    with self.repo.db.connect() as db:
+                    missing_rows.append(row)
+            if missing_rows:
+                with self.repo.db.connect() as db:
+                    for row in missing_rows:
                         db.execute("UPDATE file_locations SET scan_status='MISSING', "
                                    "last_seen_scan_id=? WHERE id=?", (scan_id, row["id"]))
-                    stats["missing"] += 1
+                    stats["missing"] += len(missing_rows)
 
             # MOVED/DUPLICATE-nabewerking: alleen nu is het volledige beeld bekend
             with self.repo.db.connect() as db:
@@ -266,7 +374,10 @@ class LibraryEngine:
                         "SELECT COUNT(*) FROM file_locations WHERE root_id=? AND scan_status=?",
                         (root_id, status)).fetchone()[0]
             self._checkpoint(scan_id, str(root_path), stats, final=True)
-            self._refresh_search_index()
+            if stats["new"] or stats["modified"] or resume:
+                # zoekindex alleen herbouwen als er iets veranderd is (scheelt
+                # een volledige FTS-rebuild bij elke ongewijzigde herscan)
+                self._refresh_search_index()
             with self.repo.db.connect() as db:
                 db.execute("""UPDATE library_roots SET status='ONLINE',
                     last_scan_at=CURRENT_TIMESTAMP,

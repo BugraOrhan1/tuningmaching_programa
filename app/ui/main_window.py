@@ -69,9 +69,11 @@ Selecteer rijen en gebruik "Selectie → Files (BIN/ORI)" om ze één voor één
 naar Files te halen (bron blijft altijd staan), of "→ WinOLS verwerken"
 voor .ols-projecten.<br>
 <b>Library (V5)</b> — registreer hele bronmappen/schijven (D:\Tuning, E:\WinOLS…).
-Bestanden blijven op hun plek; de app indexeert pad + SHA256. Scans zijn
-incrementeel (alleen nieuwe/gewijzigde files worden opnieuw gelezen) en hervatten
-na onderbreking. Daarna "analyseren" verwerkt nieuwe content één keer per unieke
+Bestanden blijven op hun plek; de app indexeert pad + SHA256. Gebouwd voor
+10TB+: <u>ongewijzigde bestanden worden nooit opnieuw gelezen</u> (2e scan =
+seconden), hashen gebeurt <u>parallel</u> (profiel LOW=1 / BALANCED=3 / HIGH=6
+workers) en de GUI blijft responsief (paginaladen). Scans hervatten na
+onderbreking. Daarna "analyseren" verwerkt nieuwe content één keer per unieke
 inhoud. Alles wat een scan vindt, verschijnt óók onderaan de Files-pagina.<br>
 <b>WinOLS</b> — importeer een .ols-project (één bestand). De app leest versies,
 extraheert bewezen binaries naar Files, bepaalt Original/Tuned-rollen uit
@@ -1804,7 +1806,11 @@ class MainWindow(QMainWindow):
         self.stats.setText('\n\n'.join(f'{key}:  {value}' for key, value in self.repo.dashboard().items()))
         files = self.repo.files(self.search.text())
         self.populate(self.file_table, files, ['id', 'filename', 'file_type', 'file_size', 'ecu_family', 'software_number', 'hardware_number', 'stage', 'customer', 'project'])
-        if files:
+        total = self.repo.files_count(self.search.text())
+        if total > len(files):
+            self.file_hint.setText(f"{len(files)} van {total} bestanden getoond (snelheid) — "
+                                   "verfijn met het zoekveld hierboven om de rest te zien.")
+        elif files:
             self.file_hint.setText('Bestanden in Files: eigen BIN/ORI-imports én automatisch geëxtraheerde '
                                    'OLS-versie-binaries (bron: ols://…). De bron-OLS blijft altijd ongewijzigd.')
         else:

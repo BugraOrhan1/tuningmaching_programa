@@ -210,6 +210,10 @@ class Database:
         db = sqlite3.connect(self.path, timeout=30)
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA foreign_keys=ON")
+        # WAL + synchronous=NORMAL: ordes van grootte sneller committen bij
+        # bulk-scans, veilig tegen app-crashes (alleen bij stroomuitval kan de
+        # allerlaatste transactie wegrollen —bronbestanden worden nooit geraakt)
+        db.execute("PRAGMA synchronous=NORMAL")
         try:
             with db:
                 yield db

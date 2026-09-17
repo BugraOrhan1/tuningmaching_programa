@@ -40,11 +40,27 @@ class Repository(RepositoryV3Mixin):
         for name in ("originals", "tuned", "unknown", "winols_projects", "reports"):
             (self.root / name).mkdir(parents=True, exist_ok=True)
 
-    def files(self, query: str = "") -> list[dict]:
+    FILE_PAGE_LIMIT = 400  # GUI laadt pagina's; zoeken verfijnt (10TB-proof)
+
+    def files_count(self, query: str = "") -> int:
         columns = ("filename", "file_type", *FIELDS)
         where = " OR ".join(f"coalesce({c},'') LIKE ? ESCAPE '\\'" for c in columns)
         term = '%' + query.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') + '%'
-        return self.db.rows(f"SELECT * FROM files WHERE {where} ORDER BY id DESC", (term,) * len(columns))
+        rows = self.db.rows(f"SELECT COUNT(*) AS n FROM files WHERE {where}",
+                            (term,) * len(columns))
+        return rows[0]["n"]
+
+    def files(self, query: str = "", limit: int | None = None) -> list[dict]:
+        columns = ("filename", "file_type", *FIELDS)
+        where = " OR ".join(f"coalesce({c},'') LIKE ? ESCAPE '\\'" for c in columns)
+        term = '%' + query.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') + '%'
+        effective = self.FILE_PAGE_LIMIT if limit is None else limit
+        sql = f"SELECT * FROM files WHERE {where} ORDER BY id DESC"
+        args = [term] * len(columns)
+        if effective:
+            sql += " LIMIT ?"
+            args.append(effective)
+        return self.db.rows(sql, tuple(args))
 
     def file(self, file_id: int) -> dict:
         rows = self.db.rows("SELECT * FROM files WHERE id=?", (file_id,))

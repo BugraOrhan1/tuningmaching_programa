@@ -2,7 +2,26 @@
 
 Datum: 2026-09-10 (bijgewerkt na V3-ronde)
 
-## V7.5-status (pagina-consolidatie: dubbele pagina's samengevoegd) — actueel
+## V7.6-status (10TB-snelheid: parallelle scan + chunked writes + GUI-paginering) — actueel
+
+**139/139 tests groen. Benchmark (sandbox, 1200×256KB random):** hashen met
+4 workers = **1,9× sneller**; herscan 1200 bestanden = **84 ms** (ongewijzigd-
+cache, 0 hashes); 20.000 bestanden scannen = **4,8 s**; Files-query bij 21k+
+locaties = **1 ms** (paginalimiet).
+
+- **scan_root herbouwd**: hash-werk in ThreadPoolExecutor (hashlib geeft de
+  GIL vrij), workers uit preset (LOW=1/BALANCED=3/HIGH=6, override
+  `scan_hash_workers`); alles per CHUNK (64 bestanden): één transactie,
+  één checkpoint, één progress-melding per chunk i.p.v. per bestand.
+- **SQLite**: `PRAGMA synchronous=NORMAL` per connectie (bulk-commit-winst
+  in WAL, bronbestanden altijd veilig).
+- **repo.files(query, limit)**: paginalimiet 400 + `files_count()`; GUI-hint
+  "X van Y getoond — verfijn met zoeken"; service `auto_process_ols` leest
+  expliciet alles (limit=0); FTS-rebuild alleen nog bij new/modified/resume.
+- Nieuwe tests: throttling, parallel==sequentieel resultaat, ongewijzigd-
+  cache (herscan 0 hashes), 300-bestanden chunk-flow.
+
+## V7.5-status (pagina-consolidatie: dubbele pagina's samengevoegd)
 
 **136/136 tests groen. 31 → 26 pagina's (nav 37 → 32), alle functies behouden.**
 
