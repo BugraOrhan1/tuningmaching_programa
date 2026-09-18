@@ -53,8 +53,9 @@ kandidaatbestand (checksums niet gecorrigeerd: eerst WinOLS-controle).</li>
 <h2>Elke pagina uitgelegd</h2>
 
 <h3>START</h3>
-<p><b>Dashboard</b> — live status (roots online, bestanden/contents, kennis, taken) en
-de genummerde snelstart. Begin hier.<br>
+<p><b>Dashboard</b> — live status (roots online, bestanden/contents, kennis, taken),
+een slim advies ("🤖 Advies: …" — de belangrijkste volgende stap) en de
+genummerde snelstart. Begin hier.<br>
 <b>Assistent</b> — jouw lokale AI-gids: stel vragen als "Wat moet ik nu doen?",
 "Waarom matcht mijn BIN niet?", "Wat ligt er ter review?", "Welke tunes kan ik
 bouwen?" of "Hoe krijg ik mijn 10TB snel geladen?" — hij antwoordt met échte
@@ -84,12 +85,14 @@ onderbreking. Daarna "analyseren" verwerkt nieuwe content één keer per unieke
 inhoud. Alles wat een scan vindt, verschijnt óók onderaan de Files-pagina.<br>
 <b>⭐ Root volledig verwerken</b> — de grote knop op de Library-pagina: scant
 de geselecteerde root en verwerkt daarna AUTOMATISCH alles (BIN/ORI naar
-Files, elk .ols volledig). Miljoenen bestanden? Eén keer starten en laten
-draaien — hervatbaar na onderbreking, en al-aanwezig wordt overgeslagen
-zonder lezen. Handmatig Library→Files selecteren is niet meer nodig.
-Sterke losse BIN-paren (expliciet stage/add-on-label + ≥90% score + geen
-tegenstrijdige metadata) worden hierbij automatisch bevestigd; de rest
-blijft bewust in de reviewwachtrij.<br>
+Files, elk .ols volledig), classificeert unknowns op uniek bewijs,
+bevestigt sterke BIN-paren (expliciet label + ≥90% score, geen
+tegenstrijdige metadata) en leert patronen uit alle bevestigde paren.
+Miljoenen bestanden? Eén keer starten en laten draaien — hervatbaar na
+onderbreking, en al-aanwezig wordt overgeslagen zonder lezen.<br>
+<b>🤖 ALLES automatisch afhandelen</b> — de blauwe knop: doet het bovenstaande
+voor élke geregistreerde root achter elkaar (offline schijven worden
+netjes overgeslagen). Één klik = het hele huiswerk.<br>
 <b>WinOLS</b> — importeer een .ols-project (één bestand). De app leest versies,
 extraheert bewezen binaries naar Files, bepaalt Original/Tuned-rollen uit
 expliciete WinOLS-labels en stelt paren voor bij gelijke werkelijke
@@ -527,6 +530,10 @@ class MainWindow(QMainWindow):
         self.dashboard_status.setWordWrap(True)
         self.dashboard_status.setStyleSheet('font-size: 15px; padding: 6px;')
         layout.addWidget(self.dashboard_status)
+        self.smart_advice = QLabel('Advies wordt geladen…')
+        self.smart_advice.setWordWrap(True)
+        self.smart_advice.setStyleSheet('font-weight: bold; padding: 6px; background:#eef2ff;')
+        layout.addWidget(self.smart_advice)
         quick = QLabel('SNELSTART')
         quick.setStyleSheet('font-weight: bold; padding: 6px 0;')
         layout.addWidget(quick)
@@ -1399,6 +1406,10 @@ class MainWindow(QMainWindow):
         bulk_btn.setStyleSheet('font-weight: bold; padding: 8px;')
         bulk_btn.clicked.connect(self.bulk_process_selected_root)
         layout.addWidget(bulk_btn)
+        all_btn = QPushButton('🤖 ALLES automatisch afhandelen — élke root: scan + importeren + classificeren + paren + leren (hervatbaar)')
+        all_btn.setStyleSheet('font-weight: bold; padding: 8px; background:#1d4ed8; color:#fff;')
+        all_btn.clicked.connect(self.bulk_process_all_roots)
+        layout.addWidget(all_btn)
         self.library_storage = QLabel('Opslag: nog geen library geïndexeerd.')
         self.library_storage.setWordWrap(True)
         layout.addWidget(self.library_storage)
@@ -1431,17 +1442,38 @@ class MainWindow(QMainWindow):
             callback=lambda result: self.safe(
                 lambda: self.show_bulk_result(result)))
 
-    def show_bulk_result(self, result):
+    def bulk_process_all_roots(self):
+        """Één knop voor het hele plaatje: élke geregistreerde root volledig
+        verwerken (scan → import → classificeren → paren → patronen)."""
+        roots = self.service.library.roots()
+        if not roots:
+            QMessageBox.information(
+                self, 'Alles verwerken',
+                'Er staan nog geen library-roots geregistreerd. Voeg eerst een '
+                'bronmap of schijf toe op deze pagina.')
+            return
+        self.run_job(lambda progress: self.service.process_all_roots(progress, resume=True),
+                     job_name='alle roots automatisch verwerken',
+                     callback=lambda result: self.safe(
+                         lambda: self.show_bulk_result(result, alle_roots=True)))
+
+    def show_bulk_result(self, result, alle_roots=False):
         self.refresh()
         errors = result.get('errors') or []
-        lines = ["Root volledig verwerken klaar.",
-                 '',
-                 f"Gescand (bestanden gevonden): {result.get('scanned', '—')}",
-                 f"BIN/ORI nieuw naar Files: {result.get('imported', 0)}",
-                 f"Al aanwezig (overgeslagen zonder lezen): {result.get('skipped_existing', 0)}",
-                 f"OLS-projecten volledig verwerkt: {result.get('ols_projects', 0)}",
-                 f"Paren automatisch bevestigd (label+bewijs): {result.get('pairs_auto_confirmed', 0)} · "
-                 f"voor review: {result.get('pairs_review', 0)}"]
+        kop = ('ALLES automatisch afgehandeld.' if alle_roots
+               else 'Root volledig verwerken klaar.')
+        lines = [kop, '']
+        if alle_roots:
+            lines.append(f"Roots verwerkt: {result.get('roots_total', 0)} "
+                         f"(offline: {result.get('roots_offline', 0)})")
+        lines += [f"Gescand (bestanden gevonden): {result.get('scanned', '—')}",
+                  f"BIN/ORI nieuw naar Files: {result.get('imported', 0)}",
+                  f"Al aanwezig (overgeslagen zonder lezen): {result.get('skipped_existing', 0)}",
+                  f"OLS-projecten volledig verwerkt: {result.get('ols_projects', 0)}",
+                  f"Automatisch geclassificeerd (uniek bewijs): {result.get('auto_classified', 0)}",
+                  f"Paren automatisch bevestigd (label+bewijs): {result.get('pairs_auto_confirmed', 0)} · "
+                  f"voor review: {result.get('pairs_review', 0)}",
+                  f"Patronen geleerd: {result.get('patterns_built', 0)}"]
         if errors:
             lines.append(f"Fouten: {len(errors)} (eerste 3)")
             lines += [f"  • {item['path']}: {item['error']}" for item in errors[:3]]
@@ -1584,10 +1616,10 @@ class MainWindow(QMainWindow):
             self.safe(self.refresh)
             checkbox = getattr(self, '_wizard_start_checkbox', None)
             if checkbox is None or checkbox.isChecked():
-                for root in self.service.library.roots():
-                    self.run_job(lambda progress, root_id=root['id']:
-                                 self.service.library.scan_root(root_id, progress=progress),
-                                 callback=lambda _result: self.safe(self.refresh))
+                # volledige automatisering i.p.v. alléén scannen
+                self.run_job(lambda progress: self.service.process_all_roots(progress, resume=True),
+                             job_name='eerste keer: alles automatisch verwerken',
+                             callback=lambda _result: self.safe(self.refresh))
 
     def _wizard_welcome(self):
         page = QWizardPage()
@@ -1637,7 +1669,7 @@ class MainWindow(QMainWindow):
         combo.setObjectName('profileCombo')
         layout.addWidget(QLabel('Resourceprofiel (aantal hash/analyse-workers):'))
         layout.addWidget(combo)
-        start = QCheckBox('Direct de eerste scan starten (hervatbaar)')
+        start = QCheckBox('Direct ALLES automatisch afhandelen: scan + importeren + classificeren + paren + leren (hervatbaar)')
         start.setChecked(True)
         layout.addWidget(start)
         layout.addWidget(QLabel('LOW = minste disk-I/O en CPU; HIGH = snelste scan.'))
@@ -1922,6 +1954,11 @@ class MainWindow(QMainWindow):
                 images = self.repo.db.rows(
                     'SELECT COUNT(*) AS n FROM ecu_image_identities')[0]['n']
                 patterns = len(self.service.patterns_detail())
+                try:
+                    advice = self.service.assistant.answer('wat nu')['answer'].splitlines()[0]
+                    self.smart_advice.setText('🤖 Advies: ' + advice)
+                except Exception:
+                    pass
                 parts = [f"Library: {len(roots)} root(s), {online} online · "
                          f"{summary['locations']} locaties / "
                          f"{summary['unique_contents']} unieke contents",

@@ -80,11 +80,13 @@ class Assistant:
             steps.append(f"2. {c['unknowns']} bestanden zijn 'unknown': draai 'Unknown automatisch classificeren' "
                          "(Files-pagina of dashboard). Blijft iemand unknown? Dan is het bewijs te zwak — dat is bewust.")
         if c["unconfirmed"]:
-            steps.append(f"3. {c['unconfirmed']} paren wachten op bevestiging: controleer ze op Original/Tuned Pairs. "
-                         "Sterke paren met duidelijk stage/add-on-label worden bij bulk-verwerking automatisch bevestigd.")
+            steps.append(f"3. {c['unconfirmed']} paren wachten op bevestiging: sterke paren (label + ≥90%) "
+                         "worden automatisch bevestigd bij 'ALLES automatisch afhandelen' of "
+                         "'Root volledig verwerken'; de rest controleer je op Original/Tuned Pairs.")
         if c["confirmed"] and c["patterns"] == 0:
-            steps.append("4. Je hebt bevestigde paren maar nog geen patronen: bouw patronen op de Patronen-pagina "
-                         "— daarna herkent New BIN Analyse bekende wijzigingen.")
+            steps.append("4. Je hebt bevestigde paren maar nog geen patronen: die leert de app automatisch "
+                         "bij 'ALLES automatisch afhandelen' (of handmatig op de Patronen-pagina) — "
+                         "daarna herkent New BIN Analyse bekende wijzigingen.")
         if c["confirmed"] >= 1:
             steps.append(f"5. Tune Bouwer is klaar voor gebruik: {self._recipes_line()}")
         else:

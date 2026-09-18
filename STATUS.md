@@ -2,6 +2,26 @@
 
 Datum: 2026-09-10 (bijgewerkt na V3-ronde)
 
+## V8.0-status (volledige automatisering: bulk = hele pijplijn; ALLES-knop; slim advies) — actueel
+
+**152/152 tests groen.**
+
+- **process_root_bulk is nu de complete pijplijn**: scan → importeren →
+  auto_classify_evidence (uniek bewijs) → suggest + auto_confirm_binary_pairs
+  (label+≥90) → run_pattern_job (leren uit bevestigde paren). Elke stap
+  try/except-wrapped: bulk kan nooit breken; alle sleutels in het resultaat
+  (auto_classified, pairs_auto_confirmed/review, patterns_built).
+- **service.process_all_roots**: élke root achter elkaar; offline schijven
+  worden netjes overgeslagen (OFFLINE-status nu doorgegeven in bulk-resultaat);
+  alles optellen in één samenvatting.
+- **GUI**: blauwe "🤖 ALLES automatisch afhandelen"-knop op Library;
+  dashboard toont "🤖 Advies: …" (belangrijkste volgende stap, uit de
+  assistent); eerste-start-wizard checkbox start nu de volledige automatisering
+  i.p.v. alléén een scan.
+- Assistent-teksten bijgewerkt (auto-confirm + automatisch patronen leren).
+- Tests: volledige-pijplijn-bulk, process_all_roots (incl. offline-root),
+  bestaande bulk/wizard-tests blijven groen.
+
 ## V7.9-status (lokale Assistent + auto-confirm van sterke BIN-paren) — actueel
 
 **150/150 tests groen.**

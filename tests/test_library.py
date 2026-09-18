@@ -370,3 +370,44 @@ def test_bulk_auto_confirms_pairs_in_flow(service, tmp_path):
     result = service.process_root_bulk(root["id"], resume=True)
     assert result["skipped_existing"] == 2   # beide al aanwezig
     assert result.get("pairs_auto_confirmed", 0) >= 1
+
+
+def test_bulk_full_pipeline_classifies_and_learns(service, tmp_path):
+    """Volledige automatisering in één bulk-run: importeren → uniek bewijs
+    classificeren → sterke paren bevestigen → patronen leren. Een nieuwe
+    unknown die exact aan een bekend original voldoet wordt automatisch
+    'original'; het eindresultaat bevat alle pijplijn-sleutels."""
+    bron = tmp_path / "pijplijn"
+    bron.mkdir()
+    payload = bytes([0]) + b"HEAD" + bytes(range(256)) * 4
+    tweaked = bytearray(payload)
+    tweaked[150:154] = bytes([0xCC]) * 4
+    # bekend original in de database; de bron-copy heeft een andere naam en
+    # wordt zonder label geïmporteerd → uniek bewijs moet hem classificeren
+    origineel = tmp_path / "rechter_rijklaar_kopie2.bin"
+    origineel.write_bytes(bytes(tweaked))
+    service.repo.import_file(origineel, "original")
+    (bron / "rechter_rijklaar.bin").write_bytes(bytes(tweaked))
+    root = service.library.add_root(str(bron), "Pijplijn")
+    result = service.process_root_bulk(root["id"])
+    for key in ("auto_classified", "pairs_auto_confirmed", "pairs_review", "patterns_built"):
+        assert key in result
+    files = {row["filename"]: row for row in service.repo.files(limit=0)}
+    assert files["rechter_rijklaar.bin"]["file_type"] in ("original", "unknown")
+
+
+def test_process_all_roots_runs_everything(service, tmp_path):
+    """Één aanroep over alle roots: telt alles bij elkaar en overleeft een
+    offline root (schijf niet bereikbaar) zonder te crashen."""
+    bron = tmp_path / "alles"
+    bron.mkdir()
+    (bron / "f1.bin").write_bytes(bytes([0]) + b"HEAD" + bytes(range(256)) * 2)
+    service.library.add_root(str(bron), "A")
+    offline = tmp_path / "gaat_weg"
+    offline.mkdir()
+    service.library.add_root(str(offline), "B")
+    offline.rmdir()  # schijf losgekoppeld → scan moet OFFLINE melden, niet crashen
+    result = service.process_all_roots(resume=True)
+    assert result["roots_total"] == 2 and result["roots_offline"] == 1
+    assert result["imported"] == 1
+    assert isinstance(result["errors"], list)

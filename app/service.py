@@ -394,6 +394,7 @@ class Service(ServiceV3Mixin):
             if not run:
                 scan = self.library.scan_root(root_id, progress=progress)
                 result["scanned"] = scan.get("discovered", 0)
+                result["status"] = scan.get("status", "done")
             last_id = start_after
             while True:
                 rows = self.repo.db.rows(
@@ -423,20 +424,66 @@ class Service(ServiceV3Mixin):
                                  f"{result['ols_projects']} OLS · "
                                  f"{len(result['errors'])} fouten")
             try:
-                # eerst voorstellen (blijft unconfirmed), dan bewijs-gestuurd bevestigen
+                # 1) onbekende bestanden automatisch classificeren (alleen uniek bewijs)
+                classify = self.repo.auto_classify_evidence()
+                result["auto_classified"] = classify.get("updated", 0)
+                result["classify_review"] = len(classify.get("review") or [])
+            except Exception as exc:  # elke auto-stap mag bulk nooit breken
+                result["auto_classified"] = 0
+                result["auto_classify_error"] = str(exc)
+            try:
+                # 2) voorstellen (blijft unconfirmed), dan bewijs-gestuurd bevestigen
                 self.repo.suggest_binary_relationships()
                 confirm = self.repo.auto_confirm_binary_pairs(min_score=90)
                 result["pairs_auto_confirmed"] = confirm["confirmed"]
                 result["pairs_review"] = confirm["review"]
-            except Exception as exc:  # auto-confirm mag bulk nooit breken
+            except Exception as exc:
                 result["pairs_auto_confirmed"] = 0
                 result["auto_confirm_error"] = str(exc)
+            try:
+                # 3) leren: patronen opbouwen uit alle bevestigde paren (hervatbaar)
+                if result.get("pairs_auto_confirmed") or result.get("imported"):
+                    learned = self.run_pattern_job(resume=True, progress=progress)
+                    result["patterns_built"] = len(learned.get("patterns")
+                                                   or learned.get("items") or []) or \
+                        int(learned.get("built", 0) or 0)
+                    result["patterns_status"] = str(learned.get("status", "done"))
+            except Exception as exc:
+                result["patterns_built"] = 0
+                result["patterns_error"] = str(exc)
             self.repo.finish_run(run_id, "done", result)
         except Exception:
             self.repo.checkpoint_run(run_id, {"last_id": last_id}, result)
             self.repo.finish_run(run_id, "interrupted", result)
             raise
         return result
+
+    def process_all_roots(self, progress=None, resume: bool = True) -> dict:
+        """Volledige automatisering over ALLE geregistreerde roots: scan,
+        importeren, classificeren, paren bevestigen (bewijs-gestuurd) en
+        patronen leren — één aanroep, hervatbaar, per root checkpoints."""
+        totals = {"roots_total": 0, "roots_offline": 0, "scanned": 0, "imported": 0,
+                  "skipped_existing": 0, "ols_projects": 0, "auto_classified": 0,
+                  "pairs_auto_confirmed": 0, "pairs_review": 0, "patterns_built": 0,
+                  "errors": []}
+        roots = self.library.roots()
+        totals["roots_total"] = len(roots)
+        for number, root in enumerate(roots, start=1):
+            if progress:
+                progress(f"Root {number}/{len(roots)}: {root.get('name') or root.get('path')}")
+            try:
+                part = self.process_root_bulk(root["id"], progress, resume=resume)
+                if part.get("status") == "OFFLINE":
+                    totals["roots_offline"] += 1
+                    continue
+                for key in ("scanned", "imported", "skipped_existing", "ols_projects",
+                            "auto_classified", "pairs_auto_confirmed", "pairs_review",
+                            "patterns_built"):
+                    totals[key] += int(part.get(key) or 0)
+                totals["errors"].extend(part.get("errors") or [])
+            except Exception as exc:
+                totals["errors"].append({"root": root.get("path"), "error": str(exc)})
+        return totals
 
     def job_cancel(self, run_id: int) -> dict:
         row = self.job(run_id)
