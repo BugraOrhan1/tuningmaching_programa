@@ -513,3 +513,31 @@ def test_store_ols_structure_names_extra_binaries(service, tmp_path):
     by_name = {row['filename']: row for row in service.repo.files(limit=0)}
     assert all(by_name[row['filename']].get('project') == 'golf7.ols'
                for row in rows if row['filename'] in by_name)
+
+
+def test_review_queues_counts_all_three(service, pair, tmp_path):
+    """Review-center: unknowns + onbevestigde paren + kandidaten in één call."""
+    unknown = tmp_path / "u.bin"
+    unknown.write_bytes(b"\\x00HEAD" + bytes(256))
+    service.repo.import_file(unknown, "unknown")
+    # onbevestigd paar: original uit de fixture + tweede tuned, suggestie-only
+    tuned2 = tmp_path / "t2.bin"
+    tuned2.write_bytes(b"\\x00SW:TEST_SW HW:TEST_HW\\x00" + bytes(range(256)) * 8)
+    tuned2_id = service.repo.import_file(tuned2, "tuned")
+    original_row = next(row for row in service.repo.files(limit=0)
+                        if row["file_type"] == "original")
+    service.repo.pair(original_row["id"], tuned2_id, False)
+    queues = service.review_queues()
+    assert len(queues["unknowns"]) == 1
+    assert len(queues["unconfirmed_pairs"]) >= 1   # suggestie-paar ligt er
+    assert "total" in queues
+
+
+def test_auto_backup_once_per_day(service):
+    """Auto-backup: eerste keer maakt hij aan; binnen 24 uur niet opnieuw."""
+    first = service.auto_backup_if_stale(max_age_hours=24)
+    assert first and first.get("backup_path")
+    second = service.auto_backup_if_stale(max_age_hours=24)
+    assert second is None
+    info = service.last_backup_info()
+    assert info and info["complete"] and info["age_hours"] < 24

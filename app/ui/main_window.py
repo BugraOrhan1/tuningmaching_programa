@@ -2,7 +2,7 @@
 import json
 import logging
 from pathlib import Path
-from PySide6.QtCore import QThread, Signal, Qt
+from PySide6.QtCore import QThread, QTimer, Signal, Qt
 from PySide6.QtWidgets import (QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QListWidget,
     QListWidgetItem, QStackedWidget, QLabel, QPushButton, QLineEdit, QComboBox, QTableWidget,
     QTableWidgetItem, QFileDialog, QMessageBox, QPlainTextEdit, QTextBrowser,
@@ -60,6 +60,9 @@ genummerde snelstart. Begin hier.<br>
 "Waarom matcht mijn BIN niet?", "Wat ligt er ter review?", "Welke tunes kan ik
 bouwen?" of "Hoe krijg ik mijn 10TB snel geladen?" — hij antwoordt met échte
 cijfers uit jouw database, volledig lokaal (geen cloud).<br>
+<b>Review-center</b> — ééne plek voor alles wat jouw aandacht vraagt:
+unknown-bestanden (met Original/Tuned-knoppen), onbevestigde paren (met
+bevestig-knop en diff) en open kenniskandidaten (goedkeuren/afkeuren).<br>
 <b>Uitleg &amp; Handleiding</b> — dit document.</p>
 
 <h3>BIBLIOTHEEK</h3>
@@ -129,6 +132,8 @@ verschil met hex-venster (oranje = gewijzigd) én de wijzigingsregio's met
 klasse (calibratie/checksum/code), entropie en bewijs.<br>
 <b>Vergelijk A|B (V6)</b> — twee bestanden naast elkaar: zelfde ECU-image?
 Corresponderende structuren? Original→Tuned-ketting van beide kanten.<br>
+<b>Tune-kandidaten</b> — overzicht van alle gebouwde kandidaten (normaal én
+kennis-overdracht) met recept, score en output-pad; allemaal NOT VERIFIED.
 <b>Zoeken</b> — doorzoek alles op ECU, SW/HW, namen.</p>
 
 <h3>KENNIS</h3>
@@ -167,7 +172,9 @@ analyzer blijft leidend.</p>
 <p><b>Jobs &amp; Audit</b> — achtergrondtaken (scans/analyses/patronen) met
 pauze/hervat/annuleer; onderin de auditlog van alle technische acties.<br>
 <b>Backup &amp; Health</b> — backup van database+kennis+config (NOOIT je brondata),
-herstellen met verificatie, health-check van de database.<br>
+herstellen met verificatie, health-check van de database. <b>Automatisch</b>:
+bij elke opstart wordt stil een backup gemaakt als de laatste ouder is dan
+24 uur.<br>
 <b>Settings</b> — config.json-instellingen. Belangrijkst: <b>max_file_mb</b>
 (512 MB; verhoog naar 2048 voor zeer grote OLS-bestanden).</p>
 
@@ -242,6 +249,7 @@ class MainWindow(QMainWindow):
         self.nav_section('START')
         self.build_dashboard()
         self.build_assistant()
+        self.build_review_center()
         self.build_manual()
         self.nav_section('BIBLIOTHEEK')
         self.build_files()
@@ -253,6 +261,7 @@ class MainWindow(QMainWindow):
         self.build_diff_regions()
         self.build_compare_workspace()
         self.build_tune_builder()
+        self.build_tune_candidates()
         self.build_search()
         self.nav_section('KENNIS')
         self.build_pairs()
@@ -280,10 +289,22 @@ class MainWindow(QMainWindow):
         self.refresh()
         if first_run:
             self.maybe_first_run()
+        else:
+            QTimer.singleShot(1500, self._quiet_auto_backup)
 
-    SIMPLE_PAGES = {'Dashboard', 'Assistent', 'Uitleg & Handleiding', 'Files', 'Library (V5)',
-                    'WinOLS', 'Original/Tuned Pairs', 'BIN Analyseren (V3)',
-                    "Diff & Regio's", 'Tune Bouwer (V7)', 'Jobs & Audit'}
+    def _quiet_auto_backup(self):
+        """Stille dagelijkse backup bij opstart (alleen als >24u oud); faalt nooit luid."""
+        def done(result):
+            if result:
+                self.safe(lambda: self.statusBar().showMessage(
+                    f'Automatische backup gemaakt: {result.get("backup_path")}', 8000))
+        self.run_job(lambda progress: self.service.auto_backup_if_stale(),
+                     job_name='automatische backup', callback=done)
+
+    SIMPLE_PAGES = {'Dashboard', 'Assistent', 'Review-center', 'Uitleg & Handleiding',
+                    'Files', 'Library (V5)', 'WinOLS', 'Original/Tuned Pairs',
+                    'BIN Analyseren (V3)', "Diff & Regio's", 'Tune Bouwer (V7)',
+                    'Jobs & Audit'}
 
     def _record_nav_groups(self):
         """Koppel sectiekoppen aan hun pagina's (voor Eenvoudig/Expert-modus)."""
@@ -476,6 +497,116 @@ class MainWindow(QMainWindow):
         if not ids:
             raise ValueError('Selecteer eerst één of meer rijen.')
         return ids
+
+    def build_review_center(self):
+        layout = self.page('Review-center', 'Één plek voor alles wat jouw aandacht '
+                           'vraagt: unknown-bestanden, onbevestigde paren en open '
+                           'kenniskandidaten. Niets hier wordt automatisch beslist — '
+                           'jouw beoordeling is het bewijs.')
+        self.review_summary = QLabel('Wachtrij wordt geladen…')
+        self.review_summary.setWordWrap(True)
+        self.review_summary.setStyleSheet('font-weight: bold; padding: 6px; background:#eef2ff;')
+        layout.addWidget(self.review_summary)
+        layout.addWidget(QLabel('— UNKNOWN-BESTANDEN (type nog onbekend) —'))
+        self.review_unknown_table = self.table(layout, ['ID', 'Bestand', 'Bytes', 'ECU', 'SW'])
+        review_row = QHBoxLayout()
+        for label, kind in (('Selectie → Original', 'original'), ('Selectie → Tuned', 'tuned')):
+            btn = QPushButton(label)
+            btn.clicked.connect(lambda _c=False, k=kind: self.review_reclassify(k))
+            review_row.addWidget(btn)
+        auto_btn = QPushButton('Unknown automatisch classificeren (uniek bewijs)')
+        auto_btn.clicked.connect(self.auto_classify)
+        review_row.addWidget(auto_btn)
+        layout.addLayout(review_row)
+        layout.addWidget(QLabel('— ONBEVESTIGDE PAREN (controleer en bevestig) —'))
+        self.review_pair_table = self.table(layout, ['ID', 'Original → Tuned', 'Zekerheid'])
+        pair_row = QHBoxLayout()
+        confirm_btn = QPushButton('Geselecteerd paar bevestigen')
+        confirm_btn.clicked.connect(self.review_confirm_pair)
+        pair_row.addWidget(confirm_btn)
+        diff_btn = QPushButton('Diff van geselecteerd paar bekijken')
+        diff_btn.clicked.connect(self.review_open_diff)
+        pair_row.addWidget(diff_btn)
+        layout.addLayout(pair_row)
+        layout.addWidget(QLabel('— OPEN KENNISKANDIDATEN (goedkeuren = kennis) —'))
+        self.review_candidate_table = self.table(layout, ['ID', 'Type', 'Onderwerp', 'Confidence'])
+        cand_row = QHBoxLayout()
+        approve_btn = QPushButton('Geselecteerde kandidaat goedkeuren')
+        approve_btn.clicked.connect(self.review_approve_candidate)
+        cand_row.addWidget(approve_btn)
+        reject_btn = QPushButton('Geselecteerde kandidaat afwijzen')
+        reject_btn.clicked.connect(self.review_reject_candidate)
+        cand_row.addWidget(reject_btn)
+        layout.addLayout(cand_row)
+
+    def review_reclassify(self, kind):
+        ids = self.selected_ids(self.review_unknown_table)
+        if not ids:
+            QMessageBox.information(self, 'Review', 'Selecteer eerst rij(en).')
+            return
+        self.repo.reclassify_files(ids, kind)
+        self.safe(self.refresh)
+        self.statusBar().showMessage(f'{len(ids)} bestand(en) → {kind}.', 5000)
+
+    def review_confirm_pair(self):
+        pair_id = self.selected_id(self.review_pair_table)
+        if pair_id is None:
+            QMessageBox.information(self, 'Review', 'Selecteer eerst een paar.')
+            return
+        self.repo.confirm_pair(pair_id)
+        self.safe(self.refresh)
+        self.statusBar().showMessage(f'Paar {pair_id} bevestigd — de app leert er nu van.', 5000)
+
+    def review_open_diff(self):
+        pair_id = self.selected_id(self.review_pair_table)
+        if pair_id is None:
+            QMessageBox.information(self, 'Review', 'Selecteer eerst een paar.')
+            return
+        self.run_job(lambda progress: self.service.diff(pair_id), self.show_diff_regions_ready)
+
+    def show_diff_regions_ready(self, report):
+        self.diff_report = report
+        self.populate(self.diff_table,
+                      [{**block, 'start': hex(block['start_offset']),
+                        'end': hex(block['end_offset'])} for block in report['blocks']],
+                      ['start', 'end', 'length', 'changed_bytes', 'change_percentage'])
+        self.navigate("Diff & Regio's")
+
+    def review_approve_candidate(self):
+        candidate_id = self.selected_id(self.review_candidate_table)
+        if candidate_id is None:
+            QMessageBox.information(self, 'Review', 'Selecteer eerst een kandidaat.')
+            return
+        self.repo.approve_candidate(candidate_id)
+        self.safe(self.refresh)
+        self.statusBar().showMessage(f'Kandidaat {candidate_id} goedgekeurd.', 5000)
+
+    def review_reject_candidate(self):
+        candidate_id = self.selected_id(self.review_candidate_table)
+        if candidate_id is None:
+            QMessageBox.information(self, 'Review', 'Selecteer eerst een kandidaat.')
+            return
+        self.repo.reject_candidate(candidate_id)
+        self.safe(self.refresh)
+        self.statusBar().showMessage(f'Kandidaat {candidate_id} afgewezen.', 5000)
+
+    def build_tune_candidates(self):
+        layout = self.page('Tune-kandidaten', 'Overzicht van alle gebouwde kandidaten '
+                           '(normaal én kennis-overdracht). Iedere kandidaat is NOT '
+                           'VERIFIED: controleer in WinOLS vóór gebruik; checksums zijn '
+                           'nooit gecorrigeerd.')
+        self.candidate_overview = self.table(layout, ['ID', 'Datum', 'Doel-bestand', 'Recept',
+                                                      'Match %', 'Toegepast', 'Overgeslagen',
+                                                      'Output'])
+        self.button(layout, 'Kandidaten vernieuwen', self.refresh)
+        folder_btn = QPushButton('Kandidaten-map openen')
+        folder_btn.clicked.connect(self.open_candidates_folder)
+        layout.addWidget(folder_btn)
+
+    def open_candidates_folder(self):
+        folder = self.repo.root / 'exports' / 'candidates'
+        folder.mkdir(parents=True, exist_ok=True)
+        open_project_folder(folder)
 
     def build_manual(self):
         layout = self.page('Uitleg & Handleiding', 'Hoe werkt alles in deze app? Elke '
@@ -1603,6 +1734,14 @@ class MainWindow(QMainWindow):
         self.health_output = QLabel('Nog geen health check uitgevoerd.')
         self.health_output.setWordWrap(True)
         layout.addWidget(self.health_output)
+        self.backup_info = QLabel('Laatste backup: onbekend')
+        self.backup_info.setWordWrap(True)
+        layout.addWidget(self.backup_info)
+        auto_label = QLabel('Automatische backup: bij elke opstart wordt (stil) een '
+                            'backup gemaakt als de laatste ouder is dan 24 uur. '
+                            'Backups bevatten NOOIT je bronbibliotheek.')
+        auto_label.setWordWrap(True)
+        layout.addWidget(auto_label)
 
     def make_backup(self):
         folder = QFileDialog.getExistingDirectory(self, 'Waar wilt u de backup opslaan?')
@@ -2006,6 +2145,51 @@ class MainWindow(QMainWindow):
                 self.location_hint.setText(
                     f"{len(rows)} locatie(s) zichtbaar (max 500). Status NEW = "
                     "nog niet geanalyseerd in de Library.")
+        except Exception:
+            pass
+        try:
+            if hasattr(self, 'backup_info'):
+                info = self.service.last_backup_info()
+                if info:
+                    self.backup_info.setText(
+                        f"Laatste backup: {info['path']} ({info['age_hours']} uur geleden"
+                        f"{'' if info['complete'] else ' — INCOMPLEET'})")
+                else:
+                    self.backup_info.setText('Laatste backup: nog geen — maak er één!')
+        except Exception:
+            pass
+        try:
+            if hasattr(self, 'review_summary'):
+                queues = self.service.review_queues()
+                self.review_summary.setText(
+                    f"Te reviewen: {queues['total']} · unknowns {len(queues['unknowns'])} · "
+                    f"onbevestigde paren {len(queues['unconfirmed_pairs'])} · "
+                    f"kenniskandidaten {len(queues['candidates'])}")
+                self.populate(self.review_unknown_table, queues['unknowns'],
+                              ['id', 'filename', 'file_size', 'ecu_family', 'software_number'])
+                self.populate(self.review_pair_table,
+                              [dict(row, name=row.get('pair_name') or '')
+                               for row in queues['unconfirmed_pairs']],
+                              ['id', 'name', 'confidence'])
+                self.populate(self.review_candidate_table, queues['candidates'],
+                              ['id', 'candidate_type', 'subject', 'confidence'])
+        except Exception:
+            pass
+        try:
+            if hasattr(self, 'candidate_overview'):
+                self.populate(self.candidate_overview,
+                              [dict(row, recipe_label=(row.get('payload') or {}).get(
+                                        'recipe', {}).get('selected') or '—',
+                                    date=row.get('created_at') or '')
+                               for row in self.repo.tune_candidates()],
+                              ['id', 'date', 'target_file_id', 'recipe_label',
+                               'match_score', 'applied_regions', 'skipped_regions',
+                               'output_path'])
+        except Exception:
+            pass
+        try:
+            if hasattr(self, 'health_output') and not self.health_output.text().startswith(('Backup', 'Nog')):
+                pass
         except Exception:
             pass
         try:

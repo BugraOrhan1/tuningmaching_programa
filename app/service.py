@@ -546,6 +546,46 @@ class Service(ServiceV3Mixin):
                 totals["errors"].append({"root": root.get("path"), "error": str(exc)})
         return totals
 
+    def review_queues(self) -> dict:
+        """Alles wat menselijke aandacht nodig heeft, op één plek: unknown-
+        bestanden, onbevestigde paren en open kenniskandidaten."""
+        files = self.repo.files(limit=0)
+        unknowns = [row for row in files if row["file_type"] == "unknown"]
+        pairs = [row for row in self.repo.pairs() if not row["confirmed"]]
+        candidates = self.repo.db.rows(
+            "SELECT id, candidate_type, subject_key AS subject, confidence, status "
+            "FROM knowledge_candidates WHERE status='candidate' ORDER BY id DESC")
+        return {"unknowns": unknowns, "unconfirmed_pairs": pairs,
+                "candidates": candidates,
+                "total": len(unknowns) + len(pairs) + len(candidates)}
+
+    def last_backup_info(self) -> dict | None:
+        backups = self.repo.root / "backups"
+        if not backups.exists():
+            return None
+        folders = sorted((item for item in backups.iterdir()
+                          if item.is_dir() and item.name.startswith("backup_")),
+                         reverse=True)
+        if not folders:
+            return None
+        newest = folders[0]
+        db_file = newest / "tuning.db"
+        return {"path": str(newest),
+                "age_hours": round(max((datetime.now() - datetime.fromtimestamp(
+                    newest.stat().st_mtime)).total_seconds() / 3600, 0), 1),
+                "complete": db_file.exists()}
+
+    def auto_backup_if_stale(self, max_age_hours: float = 24.0) -> dict | None:
+        """Stille automatische backup bij het opstarten als de laatste ouder
+        is dan max_age_hours (of er nog geen is). Faalt nooit de opstart."""
+        try:
+            info = self.last_backup_info()
+            if info and info["age_hours"] < max_age_hours and info["complete"]:
+                return None
+            return self.backup()
+        except Exception:
+            return None
+
     def job_cancel(self, run_id: int) -> dict:
         row = self.job(run_id)
         if row is None:

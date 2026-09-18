@@ -2,6 +2,22 @@
 
 Datum: 2026-09-10 (bijgewerkt na V3-ronde)
 
+## V8.6-status (Review-center + Tune-kandidaten-overzicht + automatische backup) — actueel
+
+**168 passed / 1 guard-skip groen.** Nav: 29 pagina's / 35 items.
+
+- **Review-center** (START, Eenvoudig-modus): alles wat menselijke aandacht
+  vraagt op één pagina — unknown-bestanden (→Original/Tuned/auto-classify),
+  onbevestigde paren (bevestigen + diff bekijken), open kenniskandidaten
+  (goedkeuren/afkeuren); teller-balk bovenaan. `service.review_queues()`.
+- **Tune-kandidaten-overzicht** (ANALYSE, Expert): alle gebouwde kandidaten
+  met recept/score/toegepast/overgeslagen/output + knop "Kandidaten-map
+  openen" (bestond alléén in de API — GUI-gat gedicht).
+- **Automatische backup bij opstart**: `auto_backup_if_stale(24h)` via
+  QTimer (1,5 s na start, stil; faalt nooit luid) + "Laatste backup: …"
+  op Backup & Health.
+- Tests: review-queues (3 soorten), auto-backup once-per-day; nav 29/35.
+
 ## V8.5-status (kennis-overdracht: tunen zonder eigen tuned-bestand) — actueel
 
 **166 passed / 1 guard-skip groen.**

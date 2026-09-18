@@ -73,8 +73,9 @@ def test_gui_smoke(service, pair, monkeypatch, tmp_path):
     window.apply_ui_mode('expert')  # volledige nav voor deze test
     window.show()
     application.processEvents()
-    assert window.page_count == 27  # + Assistent (lokale AI-gids)
-    assert window.nav.count() == 33  # 27 pagina's + 6 groepskoppen
+    assert window.page_count == 29  # + Assistent + Review-center + Tune-kandidaten
+    assert window.nav.count() == 35  # 29 pagina's + 6 groepskoppen
+    assert window.navigate('Review-center') is True
     assert window.navigate('Assistent') is True
     assert window.navigate('Uitleg & Handleiding') is True
     # gebruikersvriendelijkheid: direct navigeren en paginazoeker werken
@@ -202,7 +203,7 @@ def test_ui_simple_mode_by_default_and_expert_toggle(service, monkeypatch, tmp_p
     visible = [window.nav.item(row).text() for row in range(window.nav.count())
                if not window.nav.item(row).isHidden()
                and window.nav.item(row).data(Qt.ItemDataRole.UserRole) == 'page']
-    assert len(visible) == window.page_count == 27
+    assert len(visible) == window.page_count == 29
     window.apply_ui_mode('eenvoudig')
     window.close()
     # keuze is bewaard: een volgend venster start weer in Eenvoudig
