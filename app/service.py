@@ -370,6 +370,63 @@ class Service(ServiceV3Mixin):
             return self.rebuild_patterns(resume=True, progress=progress)
         raise ValueError(f"Taaktype {row['run_type']} kent geen hervat-padhérecke")
 
+    def process_root_bulk(self, root_id: int, progress=None, resume: bool = False) -> dict:
+        """Eén klik voor een hele bron: scan de root (incrementeel) en verwerk
+        daarna AUTOMATISCH élke locatie — BIN/ORI naar Files (al-aanwezig wordt
+        overgeslagen zonder lezen), elk .ols-project volledig. Hervatbaar via
+        checkpoints (run-systeem), dus miljoenen bestanden = gewoon doordraaien."""
+        run = self.repo.resume_run("root_bulk") if resume else None
+        if run and run["config"].get("root_id") != root_id:
+            raise ValueError("Er draait nog een onderbroken bulk-verwerking voor een andere root; "
+                             "voltooi of hervat die eerst.")
+        run_id = run["id"] if run else self.repo.start_run(
+            "root_bulk", {"root_id": root_id})
+        start_after = int(run["checkpoint"].get("last_id", 0)) if run else 0
+        result = dict(run["stats"] if run else {})
+        result.setdefault("scanned", 0)
+        result.setdefault("imported", 0)
+        result.setdefault("skipped_existing", 0)
+        result.setdefault("ols_projects", 0)
+        result.setdefault("errors", [])
+        try:
+            if not run:
+                scan = self.library.scan_root(root_id, progress=progress)
+                result["scanned"] = scan.get("discovered", 0)
+            last_id = start_after
+            while True:
+                rows = self.repo.db.rows(
+                    """SELECT id, path, extension FROM file_locations
+                       WHERE root_id=? AND id>? ORDER BY id LIMIT 500""",
+                    (root_id, last_id))
+                if not rows:
+                    break
+                for row in rows:
+                    last_id = row["id"]
+                    path = Path(row["path"])
+                    try:
+                        if row["extension"] == ".ols":
+                            self.auto_process_ols(str(path))
+                            result["ols_projects"] += 1
+                        elif self.repo._already_imported(path, "auto"):
+                            result["skipped_existing"] += 1
+                        else:
+                            self.repo.import_file(path, "auto")
+                            result["imported"] += 1
+                    except (OSError, ValueError) as exc:
+                        result["errors"].append({"path": str(path), "error": str(exc)})
+                    self.repo.checkpoint_run(run_id, {"last_id": last_id}, result)
+                    if progress:
+                        progress(f"Verwerk root: {result['imported']} nieuw · "
+                                 f"{result['skipped_existing']} al aanwezig · "
+                                 f"{result['ols_projects']} OLS · "
+                                 f"{len(result['errors'])} fouten")
+            self.repo.finish_run(run_id, "done", result)
+        except Exception:
+            self.repo.checkpoint_run(run_id, {"last_id": last_id}, result)
+            self.repo.finish_run(run_id, "interrupted", result)
+            raise
+        return result
+
     def job_cancel(self, run_id: int) -> dict:
         row = self.job(run_id)
         if row is None:

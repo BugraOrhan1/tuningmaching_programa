@@ -70,6 +70,7 @@ def test_gui_smoke(service, pair, monkeypatch, tmp_path):
     from app.ui.main_window import MainWindow
     application = QApplication.instance() or QApplication([])
     window = MainWindow(service)
+    window.apply_ui_mode('expert')  # volledige nav voor deze test
     window.show()
     application.processEvents()
     assert window.page_count == 26  # na consolidatie: dubbele pagina's samengevoegd
@@ -174,3 +175,36 @@ def test_gui_background_analysis(service, pair, monkeypatch):
     assert window.report['matches'][0]['match_score'] == 100
     timer.stop()
     window.close()
+
+
+def test_ui_simple_mode_by_default_and_expert_toggle(service, monkeypatch, tmp_path):
+    """Nieuw: Eenvoudig/Expert. Standaard Eenvoudig (10 dagelijkse pagina's +
+    alleen gevulde sectiekoppen); Expert toont alles; keuze blijft bewaard."""
+    monkeypatch.setenv('QT_QPA_PLATFORM', 'offscreen')
+    from PySide6.QtWidgets import QApplication
+    from app.ui.main_window import MainWindow
+    application = QApplication.instance() or QApplication([])
+    window = MainWindow(service)
+    assert window._ui_mode == 'eenvoudig'
+    visible = [window.nav.item(row).text() for row in range(window.nav.count())
+               if not window.nav.item(row).isHidden()
+               and window.nav.item(row).data(Qt.ItemDataRole.UserRole) == 'page']
+    assert set(visible) == MainWindow.SIMPLE_PAGES
+    # sectiekoppen zonder zichtbare pagina's verdwijnen mee
+    sections = [window.nav.item(row).text() for row in range(window.nav.count())
+                if not window.nav.item(row).isHidden()
+                and window.nav.item(row).data(Qt.ItemDataRole.UserRole) == 'section']
+    assert 'FAMILIES & LEARNING' not in sections
+    assert 'BIBLIOTHEEK' in sections
+    # wisselen naar expert: alles zichtbaar
+    window.apply_ui_mode('expert')
+    visible = [window.nav.item(row).text() for row in range(window.nav.count())
+               if not window.nav.item(row).isHidden()
+               and window.nav.item(row).data(Qt.ItemDataRole.UserRole) == 'page']
+    assert len(visible) == window.page_count == 26
+    window.apply_ui_mode('eenvoudig')
+    window.close()
+    # keuze is bewaard: een volgend venster start weer in Eenvoudig
+    window2 = MainWindow(service)
+    assert window2._ui_mode == 'eenvoudig'
+    window2.close()

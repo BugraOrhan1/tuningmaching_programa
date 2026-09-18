@@ -278,3 +278,50 @@ def test_scan_progress_reports_speed(lib):
     service.library.scan_root(root["id"], progress=calls.append)
     assert any("MB/s" in message for message in calls)
     assert service.library.storage_summary()["locations"] == 4
+
+
+def test_process_root_bulk_automatic_all_to_files(service, tmp_path):
+    """Eén knop voor miljoenen: root volledig verwerken scant en verwerkt
+    AUTOMATISCH alles naar Files (BIN import, .ols volledig) — al-aanwezig
+    wordt overgeslagen zonder lezen, en een tweede keer is bijna gratis."""
+    bron = tmp_path / "bron"
+    bron.mkdir()
+    (bron / "a.bin").write_bytes(b"\\x00HEAD" + b"A" * 1024)
+    (bron / "b.bin").write_bytes(b"\\x00HEAD" + b"B" * 1024)
+    (bron / "project.ols").write_bytes(b"OLS\\x00demo project\\x00")
+    root = service.library.add_root(str(bron), "Bron")
+    # één bestand staat al in Files: moet worden overgeslagen zonder lezen
+    service.repo.import_file(bron / "a.bin", "original")
+    result = service.process_root_bulk(root["id"])
+    assert result["imported"] == 1          # alleen b.bin nieuw
+    assert result["skipped_existing"] == 1  # a.bin al aanwezig
+    assert result["ols_projects"] == 1
+    files = {row["filename"] for row in service.repo.files(limit=0)}
+    assert {"a.bin", "b.bin"} <= files
+    # tweede keer: niets nieuw, alles overgeslagen
+    again = service.process_root_bulk(root["id"])
+    assert again["imported"] == 0 and again["skipped_existing"] == 2
+
+
+def test_process_root_bulk_resumes_after_crash(service, tmp_path):
+    """Crash tijdens bulk-verwerking → onderbroken run → resume maakt het af
+    (miljoenen bestanden kunnen altijd gewoon doordraaien)."""
+    bron = tmp_path / "bron2"
+    bron.mkdir()
+    for index in range(4):
+        (bron / f"f{index}.bin").write_bytes(b"\\x00HEAD" + bytes([index]) * 512)
+    root = service.library.add_root(str(bron), "Bron2")
+    calls = {"n": 0}
+
+    def progress(_msg):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("gesimuleerde crash")
+
+    import pytest as _pytest
+    with _pytest.raises(RuntimeError):
+        service.process_root_bulk(root["id"], progress)
+    result = service.process_root_bulk(root["id"], resume=True)
+    assert result["imported"] >= 1
+    assert len([row for row in service.repo.files(limit=0)
+                if row["source_path"].startswith(str(bron))]) == 4

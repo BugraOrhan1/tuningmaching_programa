@@ -193,6 +193,13 @@ class MainWindow(QMainWindow):
         self.nav_filter.setPlaceholderText('Zoek pagina…')
         self.nav_filter.setClearButtonEnabled(True)
         left_layout.addWidget(self.nav_filter)
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(QLabel('Modus:'))
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItems(['Eenvoudig (aanbevolen)', 'Expert (alles)'])
+        self.mode_combo.currentIndexChanged.connect(self._mode_changed)
+        mode_row.addWidget(self.mode_combo, 1)
+        left_layout.addLayout(mode_row)
         self.nav = QListWidget()
         self.nav.setFixedWidth(220)
         left_layout.addWidget(self.nav, 1)
@@ -232,12 +239,69 @@ class MainWindow(QMainWindow):
         self.build_jobs_manager()
         self.build_backup()
         self.build_settings()
+        self._record_nav_groups()
+        self.apply_ui_mode(self.load_ui_mode())
         self.nav.currentRowChanged.connect(self._nav_changed)
         self.nav_filter.textChanged.connect(self.filter_nav)
         self.navigate('Dashboard')
         self.refresh()
         if first_run:
             self.maybe_first_run()
+
+    SIMPLE_PAGES = {'Dashboard', 'Uitleg & Handleiding', 'Files', 'Library (V5)',
+                    'WinOLS', 'Original/Tuned Pairs', 'BIN Analyseren (V3)',
+                    "Diff & Regio's", 'Tune Bouwer (V7)', 'Jobs & Audit'}
+
+    def _record_nav_groups(self):
+        """Koppel sectiekoppen aan hun pagina's (voor Eenvoudig/Expert-modus)."""
+        self._nav_groups = []
+        header = None
+        for row in range(self.nav.count()):
+            item = self.nav.item(row)
+            if item.data(Qt.ItemDataRole.UserRole) == 'section':
+                header = item
+                self._nav_groups.append((header, []))
+            elif header is not None:
+                self._nav_groups[-1][1].append(item)
+
+    def load_ui_mode(self) -> str:
+        try:
+            store = Path(self.repo.config['data_dir']) / 'ui.json'
+            if store.exists():
+                return json.loads(store.read_text(encoding='utf-8')).get('ui_mode', 'eenvoudig')
+        except Exception:
+            pass
+        return 'eenvoudig'
+
+    def _persist_ui_mode(self, mode: str) -> None:
+        try:
+            store = Path(self.repo.config['data_dir']) / 'ui.json'
+            store.parent.mkdir(parents=True, exist_ok=True)
+            store.write_text(json.dumps({'ui_mode': mode}), encoding='utf-8')
+        except Exception:
+            pass
+
+    def _mode_changed(self, index):
+        self.apply_ui_mode('expert' if index == 1 else 'eenvoudig')
+
+    def apply_ui_mode(self, mode: str):
+        """Eenvoudig = alleen de dagelijkse pagina's (10) + alleen sectiekoppen
+        die zichtbare pagina's hebben. Expert = alles (26). Keuze blijft bewaard."""
+        mode = 'expert' if mode == 'expert' else 'eenvoudig'
+        self._ui_mode = mode
+        for header, pages in getattr(self, '_nav_groups', []):
+            for item in pages:
+                item.setHidden(mode == 'eenvoudig' and item.text() not in self.SIMPLE_PAGES)
+            header.setHidden(not (mode == 'expert' or any(
+                item.text() in self.SIMPLE_PAGES for item in pages)))
+        self._persist_ui_mode(mode)
+        # combo synchroon houden zonder opnieuw te triggeren
+        self.mode_combo.blockSignals(True)
+        self.mode_combo.setCurrentIndex(1 if mode == 'expert' else 0)
+        self.mode_combo.blockSignals(False)
+        current = self.nav.currentItem()
+        if current is not None and current.isHidden():
+            self.navigate('Dashboard')
 
     def page(self, name, subtitle):
         page_item = QListWidgetItem(name)
@@ -293,31 +357,27 @@ class MainWindow(QMainWindow):
     def filter_nav(self, text):
         """Navigatie filteren op paginanaam; lege groepen verdwijnen mee."""
         needle = text.strip().casefold()
+        mode = getattr(self, '_ui_mode', 'eenvoudig')
         sections = []
         for row in range(self.nav.count()):
             item = self.nav.item(row)
             if item.data(Qt.ItemDataRole.UserRole) == 'section':
                 sections.append(item)
                 continue
-            item.setHidden(bool(needle) and needle not in item.text().casefold())
+            base_hidden = mode == 'eenvoudig' and item.text() not in self.SIMPLE_PAGES
+            item.setHidden(base_hidden
+                           or (bool(needle) and needle not in item.text().casefold()))
         for section in sections:
-            row = self.nav.row(section)
-            has_visible = any(
-                not self.nav.item(r).isHidden()
-                and self.nav.item(r).data(Qt.ItemDataRole.UserRole) == 'page'
-                for r in range(row + 1, self.nav.count())
-                if self.nav.item(r).data(Qt.ItemDataRole.UserRole) != 'section'
-            ) if True else False
             # stop bij de eerstvolgende sectie
             has_visible = False
-            for r in range(row + 1, self.nav.count()):
+            for r in range(self.nav.row(section) + 1, self.nav.count()):
                 item = self.nav.item(r)
                 if item.data(Qt.ItemDataRole.UserRole) == 'section':
                     break
                 if not item.isHidden():
                     has_visible = True
                     break
-            section.setHidden(bool(needle) and not has_visible)
+            section.setHidden(not has_visible)
 
     def button(self, layout, title, callback):
         button = QPushButton(title)
@@ -1274,6 +1334,10 @@ class MainWindow(QMainWindow):
         resume_btn.clicked.connect(lambda: self.scan_selected_library(resume=True))
         row.addWidget(resume_btn)
         layout.addLayout(row)
+        bulk_btn = QPushButton('⭐ Geselecteerde root VOLLEDIG verwerken — scan + AUTOMATISCH alles naar Files (hervatbaar)')
+        bulk_btn.setStyleSheet('font-weight: bold; padding: 8px;')
+        bulk_btn.clicked.connect(self.bulk_process_selected_root)
+        layout.addWidget(bulk_btn)
         self.library_storage = QLabel('Opslag: nog geen library geïndexeerd.')
         self.library_storage.setWordWrap(True)
         layout.addWidget(self.library_storage)
@@ -1296,6 +1360,29 @@ class MainWindow(QMainWindow):
         self.run_job(lambda progress: self.service.library.scan_root(root_id, resume=resume,
                                                                      progress=progress),
                      callback=lambda _result: self.safe(self.refresh))
+
+    def bulk_process_selected_root(self):
+        """Eén klik: hele root scannen én automatisch alles naar Files verwerken.
+        Miljoenen bestanden? Gewoon laten draaien — hervatbaar via checkpoints."""
+        root_id = self.selected_id(self.library_root_table)
+        self.run_job(
+            lambda progress: self.service.process_root_bulk(root_id, progress, resume=True),
+            callback=lambda result: self.safe(
+                lambda: self.show_bulk_result(result)))
+
+    def show_bulk_result(self, result):
+        self.refresh()
+        errors = result.get('errors') or []
+        lines = ["Root volledig verwerken klaar.",
+                 '',
+                 f"Gescand (bestanden gevonden): {result.get('scanned', '—')}",
+                 f"BIN/ORI nieuw naar Files: {result.get('imported', 0)}",
+                 f"Al aanwezig (overgeslagen zonder lezen): {result.get('skipped_existing', 0)}",
+                 f"OLS-projecten volledig verwerkt: {result.get('ols_projects', 0)}"]
+        if errors:
+            lines.append(f"Fouten: {len(errors)} (eerste 3)")
+            lines += [f"  • {item['path']}: {item['error']}" for item in errors[:3]]
+        QMessageBox.information(self, 'Root verwerkt', '\n'.join(lines))
 
     def refresh_library_locations(self):
         if not self.library_root_table.rowCount():
