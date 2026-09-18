@@ -249,7 +249,7 @@ class Service(ServiceV3Mixin):
                                (pattern_key, json.dumps(pattern_payload, ensure_ascii=False), 59.0))
         return {**payload, 'confidence': confidence, 'status': 'candidate'}
 
-    def tuning_dna(self, status: str | None = None) -> list[dict]:
+    def tuning_dna(self, status: str | None = None, limit: int = 0) -> list[dict]:
         query = 'SELECT * FROM tuning_dna'
         args = ()
         if status is not None:
@@ -260,6 +260,9 @@ class Service(ServiceV3Mixin):
         else:
             query += " WHERE status <> 'rejected'"
         query += ' ORDER BY confidence DESC, id DESC'
+        if limit:
+            query += ' LIMIT ?'
+            args = args + (limit,)
         rows = self.repo.db.rows(query, args)
         for row in rows:
             row['payload'] = json.loads(row['payload'])
@@ -546,18 +549,33 @@ class Service(ServiceV3Mixin):
                 totals["errors"].append({"root": root.get("path"), "error": str(exc)})
         return totals
 
-    def review_queues(self) -> dict:
-        """Alles wat menselijke aandacht nodig heeft, op één plek: unknown-
-        bestanden, onbevestigde paren en open kenniskandidaten."""
-        files = self.repo.files(limit=0)
-        unknowns = [row for row in files if row["file_type"] == "unknown"]
-        pairs = [row for row in self.repo.pairs() if not row["confirmed"]]
+    def review_queues(self, limit: int = 200) -> dict:
+        """Alles wat menselijke aandacht nodig heeft, op één plek. Totalen
+        komen uit snelle COUNT-query's; lijsten zijn begrensd op `limit`
+        (GUI-thread blijft responsief, ook bij 100k+ bestanden)."""
+        with self.repo.db.connect() as db:
+            unknowns_total = db.execute(
+                "SELECT COUNT(*) FROM files WHERE file_type='unknown'").fetchone()[0]
+            pairs_total = db.execute(
+                "SELECT COUNT(*) FROM file_pairs WHERE confirmed=0").fetchone()[0]
+            candidates_total = db.execute(
+                "SELECT COUNT(*) FROM knowledge_candidates WHERE status='candidate'"
+            ).fetchone()[0]
+        lim_sql, lim_args = (" LIMIT ?", (limit,)) if limit else ("", ())
+        unknowns = self.repo.db.rows(
+            "SELECT * FROM files WHERE file_type='unknown' ORDER BY id DESC" + lim_sql,
+            lim_args)
+        pairs = self.repo.db.rows(
+            "SELECT * FROM file_pairs WHERE confirmed=0 ORDER BY id DESC" + lim_sql,
+            lim_args)
         candidates = self.repo.db.rows(
             "SELECT id, candidate_type, subject_key AS subject, confidence, status "
-            "FROM knowledge_candidates WHERE status='candidate' ORDER BY id DESC")
-        return {"unknowns": unknowns, "unconfirmed_pairs": pairs,
-                "candidates": candidates,
-                "total": len(unknowns) + len(pairs) + len(candidates)}
+            "FROM knowledge_candidates WHERE status='candidate' ORDER BY id DESC" + lim_sql,
+            lim_args)
+        return {"unknowns": unknowns, "unknowns_total": unknowns_total,
+                "unconfirmed_pairs": pairs, "pairs_total": pairs_total,
+                "candidates": candidates, "candidates_total": candidates_total,
+                "total": unknowns_total + pairs_total + candidates_total}
 
     def last_backup_info(self) -> dict | None:
         backups = self.repo.root / "backups"

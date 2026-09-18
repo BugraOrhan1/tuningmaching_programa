@@ -573,3 +573,27 @@ def test_scan_uses_max_preset_globally(service, tmp_path):
     scan_config = json.loads(scan_row["config"])
     assert scan_config["hash_workers"] >= 8
     assert scan_config["chunk"] >= 128
+
+
+def test_review_queues_bounded_lists_with_sql_totals(service, tmp_path):
+    """V8.7.1: totalen via COUNT (correct bij tienduizenden), lijsten begrensd
+    op `limit` — de GUI-thread laadt nooit meer alles."""
+    for index in range(4):
+        unknown = tmp_path / f"u{index}.bin"
+        unknown.write_bytes(b"\\x00HEAD" + bytes(256))
+        service.repo.import_file(unknown, "unknown")
+    queues = service.review_queues(limit=2)
+    assert len(queues["unknowns"]) == 2          # begrensd
+    assert queues["unknowns_total"] == 4         # telling klopt óndanks limiet
+    assert queues["total"] >= queues["unknowns_total"]
+    queues_full = service.review_queues(limit=0)
+    assert len(queues_full["unknowns"]) == 4
+
+
+def test_gui_tables_bounded(service, pair, tmp_path):
+    """pairs/tune_candidates/patterns accepteren een limiet (GUI-refresh
+    blijft snel bij grote bibliotheken)."""
+    assert len(service.repo.pairs(limit=0)) >= 1
+    assert len(service.repo.pairs(limit=1)) <= 1
+    assert service.repo.tune_candidates(limit=5) == []
+    assert len(service.patterns_detail(limit=3)) <= 3

@@ -252,8 +252,8 @@ class ServiceV3Mixin:
         return {"run_id": run_id, "status": "done", "build_id": build_id,
                 "patterns": pattern_count, **stats}
 
-    def patterns_detail(self, status: str | None = None) -> list[dict]:
-        return self.repo.patterns_v3(status)
+    def patterns_detail(self, status: str | None = None, limit: int = 0) -> list[dict]:
+        return self.repo.patterns_v3(status, limit=limit)
 
     def review_pattern(self, pattern_id: int, action: str, reviewer: str | None = None,
                        note: str = "", payload: dict | None = None) -> dict:

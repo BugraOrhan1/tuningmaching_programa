@@ -199,7 +199,7 @@ class RepositoryV3Mixin:
                 "moved_regions": len(members), "confidence": split_confidence,
                 "status": "rebuilt"}
 
-    def patterns_v3(self, status: str | None = None) -> list[dict]:
+    def patterns_v3(self, status: str | None = None, limit: int = 0) -> list[dict]:
         query = "SELECT * FROM tuning_patterns"
         args: tuple = ()
         if status:
@@ -208,6 +208,9 @@ class RepositoryV3Mixin:
         else:
             query += " WHERE status <> 'rejected'"
         query += " ORDER BY frequency DESC, confidence DESC, id"
+        if limit:
+            query += " LIMIT ?"
+            args = args + (limit,)
         rows = self.db.rows(query, args)
         for row in rows:
             row["payload"] = json.loads(row["payload"])

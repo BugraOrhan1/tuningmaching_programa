@@ -2,6 +2,30 @@
 
 Datum: 2026-09-10 (bijgewerkt na V3-ronde)
 
+## V8.7.1-status (HOTFIX: 'reageert niet' — GUI-thread ontzorgt) — actueel
+
+**173 passed / 1 guard-skip groen.**
+
+- Klacht: "hij reageert niet hele tijd". Oorzaak: `refresh()` draaide op de
+  GUI-thread en was per versie zwaarder geworden — V8.6-`review_queues`
+  laadde ALLE files in Python; `patterns_v3` had N+1 queries; zoeken (V3)
+  draaide synchroon op de GUI-thread. Bij grote bibliotheken bevriet dat
+  het venster ("Niet reageren" in Windows).
+- **Begrenzing (call-site, logica onveranderd)**: review-queues via snelle
+  COUNT's + lijsten LIMIT 200; pairs 400, tuning_dna 400, projects 300,
+  ols_unknown_objects 300, knowledge-candidates 300, signatures 400,
+  tune_candidates 200, patterns_v3/patterns_detail + tuning_dna + pairs +
+  projects + ols_unknown_objects + candidates + tune_candidates hebben nu
+  een `limit`-param (default 0 = onbegrensd voor logica-calls; family_
+  knowledge blijft véél paren lezen).
+- **Coalescing**: `refresh()` synchroon voor knoppen/tests; auto-refresh na
+  taken via `_refresh_soon()` (300 ms debounce, stelt uit terwijl taak
+  draait) — geen refresh-storm meer na elke taak.
+- **Zoeken async**: `run_v3_search` → run_job + `_show_v3_hits`.
+- **Zandloper-cursor** tijdens taken (WaitCursor) + herstel in
+  job_finished/_job_error — duidelijk 'het werkt' i.p.v. 'reageert niet'.
+- Tests: queues begrensd + SQL-totalen; limit-params; suites groen.
+
 ## V8.7-status (Snelheid: CPU-gestuurde presets + MAX + GUI-keuze) — actueel
 
 **171 passed / 1 guard-skip groen.**

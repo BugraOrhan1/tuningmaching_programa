@@ -6,7 +6,7 @@ from PySide6.QtCore import QThread, QTimer, Signal, Qt
 from PySide6.QtWidgets import (QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QListWidget,
     QListWidgetItem, QStackedWidget, QLabel, QPushButton, QLineEdit, QComboBox, QTableWidget,
     QTableWidgetItem, QFileDialog, QMessageBox, QPlainTextEdit, QTextBrowser,
-    QInputDialog, QAbstractItemView, QWizard, QWizardPage, QCheckBox)
+    QInputDialog, QAbstractItemView, QWizard, QWizardPage, QCheckBox, QApplication)
 from app.analysis.metadata import FIELDS
 from app.analysis.binary_reader import read_binary
 from app.learning.model import LearningIndex
@@ -497,17 +497,29 @@ class MainWindow(QMainWindow):
         self.worker = Worker(operation, self)
         self.worker.progress.connect(self.statusBar().showMessage)
         self.worker.result.connect(callback or self.show_report)
-        self.worker.error.connect(lambda text: QMessageBox.warning(self, 'Fout', text))
+        self.worker.error.connect(self._job_error)
         self.worker.finished.connect(self.job_finished)
-        self.statusBar().showMessage('Bezig…')
+        self._busy_cursor = True
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        self.statusBar().showMessage(f'Bezig: {self.worker_job_name}…')
         self.worker.start()
 
     def job_finished(self):
         self.worker.deleteLater()
         self.worker = None
         self.worker_job_name = None
-        self.refresh()
+        self._restore_busy_cursor()
+        self._refresh_soon()
         self.statusBar().showMessage('Klaar')
+
+    def _restore_busy_cursor(self):
+        if getattr(self, '_busy_cursor', False):
+            self._busy_cursor = False
+            QApplication.restoreOverrideCursor()
+
+    def _job_error(self, message: str):
+        self._restore_busy_cursor()
+        QMessageBox.warning(self, 'Fout', message)
 
     def table(self, layout, columns):
         table = QTableWidget(0, len(columns))
@@ -2160,11 +2172,11 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.search_output)
 
     def run_v3_search(self):
-        try:
-            hits = self.service.search(self.v3_search.text())
-        except ValueError as exc:
-            QMessageBox.information(self, 'Zoeken', str(exc))
-            return
+        term = self.v3_search.text()
+        self.run_job(lambda progress: self.service.search(term),
+                     callback=self._show_v3_hits, job_name='zoeken')
+
+    def _show_v3_hits(self, hits):
         lines = [f"Bestanden: {len(hits['files'])}  ·  Patronen: {len(hits['patterns'])}  ·  "
              f"OLS-projecten: {len(hits['winols_projects'])}  ·  Regio\'s: {len(hits['regions'])}  ·  "
              f"Identities: {len(hits.get('calibration_identities', []))}  ·  "
@@ -2195,6 +2207,30 @@ class MainWindow(QMainWindow):
         self.refresh()
 
     def refresh(self):
+        """Directe (synchrone) verversing — gebruikt door knoppen en tests."""
+        self._do_refresh()
+
+    def _refresh_soon(self):
+        """Auto-refresh ná taken coalescen (max 1x/300 ms) en uitstellen tot
+        de taak klaar is: de GUI-thread blijft vrij, geen 'reageert niet'."""
+        self._refresh_pending = True
+        if getattr(self, '_refresh_timer', None) is None:
+            self._refresh_timer = QTimer(self)
+            self._refresh_timer.setSingleShot(True)
+            self._refresh_timer.timeout.connect(self._refresh_flush)
+        if not self._refresh_timer.isActive():
+            self._refresh_timer.start(300)
+
+    def _refresh_flush(self):
+        if not getattr(self, '_refresh_pending', False):
+            return
+        if self.worker is not None:
+            self._refresh_timer.start(300)  # opnieuw als de taak klaar is
+            return
+        self._refresh_pending = False
+        self._do_refresh()
+
+    def _do_refresh(self):
         try:
             if hasattr(self, 'location_table'):
                 rows = self.service.library.all_locations(
@@ -2225,11 +2261,11 @@ class MainWindow(QMainWindow):
             pass
         try:
             if hasattr(self, 'review_summary'):
-                queues = self.service.review_queues()
+                queues = self.service.review_queues(limit=200)
                 self.review_summary.setText(
-                    f"Te reviewen: {queues['total']} · unknowns {len(queues['unknowns'])} · "
-                    f"onbevestigde paren {len(queues['unconfirmed_pairs'])} · "
-                    f"kenniskandidaten {len(queues['candidates'])}")
+                    f"Te reviewen: {queues['total']} · unknowns {queues['unknowns_total']} · "
+                    f"onbevestigde paren {queues['pairs_total']} · "
+                    f"kenniskandidaten {queues['candidates_total']}")
                 self.populate(self.review_unknown_table, queues['unknowns'],
                               ['id', 'filename', 'file_size', 'ecu_family', 'software_number'])
                 self.populate(self.review_pair_table,
@@ -2246,7 +2282,7 @@ class MainWindow(QMainWindow):
                               [dict(row, recipe_label=(row.get('payload') or {}).get(
                                         'recipe', {}).get('selected') or '—',
                                     date=row.get('created_at') or '')
-                               for row in self.repo.tune_candidates()],
+                               for row in self.repo.tune_candidates(limit=200)],
                               ['id', 'date', 'target_file_id', 'recipe_label',
                                'match_score', 'applied_regions', 'skipped_regions',
                                'output_path'])
@@ -2267,7 +2303,9 @@ class MainWindow(QMainWindow):
                 identities = len(self.repo.calibration_identities())
                 images = self.repo.db.rows(
                     'SELECT COUNT(*) AS n FROM ecu_image_identities')[0]['n']
-                patterns = len(self.service.patterns_detail())
+                patterns = self.repo.db.rows(
+                    "SELECT COUNT(*) AS n FROM tuning_patterns "
+                    "WHERE status <> 'rejected'")[0]['n']
                 try:
                     advice = self.service.assistant.answer('wat nu')['answer'].splitlines()[0]
                     self.smart_advice.setText('🤖 Advies: ' + advice)
@@ -2320,25 +2358,26 @@ class MainWindow(QMainWindow):
         else:
             self.file_hint.setText('Files is leeg: importeer een map met BIN/ORI of verwerk een WinOLS-project — '
                                    'bewezen versie-binaries uit de OLS verschijnen dan hier automatisch.')
-        self.populate(self.pair_table, self.repo.pairs(), ['id', 'pair_name', 'confidence', 'confirmed'])
-        dna_rows = self.service.tuning_dna()
+        self.populate(self.pair_table, self.repo.pairs(limit=400), ['id', 'pair_name', 'confidence', 'confirmed'])
+        dna_rows = self.service.tuning_dna(limit=400)
         self.populate(self.dna_table, dna_rows, ['id', 'pair_id', 'original_file_id', 'tuned_file_id', 'confidence', 'status', 'updated_at'])
-        self.populate(self.project_table, self.repo.projects(), ['id', 'filename', 'suggested_type', 'suggestion_reason', 'file_size', 'sha256', 'created_at'])
+        self.populate(self.project_table, self.repo.projects(limit=300), ['id', 'filename', 'suggested_type', 'suggestion_reason', 'file_size', 'sha256', 'created_at'])
         binary_status = self.repo.db.rows("SELECT status, COUNT(*) AS count FROM ols_binaries GROUP BY status")
         self.ols_status.setText('OLS binary-status: ' + (', '.join(f"{row['status']}={row['count']}" for row in binary_status) if binary_status else 'nog geen OLS geïmporteerd'))
-        objects = self.repo.ols_unknown_objects()
+        objects = self.repo.ols_unknown_objects(limit=300)
         projects = {row['id']: row['filename'] for row in self.repo.projects()}
         object_rows = [{**row, 'project': projects.get(row['project_id'], ''),
                 'evidence': json.dumps(json.loads(row['evidence']), ensure_ascii=False)} for row in objects]
         self.populate(self.ols_object_table, object_rows,
                   ['id', 'project', 'internal_id', 'object_type', 'size', 'role', 'confidence', 'evidence'])
         self.populate(self.ecu_family_table, self.repo.ecu_families(), ['id', 'family_name', 'ecu_type', 'verified', 'file_count', 'original_count', 'tuned_count'])
+        # (ecu_families is doorgaans klein; zware tabellen hierboven begrensd)
         self.populate(self.software_family_table, self.repo.software_families(), ['id', 'family_name', 'software_pattern', 'file_size', 'verified', 'file_count'])
         calibration = self.repo.db.rows("SELECT c.id, c.name, s.family_name AS software_family, c.verified FROM calibration_families c JOIN software_families s ON s.id=c.software_family_id ORDER BY c.name")
         self.populate(self.calibration_family_table, calibration, ['id', 'name', 'software_family', 'verified'])
-        signatures = self.repo.db.rows("SELECT s.id, e.family_name AS ecu_family, s.offset, s.length, s.confidence, s.status FROM ecu_signatures s JOIN ecu_families e ON e.id=s.ecu_family_id ORDER BY s.id DESC")
+        signatures = self.repo.db.rows("SELECT s.id, e.family_name AS ecu_family, s.offset, s.length, s.confidence, s.status FROM ecu_signatures s JOIN ecu_families e ON e.id=s.ecu_family_id ORDER BY s.id DESC LIMIT 400")
         self.populate(self.signature_table, signatures, ['id', 'ecu_family', 'offset', 'length', 'confidence', 'status'])
-        candidates = self.repo.candidates()
+        candidates = self.repo.candidates(limit=300)
         candidate_rows = [{**row, 'payload': json.dumps(row['payload'], ensure_ascii=False)} for row in candidates]
         self.populate(self.candidate_table, candidate_rows, ['id', 'candidate_type', 'subject_key', 'confidence', 'payload'])
         # V3-tabellen

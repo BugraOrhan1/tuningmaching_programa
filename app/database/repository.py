@@ -107,9 +107,14 @@ class Repository(RepositoryV3Mixin):
             raise ValueError(f"Integriteitsfout in beheerde kopie: {row['filename']}")
         return data
 
-    def projects(self, query: str = "") -> list[dict]:
+    def projects(self, query: str = "", limit: int = 0) -> list[dict]:
         term = '%' + query.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') + '%'
-        projects = self.db.rows("SELECT * FROM winols_projects WHERE filename LIKE ? ESCAPE '\\' OR source_path LIKE ? ESCAPE '\\' ORDER BY id DESC", (term, term))
+        sql = "SELECT * FROM winols_projects WHERE filename LIKE ? ESCAPE '\\' OR source_path LIKE ? ESCAPE '\\' ORDER BY id DESC"
+        args = [term, term]
+        if limit:
+            sql += " LIMIT ?"
+            args.append(limit)
+        projects = self.db.rows(sql, tuple(args))
         for project in projects:
             metadata = json.loads(project["project_metadata"])
             project["suggested_type"] = metadata.get("suggested_type", "unknown")
@@ -606,17 +611,31 @@ class Repository(RepositoryV3Mixin):
                                 sha["sha256"], size))
             return cursor.lastrowid
 
-    def tune_candidates(self) -> list[dict]:
-        rows = self.db.rows("SELECT * FROM tune_candidates ORDER BY id DESC")
+    def tune_candidates(self, limit: int = 0) -> list[dict]:
+        sql = "SELECT * FROM tune_candidates ORDER BY id DESC"
+        args: tuple = ()
+        if limit:
+            sql += " LIMIT ?"
+            args = (limit,)
+        rows = self.db.rows(sql, args)
         for row in rows:
             row["payload"] = json.loads(row["payload"])
         return rows
 
-    def ols_unknown_objects(self, project_id: int | None = None) -> list[dict]:
+    def ols_unknown_objects(self, project_id: int | None = None,
+                            limit: int = 0) -> list[dict]:
         if project_id is None:
-            return self.db.rows("SELECT * FROM ols_objects WHERE role='unknown' ORDER BY confidence DESC, id")
-        self.project(project_id)
-        return self.db.rows("SELECT * FROM ols_objects WHERE project_id=? AND role='unknown' ORDER BY confidence DESC, id", (project_id,))
+            sql = "SELECT * FROM ols_objects WHERE role='unknown' ORDER BY confidence DESC, id"
+            args: tuple = ()
+        else:
+            self.project(project_id)
+            sql = ("SELECT * FROM ols_objects WHERE project_id=? AND role='unknown' "
+                   "ORDER BY confidence DESC, id")
+            args = (project_id,)
+        if limit:
+            sql += " LIMIT ?"
+            args = args + (limit,)
+        return self.db.rows(sql, args)
 
     def import_file(self, path: Path, kind: str = "auto") -> int:
         path = path.resolve()
@@ -691,11 +710,17 @@ class Repository(RepositoryV3Mixin):
         rows = self.db.rows("SELECT * FROM recognition_results WHERE file_id=? ORDER BY id DESC LIMIT 1", (file_id,))
         return json.loads(rows[0]["details"]) if rows else self.recognize_file(file_id)
 
-    def candidates(self, status: str = "candidate") -> list[dict]:
+    def candidates(self, status: str = "candidate", limit: int = 0) -> list[dict]:
         allowed = {"candidate", "approved", "rejected"}
         if status not in allowed:
             raise ValueError("Ongeldige candidate status")
-        rows = self.db.rows("SELECT * FROM knowledge_candidates WHERE status=? ORDER BY confidence DESC, id DESC", (status,))
+        sql = ("SELECT * FROM knowledge_candidates WHERE status=? "
+               "ORDER BY confidence DESC, id DESC")
+        args: list = [status]
+        if limit:
+            sql += " LIMIT ?"
+            args.append(limit)
+        rows = self.db.rows(sql, tuple(args))
         for row in rows:
             row["payload"] = json.loads(row["payload"])
         return rows
@@ -1199,8 +1224,13 @@ class Repository(RepositoryV3Mixin):
                 examples.append(tuned_row.get("filename"))
         return {"confirmed": confirmed, "review": review, "examples": examples}
 
-    def pairs(self) -> list[dict]:
-        return self.db.rows("SELECT * FROM file_pairs ORDER BY id DESC")
+    def pairs(self, limit: int = 0) -> list[dict]:
+        sql = "SELECT * FROM file_pairs ORDER BY id DESC"
+        args: tuple = ()
+        if limit:
+            sql += " LIMIT ?"
+            args = (limit,)
+        return self.db.rows(sql, args)
 
     def confirm_pair(self, pair_id: int) -> None:
         with self.db.connect() as db:
