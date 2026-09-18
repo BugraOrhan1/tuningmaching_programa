@@ -2,6 +2,23 @@
 
 Datum: 2026-09-10 (bijgewerkt na V3-ronde)
 
+## V8.6.1-status (HOTFIX: first-run wizard crash) — actueel
+
+**169 passed / 1 guard-skip groen.**
+
+- Gebruikers-crash (exe): wizard "Eerste keer instellen" → keuze LOW/
+  BALANCED/HIGH → afronden → `AttributeError: 'MainWindow' object has no
+  attribute '_persist_profile'` (aanroep uit V5-commit 131446a; methode
+  was nooit geschreven — dus élke verse installatie crashte).
+- FIX: `_update_ui_store()` (merge in data/ui.json), `_persist_profile()`
+  bewaart resource_preset; `_load_profile_into_library()` past hem bij
+  elke start toe; `_persist_ui_mode` gebruikt nu ook de merge-store.
+- Verharding: wizard-afhandeling in try/except met zichtbare
+  foutmelding — eerste-keer-wizard kan de app NOOIT meer laten crashen.
+- AST-sweep over hele app/ op ontbrekende self-methodes: `_persist_profile`
+  was de enige échte ontbrekende (rest = mixins/overerving).
+- Regressietest: wizard met HIGH-keuze → ui.json + library.config, geen crash.
+
 ## V8.6-status (Review-center + Tune-kandidaten-overzicht + automatische backup) — actueel
 
 **168 passed / 1 guard-skip groen.** Nav: 29 pagina's / 35 items.

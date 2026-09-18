@@ -64,6 +64,36 @@ def test_v2_api_identification_and_knowledge_review(service, tmp_path):
     assert client.get('/ecu-families').json()[0]['family_name'] == 'MED17.1.21'
 
 
+def test_first_run_wizard_persists_profile_without_crash(service, monkeypatch):
+    """Regressie (gebruikers-crash): de first-run-wizard riep _persist_profile
+    aan die nooit bestond → AttributeError bij afronden (na LOW/BALANCED/HIGH-
+    keuze). Nu: profiel wordt bewaard en toegepast, géén crash."""
+    monkeypatch.setenv('QT_QPA_PLATFORM', 'offscreen')
+    from PySide6.QtWidgets import QApplication, QWizard
+    from app.ui.main_window import MainWindow
+    application = QApplication.instance() or QApplication([])
+    # wizard sluit direct met accept; profiel-combo staat op HIGH
+    monkeypatch.setattr(QWizard, 'exec', lambda self: self.accept() or 1)
+    original = MainWindow._wizard_profile
+
+    def profile_page(window_self, wizard):
+        page = original(window_self, wizard)
+        window_self._wizard_profile_combo.setCurrentIndex(2)  # HIGH kiezen
+        return page
+
+    monkeypatch.setattr(MainWindow, '_wizard_profile', profile_page)
+    window = MainWindow(service)
+    application.processEvents()
+    window.maybe_first_run()  # moest vroeger crashen: AttributeError
+    store = window.repo.config['data_dir']
+    import json as _json
+    from pathlib import Path as _Path
+    state = _json.loads((_Path(store) / 'ui.json').read_text(encoding='utf-8'))
+    assert state.get('resource_preset') == 'HIGH'
+    assert window.service.library.config.get('resource_preset') == 'HIGH'
+    window.close()
+
+
 def test_gui_smoke(service, pair, monkeypatch, tmp_path):
     monkeypatch.setenv('QT_QPA_PLATFORM', 'offscreen')
     from PySide6.QtWidgets import QApplication

@@ -283,6 +283,7 @@ class MainWindow(QMainWindow):
         self.build_settings()
         self._record_nav_groups()
         self.apply_ui_mode(self.load_ui_mode())
+        self._load_profile_into_library()
         self.nav.currentRowChanged.connect(self._nav_changed)
         self.nav_filter.textChanged.connect(self.filter_nav)
         self.navigate('Dashboard')
@@ -327,11 +328,39 @@ class MainWindow(QMainWindow):
             pass
         return 'eenvoudig'
 
-    def _persist_ui_mode(self, mode: str) -> None:
+    def _update_ui_store(self, updates: dict) -> None:
+        """Sleutel(s) samenvoegen in data/ui.json (bewaart ook de andere
+        sleutels; faalt nooit hard)."""
         try:
             store = Path(self.repo.config['data_dir']) / 'ui.json'
             store.parent.mkdir(parents=True, exist_ok=True)
-            store.write_text(json.dumps({'ui_mode': mode}), encoding='utf-8')
+            state = {}
+            if store.exists():
+                try:
+                    state = json.loads(store.read_text(encoding='utf-8'))
+                except Exception:
+                    state = {}
+            state.update(updates)
+            store.write_text(json.dumps(state), encoding='utf-8')
+        except Exception:
+            pass
+
+    def _persist_ui_mode(self, mode: str) -> None:
+        self._update_ui_store({'ui_mode': mode})
+
+    def _persist_profile(self, profile: str) -> None:
+        """Resourceprofiel (LOW/BALANCED/HIGH) uit de first-run-wizard bewaren.
+        Bestond niet (V5-bug): de wizard crashte bij afronden — nu echt
+        opgeslagen en bij elke start weer toegepast."""
+        self._update_ui_store({'resource_preset': str(profile)})
+
+    def _load_profile_into_library(self) -> None:
+        try:
+            store = Path(self.repo.config['data_dir']) / 'ui.json'
+            if store.exists():
+                preset = json.loads(store.read_text(encoding='utf-8')).get('resource_preset')
+                if preset:
+                    self.service.library.config['resource_preset'] = str(preset)
         except Exception:
             pass
 
@@ -1785,22 +1814,32 @@ class MainWindow(QMainWindow):
         wizard.addPage(self._wizard_roots(wizard))
         wizard.addPage(self._wizard_profile(wizard))
         if wizard.exec():
-            combo = getattr(self, '_wizard_profile_combo', None)
-            profile = str(combo.currentText()) if combo else 'BALANCED'
-            self.service.library.config['resource_preset'] = profile
-            self._persist_profile(profile)
-            for path in getattr(self, '_wizard_root_paths', []):
-                try:
-                    self.service.library.add_root(path)
-                except ValueError:
-                    pass  # dubbele root: overslaan
-            self.safe(self.refresh)
-            checkbox = getattr(self, '_wizard_start_checkbox', None)
-            if checkbox is None or checkbox.isChecked():
-                # volledige automatisering i.p.v. alléén scannen
-                self.run_job(lambda progress: self.service.process_all_roots(progress, resume=True),
-                             job_name='eerste keer: alles automatisch verwerken',
-                             callback=lambda _result: self.safe(self.refresh))
+            try:
+                combo = getattr(self, '_wizard_profile_combo', None)
+                profile = str(combo.currentText()) if combo else 'BALANCED'
+                self.service.library.config['resource_preset'] = profile
+                self._persist_profile(profile)
+                added = []
+                for path in getattr(self, '_wizard_root_paths', []):
+                    try:
+                        self.service.library.add_root(path)
+                        added.append(path)
+                    except ValueError:
+                        pass  # dubbele root: overslaan
+                self.safe(self.refresh)
+                checkbox = getattr(self, '_wizard_start_checkbox', None)
+                if added and (checkbox is None or checkbox.isChecked()):
+                    # volledige automatisering i.p.v. alléén scannen
+                    self.run_job(lambda progress: self.service.process_all_roots(progress, resume=True),
+                                 job_name='eerste keer: alles automatisch verwerken',
+                                 callback=lambda _result: self.safe(self.refresh))
+            except Exception as exc:  # eerste-keer-wizard mag de app NEVER crashen
+                logging.exception("first-run wizard afhandeling faalde")
+                QMessageBox.warning(self, 'Eerste keer instellen',
+                                    'De instellingen zijn bewaard, maar er ging '
+                                    f'iets mis bij het starten van de scan:\n{exc}\n\n'
+                                    'Je kunt de map later alsnog toevoegen op de '
+                                    'Library-pagina.')
 
     def _wizard_welcome(self):
         page = QWizardPage()
