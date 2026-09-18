@@ -2,6 +2,31 @@
 
 Datum: 2026-09-10 (bijgewerkt na V3-ronde)
 
+## V8.5-status (kennis-overdracht: tunen zonder eigen tuned-bestand) — actueel
+
+**166 passed / 1 guard-skip groen.**
+
+- Vraag: "geen getuned bestand van die auto, maar als de app veel geleerd
+  heeft — kan hij die dan tunen?" → **overdrachtsmodus**.
+- **`TuneBuilder.family_knowledge(min_pairs=2)`**: consolideert bevestigde
+  paren per familie (ECU + softwarenummer van het original); een regio is
+  overdraagbaar als ≥2 paren IDENTIEKE tuned-bytes tonen (consistente
+  modificatie). Inconsistente regio's worden nooit overgedragen.
+- **`TuneBuilder.build_transfer(...)`**: past alléén consistente
+  familiedelta's toe op een doel zonder eigen paar; vereist
+  analyse-match ≥ threshold met een known original van die familie;
+  `source_divergent`-vlag per regio; output = NIEUW bestand
+  (TUNED_TRANSFER_…) + rapport met OVERDRACHTSMODUS-waarschuwingen;
+  checksums nooit aangeraakt; audit `build_tune_transfer`.
+- **`service.build_tune(allow_transfer=True)`**: probeert eerst de normale
+  (bevroren) stroom; bij UNKNOWN_NO_RECIPE / no_match / no_regions_applied
+  automatisch de overdracht (`fallback_from` in het rapport).
+- **GUI**: checkbox "Kennis-overdracht toestaan" (standaard AAN) op Tune
+  Bouwer; resultatenscherm toont MODUS/fallback.
+- Tests: consistente delta overgedragen (2 paren, zelfde waarde op 300),
+  inconsistente (800) en eenmalige (900) regio's geweigerd, refusals
+  (geen kennis / geen familie-match).
+
 ## V8.4-status (Tune Bouwer uitgebreid: multi-add-on, stages 1-5, 13 add-ons) — actueel
 
 **163 passed / 1 guard-skip groen.**

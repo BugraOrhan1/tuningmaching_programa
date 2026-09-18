@@ -292,3 +292,79 @@ def test_apply_pair_skips_overlapping_regions(service, tmp_path):
     outcome2, applied2, _skipped2 = builder._apply_pair(
         result2, bytes(base["original_bytes"]), base["pair_id"])
     assert outcome2 == "ok" and applied2
+
+
+def _family_original(service, tmp_path, tag, ecu="MED17.1.21", sw="FAM_SW",
+                     delta=None):
+    """Eigen original binnen een familie (metadata expliciet gezet)."""
+    import itertools
+    unique = next(_PAIR_COUNTER)
+    source = tmp_path / f"fam_{tag}_{unique}"
+    source.mkdir()
+    original = (b"\x00SW:" + sw.encode() + b" HW:FAMH\x00"
+                + bytes((i * 7 + unique) % 251 for i in range(4096)))
+    original_path = source / f"orig_{tag}.bin"
+    original_path.write_bytes(original)
+    original_id = service.repo.import_file(original_path, "original")
+    service.repo.update_metadata(original_id, {"ecu_family": ecu,
+                                               "software_number": sw})
+    if delta:
+        tuned = bytearray(original)
+        for start, value in delta.items():
+            tuned[start:start + 4] = bytes([value]) * 4
+        tuned_path = source / f"tuned_{tag}_stage1.bin"
+        tuned_path.write_bytes(bytes(tuned))
+        tuned_id = service.repo.import_file(tuned_path, "tuned")
+        service.repo.update_metadata(tuned_id, {"stage": "stage1"})
+        pair_id = service.repo.pair(original_id, tuned_id)
+        service.repo.confirm_pair(pair_id)
+        return {"original_id": original_id, "original_bytes": original,
+                "pair_id": pair_id, "tuned_id": tuned_id}
+    return {"original_id": original_id, "original_bytes": original}
+
+
+def test_transfer_applies_consistent_family_deltas(service, tmp_path):
+    """Kern-scenario van de gebruiker: géén tuned-bestand van deze auto, maar
+    ≥2 bevestigde paren in dezelfde familie met IDENTIEKE wijziging op
+    offset 300 → die delta wordt overgedragen. Inconsistente regio (800:
+    verschillende waarden) en eenmalige regio (900) worden NIET toegepast."""
+    a = _family_original(service, tmp_path, "A", delta={300: 0xAA, 800: 0x11})
+    b = _family_original(service, tmp_path, "B", delta={300: 0xAA, 800: 0x22, 900: 0x33})
+    assert a["original_bytes"] != b["original_bytes"]
+    # doel: derde auto uit dezelfde familie, zonder eigen pair
+    target = _family_original(service, tmp_path, "C")
+    result = service.build_tune(
+        original_file_id=target["original_id"], stage="stage1",
+        addons=["pops_bang"], dry_run=False, allow_transfer=True)
+    assert result["status"] == "candidate_generated", result
+    assert result["transfer"] is True
+    applied_starts = {region["start_offset"]: region for region in result["applied_regions"]}
+    assert 300 in applied_starts
+    assert bytes.fromhex(applied_starts[300]["tuned_bytes"]) == b"\xAA" * 4
+    assert 800 not in applied_starts and 900 not in applied_starts
+    assert applied_starts[300]["confirmed_pairs"] == [a["pair_id"], b["pair_id"]]
+    assert any("OVERDRACHTSMODUS" in warning for warning in result["warnings"])
+    output = Path(result["output_path"]).read_bytes()
+    assert output[300:304] == b"\xAA" * 4
+    assert output[800:804] == target["original_bytes"][800:804]  # onaangetast
+
+
+def test_transfer_refuses_without_consistent_knowledge(service, tmp_path):
+    """Eén paar (min_pairs=2 niet gehaald) → UNKNOWN_NO_TRANSFER_KNOWLEDGE,
+    ook al is er een bevestigd paar in de familie."""
+    _family_original(service, tmp_path, "X", delta={300: 0xAA})
+    target = _family_original(service, tmp_path, "Y")
+    result = service.build_tune(
+        original_file_id=target["original_id"], dry_run=False, allow_transfer=True)
+    assert result["status"] == "UNKNOWN_NO_TRANSFER_KNOWLEDGE"
+
+
+def test_transfer_refused_without_family_match(service, tmp_path):
+    """Doel lijkt op niets bekends (andere familie/metadata) → geen overdracht."""
+    _family_original(service, tmp_path, "A", delta={300: 0xAA})
+    _family_original(service, tmp_path, "B", delta={300: 0xAA})
+    vreemd = _family_original(service, tmp_path, "Z", ecu="SIM2K", sw="ANDERE_SW")
+    result = service.build_tune(
+        original_file_id=vreemd["original_id"], dry_run=False, allow_transfer=True)
+    assert result["status"] in ("no_match_for_transfer",
+                                "UNKNOWN_NO_TRANSFER_KNOWLEDGE")

@@ -150,6 +150,10 @@ class Assistant:
     def _recipes_answer(self, c) -> dict:
         return {"answer": "\n".join([
             self._recipes_line(),
+            "Geen eigen tuned-bestand van die auto? Zet 'Kennis-overdracht' aan "
+            "(staat standaard aan): dan worden consistente wijzigingen van "
+            "vergelijkbare auto's (zelfde ECU+software, ≥2 bevestigde paren) "
+            "toegepast — met extra verplichte controle.",
             "De Tune Bouwer (ANALYSE → Tune Bouwer): origineel kiezen → stage + add-ons → bouwen. "
             "Elke regio wordt alleen overgenomen met ≥98% regionaal bewijs; output is een nieuw "
             "kandidaatbestand + JSON-rapport, checksums worden NOOIT gecorrigeerd (eerst WinOLS-controle).",

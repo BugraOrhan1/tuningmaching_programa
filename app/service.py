@@ -897,14 +897,32 @@ class Service(ServiceV3Mixin):
     def build_tune(self, original_path: str | None = None,
                    original_file_id: int | None = None, stage: str | None = None,
                    addons: list[str] | None = None, intensity: int | None = None,
-                   threshold: float = 85.0, dry_run: bool = True) -> dict:
+                   threshold: float = 85.0, dry_run: bool = True,
+                   allow_transfer: bool = False) -> dict:
         """Kandidaat bouwen. Standaard dry_run: toont wat er zou gebeuren.
         Bij dry_run=False wordt een NIEUW bestand in exports/candidates
-        geschreven; bronbestanden blijven altijd ongewijzigd."""
-        return self.tune_builder.build(
+        geschreven; bronbestanden blijven altijd ongewijzigd.
+        allow_transfer: bij geen eigen paar-kennis automatisch de
+        overdrachtsmodus proberen (consistente familiedelta's, extra
+        waarschuwingen, verplichte review)."""
+        result = self.tune_builder.build(
             original_path=original_path, original_file_id=original_file_id,
             stage=stage, addons=addons, intensity=intensity,
             threshold=threshold, dry_run=dry_run)
+        failed = result.get("status") in ("UNKNOWN_NO_RECIPE",
+                                          "no_match_above_threshold",
+                                          "no_regions_applied")
+        if allow_transfer and failed:
+            transfer = self.tune_builder.build_transfer(
+                original_path=original_path, original_file_id=original_file_id,
+                stage=stage, addons=addons, threshold=threshold, dry_run=dry_run)
+            transfer["fallback_from"] = result.get("status")
+            if transfer.get("status") == "candidate_generated":
+                transfer["note"] = ("Kennis-overdracht gebruikt (geen eigen "
+                                    "tuned-bestand van deze auto nodig); " +
+                                    transfer.get("note", ""))
+            return transfer
+        return result
 
     # ------------------------------------------------------------------
     # Rapportexport (§62): JSON/CSV/MD/HTML voor elk kennisrapport

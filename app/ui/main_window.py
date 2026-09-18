@@ -118,7 +118,12 @@ adblue off, decat, antilag, launch control, E85, swirl off, cold start off,
 …). De planner kiest het beste dekkende recept en ketent bevestigde
 recepten voor ontbrekende add-ons; elke regio alleen met regionaal bewijs
 (≥98%), overlappen worden nooit dubbel toegepast. Output = nieuw bestand +
-waarschuwingen (checksums NIET gecorrigeerd — eerst WinOLS-controle).<br>
+waarschuwingen (checksums NIET gecorrigeerd — eerst WinOLS-controle).
+<b>Kennis-overdracht</b> (standaard aan): geen eigen tuned-bestand van die
+auto? Dan past de bouwer consistente wijzigingen toe die bij ≥2 bevestigde
+paren van vergelijkbare auto's (zelfde ECU + softwarefamilie) identiek
+bleken — gemarkeerd als OVERDRACHTSMODUS met extra verplichte controle.
+Inconsistente of eenmalige wijzigingen worden nooit overgedragen.<br>
 <b>Diff &amp; Regio's</b> — één bevestigd paar volledig bekijken: byte-voor-byte
 verschil met hex-venster (oranje = gewijzigd) én de wijzigingsregio's met
 klasse (calibratie/checksum/code), entropie en bewijs.<br>
@@ -1844,6 +1849,12 @@ class MainWindow(QMainWindow):
         self.tune_dry = QCheckBox('Alleen bekijken (dry-run, niets wegschrijven)')
         self.tune_dry.setChecked(True)
         layout.addWidget(self.tune_dry)
+        self.tune_transfer = QCheckBox(
+            'Kennis-overdracht toestaan: geen eigen tuned-bestand? Dan consistente '
+            'wijzigingen van vergelijkbare auto\'s (zelfde ECU+software, ≥2 bevestigde '
+            'paren) toepassen — met extra verplichte controle')
+        self.tune_transfer.setChecked(True)
+        layout.addWidget(self.tune_transfer)
         self.button(layout, 'Recepten vernieuwen', self.refresh_tune_builder)
         self.button(layout, 'Kandidaat bouwen', self.run_tune_build)
         self.tune_output = QLabel('Kies een origineel en een recept. De builder '
@@ -1899,10 +1910,12 @@ class MainWindow(QMainWindow):
         intensity = self.tune_intensity.currentData()
         dry = self.tune_dry.isChecked()
 
+        transfer = self.tune_transfer.isChecked()
+
         def operation(progress):
             return self.service.build_tune(original_path=path, stage=stage,
                                            addons=addons, intensity=intensity,
-                                           dry_run=dry)
+                                           dry_run=dry, allow_transfer=transfer)
 
         self.run_job(operation, job_name='kandidaat bouwen',
                      callback=lambda result: self.safe(
@@ -1911,6 +1924,13 @@ class MainWindow(QMainWindow):
     def _tune_build_done(self, result):
         status = result.get('status')
         lines = [f"STATUS: {status}"]
+        if result.get('transfer'):
+            lines.append("MODUS: kennis-overdracht (geen eigen tuned-bestand "
+                         "nodig — consistente familiewijzigingen toegepast; "
+                         "EXTRA controleren in WinOLS)")
+        elif result.get('fallback_from'):
+            lines.append(f"(normale bouw niet mogelijk: {result['fallback_from']}; "
+                         "overdracht geprobeerd)")
         if result.get('recipe', {}).get('selected'):
             lines.append(f"Recept: {result['recipe']['selected']} "
                          f"(match {result.get('match_score', 0):.1f}%)")

@@ -344,6 +344,191 @@ class TuneBuilder:
                 "note": "Kandidaat geschreven; technicus-review en checksum-"
                         "correctie zijn verplicht vóór gebruik."}
 
+    # ------------------------------------------------------------------
+    # Kennis-overdracht: tunen zonder eigen tuned-bestand van die auto
+    # ------------------------------------------------------------------
+    def family_knowledge(self, min_pairs: int = 2) -> list[dict]:
+        """Consolideer bevestigde kennis per familie (ECU + softwarenummer van
+        het ORIGINAL). Een regio is overdraagbaar als ≥ min_pairs bevestigde
+        paren in díe familie IDENTIEKE tuned-bytes laten zien — dat is het
+        bewijs van een consistente modificatie (een echte 'tuning-definitie'),
+        onafhankelijk van de kalibratiewaarden van één auto. Regio's waar de
+        tuned-bytes verschillen worden bewust NIET overgedragen (nooit
+        verzinnen)."""
+        families: dict[tuple, dict] = {}
+        for pair in self.repo.pairs():
+            if not pair["confirmed"]:
+                continue
+            try:
+                original = self.repo.file(pair["original_file_id"])
+                tuned = self.repo.file(pair["tuned_file_id"])
+                known = self.service.diff(pair["id"])
+                original_data = self.repo.data(pair["original_file_id"])
+                tuned_data = self.repo.data(pair["tuned_file_id"])
+            except (OSError, ValueError):
+                continue
+            key = (original.get("ecu_family") or "?",
+                   original.get("software_number") or "?")
+            family = families.setdefault(key, {"key": key, "pairs": set(),
+                                               "regions": {}})
+            family["pairs"].add(pair["id"])
+            for block in known["blocks"]:
+                start, end = block["start_offset"], block["end_offset"]
+                if end > len(original_data) or end > len(tuned_data):
+                    continue
+                region = family["regions"].setdefault(
+                    (start, end), {"samples": [], "pair_ids": set()})
+                region["samples"].append(bytes(tuned_data[start:end]))
+                region["pair_ids"].add(pair["id"])
+        knowledge = []
+        for family in families.values():
+            for (start, end), region in family["regions"].items():
+                if len(region["pair_ids"]) < min_pairs:
+                    continue
+                unique_tuned = set(region["samples"])
+                if len(unique_tuned) != 1:
+                    continue  # inconsistent: geen overdracht
+                knowledge.append({
+                    "family": {"ecu_family": family["key"][0],
+                               "software_number": family["key"][1]},
+                    "start_offset": start, "end_offset": end,
+                    "length": end - start,
+                    "tuned_bytes": unique_tuned.pop(),
+                    "confirmed_pairs": sorted(region["pair_ids"]),
+                    "consistency": "identical_across_pairs",
+                })
+        knowledge.sort(key=lambda item: (item["family"]["ecu_family"],
+                                         item["start_offset"]))
+        return knowledge
+
+    def build_transfer(self, original_path: str | None = None,
+                       original_file_id: int | None = None,
+                       stage: str | None = None, addons: list[str] | None = None,
+                       threshold: float = 85.0, dry_run: bool = False,
+                       min_pairs: int = 2) -> dict:
+        """Overdrachtsmodus: géén eigen tuned-bestand van deze auto? Dan
+        worden alléén consistente familiedelta's toegepast (zie
+        family_knowledge). Vereist: het doel bestand lijkt genoeg op bekende
+        originals van die familie (analyse-score ≥ threshold) en hoort bij
+        dezelfde ECU/software-familie. Output is een NIEUW kandidaatbestand
+        met EXTRA waarschuwingen; checksums nooit aangeraakt."""
+        addons = [addon for addon in (addons or []) if addon]
+        if original_file_id is None and original_path:
+            original_file_id = self.repo.import_file(Path(original_path), "unknown")
+        if original_file_id is None:
+            raise ValueError("Geef een origineel bestand op (pad of file_id)")
+        target = self.repo.file(original_file_id)
+        query = self.repo.data(original_file_id)
+        report = self.service.analyze(target["filepath"])
+        ranked = [match for match in report["matches"]
+                  if match["match_score"] >= threshold
+                  and match["compatibility_status"] != "incompatible_base"]
+        if not ranked:
+            return {"status": "no_match_for_transfer", "threshold": threshold,
+                    "note": "Te weinig gelijkenis met bekende originals voor "
+                            "verantwoorde kennis-overdracht; niets gegenereerd."}
+        best = ranked[0]
+        anchor = self.repo.file(best["file_id"])
+        family_key = {"ecu_family": anchor.get("ecu_family") or "?",
+                      "software_number": anchor.get("software_number") or "?"}
+        knowledge = [item for item in self.family_knowledge(min_pairs=min_pairs)
+                     if item["family"] == family_key]
+        if not knowledge:
+            return {"status": "UNKNOWN_NO_TRANSFER_KNOWLEDGE",
+                    "family": family_key,
+                    "note": "Geen consistente overdrafbare kennis voor deze "
+                            "familie (ECU+software). Er is niets gegenereerd.",
+                    "hint": "Kennis groeit met bevestigde paren: minimaal "
+                            f"{min_pairs} paren in dezelfde familie met "
+                            "identieke wijziging per regio."}
+        applied, skipped = [], []
+        result = bytearray(query)
+        for item in knowledge:
+            start, end = item["start_offset"], item["end_offset"]
+            if end > len(result):
+                skipped.append({**item, "reason": "regio valt buiten bestand"})
+                continue
+            current = bytes(result[start:end])
+            if current == item["tuned_bytes"]:
+                skipped.append({**item, "reason": "doel heeft deze waarde al"})
+                continue
+            source_divergent = current not in {
+                bytes(self.repo.data(pid_pair["original_file_id"])[start:end])
+                for pid_pair in self.repo.pairs()
+                if pid_pair["id"] in item["confirmed_pairs"]}
+            result[start:end] = item["tuned_bytes"]
+            applied.append({"start_offset": start, "end_offset": end,
+                            "length": item["length"],
+                            "tuned_bytes": item["tuned_bytes"].hex(),
+                            "confirmed_pairs": item["confirmed_pairs"],
+                            "source_divergent": source_divergent,
+                            "transfer": True})
+        if not applied:
+            return {"status": "no_transfer_regions_applied",
+                    "family": family_key, "skipped_regions": skipped,
+                    "note": "Alle overdrafbare regio's zijn al in orde of "
+                            "niet toepasbaar; niets geschreven."}
+        output = bytes(result)
+        output_sha = hashlib.sha256(output).hexdigest()
+        payload = {
+            "target": {"id": original_file_id, "filename": target["filename"],
+                       "sha256": target["sha256"], "size": len(query)},
+            "recipe": {"stage": stage, "addons": addons, "mode": "kennis-overdracht",
+                       "family": family_key,
+                       "selected": " + ".join(filter(None, [stage, *(addons or [])]))
+                                   or "familie-delta's"},
+            "match": {"file_id": best["file_id"], "filename": best["filename"],
+                      "match_score": best["match_score"]},
+            "applied_regions": applied, "skipped_regions": skipped,
+            "warnings": [
+                "KANDIDAAT — NOT VERIFIED — FOR TECHNICIAN REVIEW.",
+                "OVERDRACHTSMODUS: kennis van andere auto's in dezelfde "
+                f"ECU/software-familie toegepast (≥{min_pairs} bevestigde "
+                "paren met identieke wijziging per regio). Elke regio extra "
+                "controleren in WinOLS.",
+                "ECU-checksums zijn NIET gecorrigeerd: niet flash-klaar zonder "
+                "technicus-review.",
+                "Bronbestanden zijn niet gewijzigd; dit is een nieuw bestand."],
+        }
+        if dry_run:
+            return {"status": "dry_run", "transfer": True,
+                    "would_write_sha256": output_sha, "family": family_key,
+                    "applied_regions": applied, "skipped_regions": skipped,
+                    "warnings": payload["warnings"],
+                    "note": "Droge run: er is niets weggeschreven."}
+        candidate_dir = self.repo.root / "exports" / "candidates"
+        candidate_dir.mkdir(parents=True, exist_ok=True)
+        stem = Path(target["filename"]).stem or "original"
+        recipe_bits = [b.replace(" ", "_") for b in (stage, *(addons or [])) if b]
+        name_bits = ["TRANSFER", stem] + recipe_bits + [output_sha[:8]]
+        output_path = candidate_dir / ("TUNED_" + "_".join(name_bits) + ".bin")
+        try:
+            with output_path.open("xb") as stream:
+                stream.write(output)
+        except FileExistsError:
+            pass
+        output_path.with_suffix(".json").write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        candidate_id = self.repo.add_tune_candidate(
+            original_file_id, None, threshold, best["match_score"],
+            len(applied), len(skipped), payload, str(output_path),
+            {"sha256": output_sha}, len(output))
+        self.repo.audit("build_tune_transfer", "tune_candidate", candidate_id,
+                        after={"output": str(output_path), "sha256": output_sha,
+                               "family": family_key,
+                               "regions": len(applied)},
+                        reason="kennis-overdracht (consistente familiedelta's)")
+        return {"status": "candidate_generated", "transfer": True,
+                "candidate_id": candidate_id, "output_path": str(output_path),
+                "report_path": str(output_path.with_suffix(".json")),
+                "sha256": output_sha, "size": len(output),
+                "family": family_key, "match_score": best["match_score"],
+                "applied_regions": applied, "skipped_regions": skipped,
+                "warnings": payload["warnings"],
+                "note": "Overdrachtskandidaat geschreven; extra verificatie "
+                        "verplicht (kennis van andere auto's in dezelfde "
+                        "familie)."}
+
     def _apply_pair(self, result: bytearray, query: bytes, pair_id: int,
                     applied_ranges: list[tuple[int, int]] | None = None):
         """Regio's van één bevestigd paar toepassen met regionaal bewijs.
