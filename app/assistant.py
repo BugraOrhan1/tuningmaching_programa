@@ -111,6 +111,9 @@ class Assistant:
             "gelijkenis en compatibiliteit zijn aparte scores met eigen bewijs ('WHY'-tabel bij BIN Analyseren).",
             "• De drempel (standaard 85%) is een vangnet: daaronder wordt NIETS automatisch overgenomen, "
             "want een verkeerde patch is erger dan geen antwoord.",
+            "• Na élke analyse maakt de app zelf het paar bij sterk uniek bewijs: "
+            "≥95% + uniek = bevestigd paar; 90–95% = suggestie die jij nakijkt; "
+            "inhoud identiek aan het original = geen paar (dat is geen tuning).",
             "• Wordt jouw bestand net niet herkend? Meest voorkomende oorzaken: (1) er zijn nog geen "
             "bevestigde paren van die ECU-familie, (2) afwijkende softwareversie — check de WHY-tabel op "
             "welk component zakte, (3) bestand zit nog tussen de unknowns.",

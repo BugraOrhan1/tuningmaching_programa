@@ -105,7 +105,10 @@ UNKNOWN tot jij ze beoordeelt (technicus-bewijs wint altijd).</p>
 <p><b>BIN Analyseren (V3)</b> — élke BIN-analyse op één pagina: bovenin de
 snelle bytevergelijking met alle originals, daaronder het volledige rapport
 (herkenning, DNA-matches, identiteiten, alle scoreonderdelen en de WHY-tabel:
-waarom dit percentage).<br>
+waarom dit percentage). <u>Na élke analyse paart de app automatisch</u>: een
+unknown die uniek en sterk matcht met één bekend original wordt tuned en
+gepaard — ≥95% = bevestigd paar, 90–95% = suggestie voor jouw review;
+inhoud identiek aan het original = geen paar (dat is geen tuning).<br>
 <b>Tune Bouwer (V7)</b> — origineel erin, getunede kandidaat terug: kies stage
 en add-ons (pops &amp; bang, vmax, …). Recepten komen uitsluitend uit bevestigde
 paren; elke regio alleen met regionaal bewijs. Output = nieuw bestand +
@@ -846,6 +849,15 @@ class MainWindow(QMainWindow):
 
     def show_report(self, report):
         self.report = report
+        auto = report.get('auto_pair') or {}
+        if auto.get('action') == 'confirmed_pair':
+            self.statusBar().showMessage(
+                f"Auto-paar BEVESTIGD met {auto.get('original')} "
+                f"(match {auto.get('match_score')}%) — te zien bij Original/Tuned Pairs.", 10000)
+        elif auto.get('action') == 'suggested_pair':
+            self.statusBar().showMessage(
+                f"Auto-paar VOORGESTELD met {auto.get('original')} "
+                f"(match {auto.get('match_score')}%) — bevestig na controle bij Original/Tuned Pairs.", 10000)
         self.output.setPlainText(json.dumps(report, ensure_ascii=False, indent=2))
         self.populate(self.match_table, report.get('matches', []), ['file_id', 'filename', 'overall_match_score', 'match_score', 'compatibility_confidence', 'compatibility_status'])
         if 'matches' in report:

@@ -2,6 +2,26 @@
 
 Datum: 2026-09-10 (bijgewerkt na V3-ronde)
 
+## V8.2-status (automatisch paren na BIN-analyse) — actueel
+
+**158/158 tests groen.**
+
+- **`service.auto_pair_after_analysis(file_id, report)`**: na élke analyse
+  wordt een unknown dat uniek en sterk matcht met één bekend original
+  automatisch 'tuned' gezet en gepaard — **≥95% = bevestigd paar**,
+  **90–95% = unconfirmed suggestie** (reviewwachtrij). Veiligheidsregels:
+  inhoud identiek aan original → géén paar (geen tuning); tweede kandidaat
+  binnen 2% → ambigu, niets; ECU-metadata-conflict → niets; bestand al
+  getypeerd → niets. Audit-regel per actie.
+- Ingebouwd in `service.analyze` (GUI snel-analyse, CLI en API): het
+  geanalyseerde bestand wordt idempotent in de database gezet (bestaande
+  rij hergebruikt, geen duplicaten) en gepaard; resultaat staat in
+  `report['auto_pair']`.
+- GUI: statusbalk-melding na analyse ("Auto-paar BEVESTIGD/VOORGESTELD…"),
+  volledige details in het rapport-JSON.
+- Tests: bevestigd-paar (+audit), 90–95-suggestieband, identiek-skip,
+  ambigue-skip (bestand blijft unknown).
+
 ## V8.1-status (bugs uit de praktijk gefixt: []-telling, 'path'-KeyError, naamherkenning) — actueel
 
 **155/155 tests groen.** Aanleiding: screenshots van de gebruiker.

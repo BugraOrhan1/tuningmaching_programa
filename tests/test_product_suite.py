@@ -374,3 +374,76 @@ def test_bulk_classifies_unknowns_by_filename_labels(service, tmp_path):
     assert files["bmw330d_origineel.bin"]["file_type"] == "original"
     assert files["bmw330d_stage1_pops_bang.bin"]["file_type"] == "tuned"
     assert files["opel_adam_1.4.bin"]["file_type"] == "unknown"
+
+
+def test_auto_pair_after_analysis_confirms_strong_unique_match(service, tmp_path):
+    """Verzoek 'automatisch pairs maken na BIN analyse': een unknown dat uniek
+    en sterk (>=95%) matcht met één bekend original wordt tuned + bevestigd
+    paar, inclusief audit-regel."""
+    payload = bytes([0]) + b"HEAD" + bytes(range(256)) * 4
+    original = tmp_path / "unit_orig.bin"
+    original.write_bytes(payload)
+    orig_id = service.repo.import_file(original, "original")
+    variant = bytearray(payload)
+    variant[100:108] = bytes([0xAA]) * 8
+    mystery = tmp_path / "mystery_variant.bin"
+    mystery.write_bytes(bytes(variant))
+    mid = service.repo.import_file(mystery, "unknown")
+    report = service.analyze(str(mystery))
+    auto = report["auto_pair"]
+    assert auto["action"] == "confirmed_pair", auto
+    assert auto["original"] == "unit_orig.bin"
+    assert service.repo.file(mid)["file_type"] == "tuned"
+    assert any(p["confirmed"] == 1 and p["original_file_id"] == orig_id
+               and p["tuned_file_id"] == mid for p in service.repo.pairs())
+    assert service.repo.db.rows(
+        "SELECT id FROM audit_log WHERE action='auto_pair_after_analysis'")
+
+
+def test_auto_pair_after_analysis_suggests_90_95_band(service, tmp_path):
+    """90–95%: goed maar niet zeker → paar als SUGGESTIE (unconfirmed) en
+    bestand op tuned, wacht op menselijke controle."""
+    payload = bytes([0]) + b"HEAD" + bytes(range(256)) * 4
+    original = tmp_path / "unit_orig2.bin"
+    original.write_bytes(payload)
+    service.repo.import_file(original, "original")
+    variant = bytearray(payload)
+    variant[100:180] = bytes([0xBB]) * 80  # ~92% match
+    mystery = tmp_path / "zwakke_variant.bin"
+    mystery.write_bytes(bytes(variant))
+    mid = service.repo.import_file(mystery, "unknown")
+    report = service.analyze(str(mystery))
+    auto = report["auto_pair"]
+    assert auto["action"] == "suggested_pair", auto
+    assert any(p["confirmed"] == 0 and p["tuned_file_id"] == mid
+               for p in service.repo.pairs())
+    assert service.repo.file(mid)["file_type"] == "tuned"
+
+
+def test_auto_pair_skips_identical_and_ambiguous(service, tmp_path):
+    """Identiek aan original = geen paar (geen tuning). Twee even sterke
+    kandidaten = ambigue → niets, bestand blijft unknown."""
+    payload = bytes([0]) + b"HEAD" + bytes(range(256)) * 4
+    original = tmp_path / "o1.bin"
+    original.write_bytes(payload)
+    service.repo.import_file(original, "original")
+    kopie = tmp_path / "kopie_van_original.bin"
+    kopie.write_bytes(payload)
+    kop_id = service.repo.import_file(kopie, "unknown")
+    report = service.analyze(str(kopie))
+    assert report["auto_pair"]["action"] == "identical_original"
+    assert service.repo.pairs() == []
+    # ambigue: tweede original met zelfde inhoud
+    original2 = tmp_path / "o2.bin"
+    original2.write_bytes(payload)
+    service.repo.import_file(original2, "original")
+    variant = bytearray(payload)
+    variant[100:108] = bytes([0xAA]) * 8
+    mystery = tmp_path / "ambigue_variant.bin"
+    mystery.write_bytes(bytes(variant))
+    amb_id = service.repo.import_file(mystery, "unknown")
+    report2 = service.analyze(str(mystery))
+    assert report2["auto_pair"]["action"] is None
+    assert "niet uniek" in report2["auto_pair"]["reason"]
+    assert service.repo.file(amb_id)["file_type"] == "unknown"
+    assert service.repo.pairs() == []

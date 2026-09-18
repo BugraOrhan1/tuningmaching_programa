@@ -32,6 +32,55 @@ class Service(ServiceV3Mixin):
         from app.assistant import Assistant
         self.assistant = Assistant(self)
 
+    def auto_pair_after_analysis(self, file_id: int, report: dict,
+                                 min_confirm: float = 95.0,
+                                 min_suggest: float = 90.0) -> dict:
+        """Automatisch paren NA een BIN-analyse (gebruikersverzoek): een
+        unknown dat uniek en sterk matcht met één bekend original wordt
+        'tuned' en gepaard. >= min_confirm: paar bevestigd; min_suggest..min_confirm:
+        paar als SUGGESTIE (unconfirmed, voor review). Identiek aan het original
+        = geen paar (dat is géén tuning). Ambigu of metadata-conflict = niets."""
+        repo = self.repo
+        row = repo.file(file_id)
+        if row['file_type'] != 'unknown':
+            return {'action': None, 'reason': f"bestand is al '{row['file_type']}'"}
+        matches = [m for m in report.get('matches') or [] if m.get('file_id') != file_id]
+        if not matches:
+            return {'action': None, 'reason': 'geen matches in het rapport'}
+        best = matches[0]
+        score = float(best.get('match_score') or 0)
+        if best.get('compatibility_status') == 'incompatible_base':
+            return {'action': None, 'reason': 'incompatibele softwarebasis'}
+        original_row = repo.file(best['file_id'])
+        if original_row['sha256'] == row['sha256']:
+            return {'action': 'identical_original', 'original': original_row['filename'],
+                    'match_score': round(score, 2),
+                    'reason': 'inhoud identiek aan bekend original — geen paar nodig'}
+        if score < min_suggest:
+            return {'action': None, 'reason': f'score {score:.1f}% < {min_suggest:.0f}%'}
+        second = matches[1] if len(matches) > 1 else None
+        if second and score - float(second.get('match_score') or 0) < 2.0:
+            return {'action': None, 'reason': 'match niet uniek: tweede kandidaat vrijwel even sterk'}
+        if (row.get('ecu_family') and original_row.get('ecu_family')
+                and row['ecu_family'] != original_row['ecu_family']):
+            return {'action': None, 'reason': 'ECU-metadata conflict met het original'}
+        confirmed = score >= min_confirm
+        try:
+            repo.reclassify_files([file_id], 'tuned')
+        except (OSError, ValueError) as exc:
+            return {'action': None, 'reason': f'classificatie onmogelijk: {exc}'}
+        pair_id = repo.pair(best['file_id'], file_id, confirmed=confirmed,
+                            confidence=round(score, 2))
+        repo.audit('auto_pair_after_analysis', 'file_pair', pair_id,
+                   after={'match_score': round(score, 2), 'confirmed': confirmed,
+                          'original_file_id': best['file_id'],
+                          'reason': 'sterk uniek bewijs uit BIN-analyse'})
+        return {'action': 'confirmed_pair' if confirmed else 'suggested_pair',
+                'pair_id': pair_id, 'original': original_row['filename'],
+                'match_score': round(score, 2),
+                'reason': ('uniek sterk bewijs — paar bevestigd' if confirmed
+                           else 'goed bewijs — paar als suggestie voor review')}
+
     def analyze(self, path: str, progress=None) -> dict:
         query = read_binary(path, self.repo.config['max_file_mb'])
         report = find_matches(self.repo, path, progress, query_data=query)
@@ -56,6 +105,17 @@ class Service(ServiceV3Mixin):
                     match['known_changes'].append(known)
                 except (OSError, ValueError) as exc:
                     report['errors'].append({'pair_id': pair['id'], 'error': str(exc)})
+        try:
+            # automatisch paren na analyse (gebruikersverzoek): het geanalyseerde
+            # bestand staat dan (idempotent) in de database als unknown
+            resolved = str(Path(path).resolve())
+            rows = self.repo.db.rows(
+                "SELECT id, file_type FROM files WHERE source_path=? ORDER BY id LIMIT 1",
+                (resolved,))
+            file_id = rows[0]['id'] if rows else self.repo.import_file(Path(path), 'unknown')
+            report['auto_pair'] = self.auto_pair_after_analysis(file_id, report)
+        except (OSError, ValueError) as exc:
+            report['auto_pair'] = {'action': None, 'reason': str(exc)}
         return report
 
     def identify(self, path: str) -> dict:
