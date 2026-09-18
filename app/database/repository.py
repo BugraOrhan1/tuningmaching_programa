@@ -34,6 +34,28 @@ def pair_key(filename: str) -> str:
     return re.sub(r"[^a-z0-9]", "", stem)
 
 
+def _sanitize_name(value: str) -> str:
+    """Leesbare veilige bestandsnaam-component; leeg → leeg."""
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", value or "").strip("_.")
+    return cleaned
+
+
+def ols_extract_filename(project_name: str, version_name: str | None,
+                         display_index: int, source_filename: str | None) -> str:
+    """Betekenisvolle naam voor een geëxtraheerde OLS-versie-binary:
+    <project>_v<index>[_<versienaam>].bin. Een échte bronbestandsnaam uit het
+    project wint altijd; zonder projectnaam valt het terug op de oude vorm."""
+    if source_filename:
+        return source_filename
+    raw_stem = Path(project_name).stem if (project_name and Path(project_name).suffix) else project_name
+    stem = _sanitize_name(raw_stem) or "ols_project"
+    parts = [stem, f"v{display_index}"]
+    version = _sanitize_name(version_name or "")
+    if version:
+        parts.append(version)
+    return "_".join(parts) + ".bin"
+
+
 class Repository(RepositoryV3Mixin):
     def __init__(self, config: dict):
         self.config = config
@@ -297,6 +319,8 @@ class Repository(RepositoryV3Mixin):
         with self.db.connect() as db:
             db.execute("DELETE FROM ols_version_binaries WHERE project_id=?", (project_id,))
         extras = 0
+        project_rows = self.db.rows("SELECT filename FROM winols_projects WHERE id=?", (project_id,))
+        project_name = project_rows[0]["filename"] if project_rows else None
         for item in structure["version_binaries"]:
             binary = item.get("binary")
             version_index = item.get("version_index")
@@ -305,7 +329,8 @@ class Repository(RepositoryV3Mixin):
                 extras += 1
                 display_index = 100 + extras
             file_id = None
-            filename = item.get("source_filename") or f"OLS_versie_{display_index}.bin"
+            filename = ols_extract_filename(project_name, item.get("name"),
+                                            display_index, item.get("source_filename"))
             evidence = []
             if binary:
                 blob = data[binary["start"]:binary["end"]]
@@ -320,7 +345,8 @@ class Repository(RepositoryV3Mixin):
                     source_path, filename, blob, kind,
                     "ols_version_label" if kind != "unknown" else "ols_binary_extract",
                     float(item.get("role_confidence", item.get("confidence") or 0.0)),
-                    evidence, project_id)
+                    evidence, project_id,
+                    project_name=project_name, version_name=item.get("name"))
             with self.db.connect() as db:
                 db.execute("""INSERT INTO ols_version_binaries
                     (project_id, version_index, version_name, role, role_confidence, role_evidence,
@@ -359,7 +385,9 @@ class Repository(RepositoryV3Mixin):
 
     def upsert_ols_file(self, source_path: str, filename: str, data: bytes, kind: str,
                         detection_method: str, confidence: float, evidence: list,
-                        project_id: int | None = None) -> int:
+                        project_id: int | None = None,
+                        project_name: str | None = None,
+                        version_name: str | None = None) -> int:
         """Register an extracted OLS binary in Files without duplicating on reimport.
 
         An existing row for the same OLS source and hash is reused so a human
@@ -369,6 +397,18 @@ class Repository(RepositoryV3Mixin):
         existing = self.db.rows("SELECT id FROM files WHERE source_path=? AND sha256=?",
                                 (source_path, digest["sha256"]))
         if existing:
+            # achteraf vullen van alleen-lege herkomstkolommen (display-info)
+            updates, args = [], []
+            if project_name:
+                updates.append("project=COALESCE(NULLIF(project,''),?)")
+                args.append(project_name)
+            if version_name:
+                updates.append("stage=COALESCE(NULLIF(stage,''),?)")
+                args.append(version_name)
+            if updates:
+                args.append(existing[0]["id"])
+                with self.db.connect() as db:
+                    db.execute(f"UPDATE files SET {','.join(updates)} WHERE id=?", tuple(args))
             return existing[0]["id"]
         if kind not in {"original", "tuned", "unknown"}:
             kind = "unknown"
@@ -382,6 +422,14 @@ class Repository(RepositoryV3Mixin):
                 raise ValueError("Bestaande beheerde kopie heeft onjuiste hash")
         row = dict(filename=filename, filepath=str(target.resolve()), source_path=source_path,
                    file_type=kind, file_size=len(data), **digest, **extract_metadata(data))
+        if project_name and not row.get("project"):
+            row["project"] = project_name
+        if version_name and not row.get("stage"):
+            row["stage"] = version_name
+        if not row.get("ecu_family"):
+            ecu_hits = (recognize(data).get("ecu") or [])
+            if ecu_hits:
+                row["ecu_family"] = str(ecu_hits[0].get("value") or "") or None
         with self.db.connect() as db:
             db.execute(f"INSERT OR IGNORE INTO files ({','.join(row)}) VALUES ({','.join('?' for _ in row)})",
                        tuple(row.values()))
