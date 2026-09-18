@@ -9,7 +9,11 @@ De eindstap van de kennisketen, op de bevroren kandidaat-stroom
   op díe regio byte-gelijk zijn aan de bekende original (≥98%).
 - Add-ons (bijv. pops & bang) worden alleen gecomponeerd als er een
   bewezen keten is: zelfde original, gelijke groottes, beide paren
-  bevestigd (stage→stage+addon).
+  bevestigd (stage→stage+addon). MEERDERE add-ons tegelijk: de planner
+  kiest eerst het beste dekkende recept en ketent daarna aanvullende
+  bevestigde recepten voor de ontbrekende add-ons — élke regio blijft
+  individueel bewijsplichtig (≥98%) en overlappende regio's worden
+  één keer toegepast.
 - Intensiteiten (-15/-30/-45) bestaan alléén als er kennis mét die
   label is; anders UNKNOWN met lijst van wat er wél is — nooit verzinnen.
 - Output is altijd een NIEUW bestand in exports/candidates + zijspan-
@@ -26,7 +30,9 @@ from pathlib import Path
 
 # expliciete, bekende add-on labels (SOURCE_EXPLICIT uit versienamen/filenames)
 KNOWN_ADDONS = ("pops_bang", "vmax", "dpf_off", "egr_off", "adblue_off",
-                "speed_limit_off", "torque_monitoring_off")
+                "speed_limit_off", "torque_monitoring_off", "decat",
+                "antilag", "launch_control", "e85", "swirl_off",
+                "cold_start_off")
 ADDON_TOKENS = {
     "pops_bang": ("pops", "bang", "pops and bang", "pops&bang", "crackle"),
     "vmax": ("vmax", "v-max"),
@@ -34,8 +40,14 @@ ADDON_TOKENS = {
     "egr_off": ("egr", "egr off", "egr-off"),
     "adblue_off": ("adblue", "scr off"),
     "speed_limit_off": ("speed limit", "vmax off", "limiter off"),
+    "decat": ("decat", "de-cat", "kat off", "katalysator off", "catalytic off"),
+    "antilag": ("antilag", "anti-lag", "anti lag"),
+    "launch_control": ("launch control", "launchcontrol", "lc on"),
+    "e85": ("e85", "flex fuel", "ethanol"),
+    "swirl_off": ("swirl", "swirlflap off"),
+    "cold_start_off": ("cold start off", "coldstart", "kaltstart off"),
 }
-STAGE_PATTERN = re.compile(r"stage\s*([123])\s*\+?", re.IGNORECASE)
+STAGE_PATTERN = re.compile(r"stage\s*([1-5])\s*\+?", re.IGNORECASE)
 INTENSITY_PATTERN = re.compile(r"(?:^|[\s\-])(\d{2,3})\s*%?(?:$|[\s\-)])")
 
 
@@ -164,6 +176,36 @@ class TuneBuilder:
     # ------------------------------------------------------------------
     # Bouwen
     # ------------------------------------------------------------------
+    def _plan_recipes(self, recipes: list[dict], stage: str | None,
+                      addons: list[str], intensity: int | None) -> list[dict]:
+        """Greedy plan voor MEERDERE add-ons: beste exacte recept eerst,
+        daarna aanvullende recepten die nog-ontbrekende add-ons dekken
+        (multi-add-on chaining). Élke regio wordt per recept apart
+        bewijsplichtig gecontroleerd tijdens het bouwen."""
+        wanted = set(addons or [])
+        exact, partial = self._match_recipes(recipes, stage, addons, intensity)
+        candidates = exact + partial
+        if not candidates:
+            return []
+        plan, covered = [], set()
+        if exact:
+            best = max(exact, key=lambda r: (len(wanted & set(r["addons"])),
+                                             r["regions"]))
+            plan.append(best)
+            covered |= set(best["addons"])
+        for recipe in candidates:
+            if wanted and covered >= wanted:
+                break
+            if recipe in plan:
+                continue
+            adds = set(recipe["addons"]) - covered
+            if wanted and adds:
+                plan.append(recipe)
+                covered |= set(recipe["addons"])
+        if not plan:
+            plan.append(candidates[0])
+        return plan
+
     def build(self, original_path: str | None = None, original_file_id: int | None = None,
               stage: str | None = None, addons: list[str] | None = None,
               intensity: int | None = None, threshold: float = 85.0,
@@ -206,29 +248,33 @@ class TuneBuilder:
                     "note": "Dit origineel lijkt niet genoeg op een bekende "
                             "original met kennis; niets gegenereerd."}
 
+        plan = self._plan_recipes(recipes, stage, addons, intensity)
         applied, skipped, chain = [], [], []
+        applied_ranges: list[tuple[int, int]] = []
         result = bytearray(query)
         selected_recipe = None
         selected_match = None
-        for recipe in exact + partial:
+        for recipe in plan:
             match = next((item for item in ranked
                           if item["file_id"] == recipe["original_file_id"]), None)
             if match is None:
                 continue
             outcome, step_applied, step_skipped = self._apply_pair(
-                result, query, recipe["pair_id"])
+                result, query, recipe["pair_id"], applied_ranges)
             if outcome != "ok" or not step_applied:
                 skipped.extend(step_skipped or [{"pair_id": recipe["pair_id"],
                                                  "reason": outcome}])
                 continue
-            selected_recipe, selected_match = recipe, match
+            if selected_recipe is None:
+                selected_recipe, selected_match = recipe, match
+            applied_ranges.extend((region["start_offset"], region["end_offset"])
+                                  for region in step_applied)
             applied.extend(step_applied)
             skipped.extend(step_skipped)
             chain.append({"pair_id": recipe["pair_id"],
                           "recipe": recipe["recipe_label"],
                           "match_score": match["match_score"],
                           "applied_regions": len(step_applied)})
-            break  # één recept: eerst exacte match die regionaal bewezen wordt
         if not applied:
             return {"status": "no_regions_applied", "threshold": threshold,
                     "skipped": skipped,
@@ -242,7 +288,9 @@ class TuneBuilder:
             "target": {"id": original_file_id, "filename": target["filename"],
                        "sha256": target["sha256"], "size": len(query)},
             "recipe": {"stage": stage, "addons": addons, "intensity": intensity,
-                       "selected": selected_recipe and selected_recipe["recipe_label"],
+                       "selected": selected_recipe and " + ".join(
+                           step["recipe"] for step in chain),
+                       "selected_recipes": chain,
                        "pair_id": selected_recipe["pair_id"] if selected_recipe else None},
             "match": {"file_id": selected_match["file_id"],
                       "filename": selected_match["filename"],
@@ -296,10 +344,13 @@ class TuneBuilder:
                 "note": "Kandidaat geschreven; technicus-review en checksum-"
                         "correctie zijn verplicht vóór gebruik."}
 
-    def _apply_pair(self, result: bytearray, query: bytes, pair_id: int):
+    def _apply_pair(self, result: bytearray, query: bytes, pair_id: int,
+                    applied_ranges: list[tuple[int, int]] | None = None):
         """Regio's van één bevestigd paar toepassen met regionaal bewijs.
         Geeft (status, applied, skipped) terug; wijzigt result alleen op
-        bewezen regio's."""
+        bewezen regio's die nog NIET door een eerder recept in deze keten
+        zijn toegepast (overlappen wordt overgeslagen, niet dubbel)."""
+        applied_ranges = applied_ranges or []
         try:
             known = self.service.diff(pair_id)
             original = self.repo.data(
@@ -321,6 +372,13 @@ class TuneBuilder:
             if end > len(result):
                 skipped.append({"pair_id": pair_id, "start_offset": start,
                                 "end_offset": end, "reason": "regio valt buiten bestand"})
+                continue
+            if any(start < prev_end and prev_start < end
+                   for prev_start, prev_end in applied_ranges):
+                skipped.append({"pair_id": pair_id, "start_offset": start,
+                                "end_offset": end,
+                                "reason": "regio al door eerder recept in de keten "
+                                          "toegepast; niet dubbel gewijzigd"})
                 continue
             regional = compare(query[start:end], original[start:end], {}, {})["match_score"]
             if regional >= 98.0:

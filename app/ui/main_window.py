@@ -113,8 +113,11 @@ unknown die uniek en sterk matcht met één bekend original wordt tuned en
 gepaard — ≥95% = bevestigd paar, 90–95% = suggestie voor jouw review;
 inhoud identiek aan het original = geen paar (dat is geen tuning).<br>
 <b>Tune Bouwer (V7)</b> — origineel erin, getunede kandidaat terug: kies stage
-en add-ons (pops &amp; bang, vmax, …). Recepten komen uitsluitend uit bevestigde
-paren; elke regio alleen met regionaal bewijs. Output = nieuw bestand +
+(1–5) en vink meerdere add-ons aan (pops &amp; bang, vmax, dpf off, egr off,
+adblue off, decat, antilag, launch control, E85, swirl off, cold start off,
+…). De planner kiest het beste dekkende recept en ketent bevestigde
+recepten voor ontbrekende add-ons; elke regio alleen met regionaal bewijs
+(≥98%), overlappen worden nooit dubbel toegepast. Output = nieuw bestand +
 waarschuwingen (checksums NIET gecorrigeerd — eerst WinOLS-controle).<br>
 <b>Diff &amp; Regio's</b> — één bevestigd paar volledig bekijken: byte-voor-byte
 verschil met hex-venster (oranje = gewijzigd) én de wijzigingsregio's met
@@ -1830,9 +1833,10 @@ class MainWindow(QMainWindow):
         options.addWidget(QLabel('Stage:'))
         self.tune_stage = QComboBox()
         options.addWidget(self.tune_stage)
-        options.addWidget(QLabel('Add-on:'))
-        self.tune_addon = QComboBox()
-        options.addWidget(self.tune_addon)
+        options.addWidget(QLabel('Add-ons (meerdere aanvinken):'))
+        self.tune_addons = QListWidget()
+        self.tune_addons.setMaximumHeight(96)
+        options.addWidget(self.tune_addons, 1)
         options.addWidget(QLabel('Intensiteit:'))
         self.tune_intensity = QComboBox()
         options.addWidget(self.tune_intensity)
@@ -1863,10 +1867,12 @@ class MainWindow(QMainWindow):
             self.tune_stage.addItem('(geen voorkeur)', None)
             for stage in options['stages']:
                 self.tune_stage.addItem(stage, stage)
-            self.tune_addon.clear()
-            self.tune_addon.addItem('(geen)', None)
+            self.tune_addons.clear()
             for addon in options['addons']:
-                self.tune_addon.addItem(addon, addon)
+                item = QListWidgetItem(addon)
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                item.setCheckState(Qt.CheckState.Unchecked)
+                self.tune_addons.addItem(item)
             self.tune_intensity.clear()
             self.tune_intensity.addItem('(beschikbaar)', None)
             for intensity in options['intensities']:
@@ -1877,15 +1883,20 @@ class MainWindow(QMainWindow):
                 f"{', '.join(options['addons']) or '—'}\n{options['note']}")
         self.safe(apply)
 
+    def _selected_tune_addons(self) -> list:
+        """Alle aangevinkte add-ons (multi-select), in menu-volgorde."""
+        return [self.tune_addons.item(index).text()
+                for index in range(self.tune_addons.count())
+                if self.tune_addons.item(index).checkState() == Qt.CheckState.Checked]
+
     def run_tune_build(self):
         path = self.tune_path.text().strip()
         if not path:
             self.tune_output.setText('Kies eerst een origineel bestand.')
             return
         stage = self.tune_stage.currentData()
-        addon = self.tune_addon.currentData()
+        addons = self._selected_tune_addons()
         intensity = self.tune_intensity.currentData()
-        addons = [addon] if addon else []
         dry = self.tune_dry.isChecked()
 
         def operation(progress):

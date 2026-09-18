@@ -231,3 +231,64 @@ def test_tune_builder_api(service, tmp_path):
         "original_path": str(original_path), "stage": "stage1", "dry_run": False})
     assert build.status_code == 200
     assert build.json()["status"] == "candidate_generated"
+
+
+def test_parse_recipe_labels_expanded():
+    """Stage 1-5 + de nieuwe add-ons (decat, antilag, launch control, e85,
+    swirl off, cold start off)."""
+    cases = [
+        ("bmw stage4 decat", "stage4", ["decat"]),
+        ("rs3 stage 5 antilag", "stage5", ["antilag"]),
+        ("golf launch control", None, ["launch_control"]),
+        ("audi e85 flex fuel", None, ["e85"]),
+        ("vw swirl off", None, ["swirl_off"]),
+        ("bmw coldstart off", None, ["cold_start_off"]),
+        ("a3 stage2 + pops&bang 50", "stage2", ["pops_bang"]),
+    ]
+    for label, stage, addons in cases:
+        parsed = parse_recipe_label(label)
+        assert parsed["stage"] == stage, (label, parsed)
+        for addon in addons:
+            assert addon in parsed["addons"], (label, parsed)
+
+
+def test_build_chains_multiple_addons(service, tmp_path):
+    """MEERDERE add-ons die in aparte recepten zitten: de planner ketent
+    stage1+pops en stage1+vmax — beide regio's komen in de output, de
+    overlappende stage-regio wordt één keer toegepast."""
+    base = _make_pair(service, tmp_path, 9, {300: 0x51, 1500: 0x44}, "stage1",
+                      name_suffix="_pops_and_bang")
+    pair2 = _make_pair(service, tmp_path, 9, {300: 0x51, 900: 0x62},
+                       "stage1", name_suffix="_vmax")
+    assert base["original_bytes"] == pair2["original_bytes"]
+    original_path = tmp_path / "multi_addon_origineel.bin"
+    original_path.write_bytes(base["original_bytes"])
+    result = service.build_tune(original_path=str(original_path), stage="stage1",
+                                addons=["pops_bang", "vmax"], dry_run=False)
+    assert result["status"] == "candidate_generated", result
+    assert len(result["chain"]) == 2, result["chain"]
+    assert result["recipe"]["selected"].count("+") >= 1
+    output = Path(result["output_path"]).read_bytes()
+    assert output[300:304] == b"\x51" * 4       # stage-regio (één keer)
+    assert output[900:904] == b"\x62" * 4       # vmax-regio (recept 2)
+    assert output[1500:1504] == b"\x44" * 4     # pops-regio (recept 1)
+    skipped_reasons = " ".join(item.get("reason", "") for item in result["skipped_regions"])
+    assert "eerder recept" in skipped_reasons    # overlap (300) netjes overgeslagen
+
+
+def test_apply_pair_skips_overlapping_regions(service, tmp_path):
+    """Regio's die al door een eerder recept in de keten zijn toegepast
+    worden overgeslagen met duidelijke reden — nooit dubbel wijzigen."""
+    builder = service.tune_builder
+    base = _make_pair(service, tmp_path, 9, {300: 0x51}, "stage1")
+    result = bytearray(base["original_bytes"])
+    outcome, applied, skipped = builder._apply_pair(
+        result, bytes(base["original_bytes"]), base["pair_id"], [(0, 4096)])
+    assert outcome == "ok"
+    assert applied == []
+    assert skipped and "eerder recept" in skipped[0]["reason"]
+    # zonder ranges: regio wordt gewoon toegepast (oude gedrag intact)
+    result2 = bytearray(base["original_bytes"])
+    outcome2, applied2, _skipped2 = builder._apply_pair(
+        result2, bytes(base["original_bytes"]), base["pair_id"])
+    assert outcome2 == "ok" and applied2

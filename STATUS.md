@@ -2,6 +2,23 @@
 
 Datum: 2026-09-10 (bijgewerkt na V3-ronde)
 
+## V8.4-status (Tune Bouwer uitgebreid: multi-add-on, stages 1-5, 13 add-ons) — actueel
+
+**163 passed / 1 guard-skip groen.**
+
+- **Multi-add-on**: GUI heeft nu een aanvinklijst (meerdere add-ons tegelijk);
+  `_plan_recipes()` kiest greedy het beste dekkende recept en ketent
+  bevestigde recepten voor ontbrekende add-ons (`chain` toont alle stappen).
+- **Overlap-veiligheid**: `_apply_pair(applied_ranges)` slaat regio's die een
+  eerder recept in de keten al wijzigde netjes over ("eerder recept") — nooit
+  dubbel schrijven; elke regio blijft individueel ≥98%-bewijsplichtig.
+- **Stages 1-5** (was 1-3); **add-ons 7 → 13**: + decat, antilag,
+  launch_control, e85, swirl_off, cold_start_off (tokens o.a. "de-cat",
+  "anti-lag", "flex fuel", "kaltstart off").
+- Tests: nieuwe labels, echte 2-recepten-keten (300 stage / 900 vmax /
+  1500 pops, overlap-skip bewezen), overlap-skip direct op _apply_pair;
+  bestaande 12 tune-tests onveranderd groen (gedrag achterwaarts-compatibel).
+
 ## V8.3-status (OLS-extracten: betekenisvolle namen + herkomst + ECU-herkenning) — actueel
 
 **160 passed / 1 skipped (guard) groen.** Vraag: "ols_versie_101.bin — hoe komt
