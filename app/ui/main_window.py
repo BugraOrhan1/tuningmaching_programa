@@ -68,6 +68,9 @@ cijfers uit jouw database, volledig lokaal (geen cloud).<br>
 <i>unknown</i> = nog onbekend), importeer daarna één bestand of een hele map.
 Onder de tabel: selecteer rijen en zet ze alsnog op Original of Tuned
 (Ctrl+klik = meerdere). Metadata (ECU/SW/HW/stage/klant) bewerk je per rij.
+<b>OLS-extracten</b> heten &lt;project&gt;_v&lt;nummer&gt;[_&lt;versie&gt;].bin en tonen in
+Project/Stage uit welk project en welke versie ze komen; ECU wordt uit de
+bytes herkend voor zover dat kan (nooit een auto raden die er niet in staat).
 <b>Onderaan deze pagina staan ook de Library-bestanden (V5)</b>: alles wat de
 Library-scans op je bronmappen vonden, met root, type, grootte en SHA-8.
 Selecteer rijen en gebruik "Selectie → Files (BIN/ORI)" om ze één voor één
@@ -2032,7 +2035,8 @@ class MainWindow(QMainWindow):
                                    "verfijn met het zoekveld hierboven om de rest te zien.")
         elif files:
             self.file_hint.setText('Bestanden in Files: eigen BIN/ORI-imports én automatisch geëxtraheerde '
-                                   'OLS-versie-binaries (bron: ols://…). De bron-OLS blijft altijd ongewijzigd.')
+                                   'OLS-versie-binaries (bron: ols://…). Voor extracten tonen Project/Stage uit welk project en '
+                                   'welke versie ze komen; ECU is herkend voor zover de bytes dat toe laten.')
         else:
             self.file_hint.setText('Files is leeg: importeer een map met BIN/ORI of verwerk een WinOLS-project — '
                                    'bewezen versie-binaries uit de OLS verschijnen dan hier automatisch.')

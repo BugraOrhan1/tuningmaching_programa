@@ -2,6 +2,20 @@
 
 Datum: 2026-09-10 (bijgewerkt na V3-ronde)
 
+## V8.3-status (OLS-extracten: betekenisvolle namen + herkomst + ECU-herkenning) — actueel
+
+**160 passed / 1 skipped (guard) groen.** Vraag: "ols_versie_101.bin — hoe komt
+hij erachter welke auto het is?"
+
+- **`ols_extract_filename()`**: extracten heten nu
+  `<project>_v<index>[_<versienaam>].bin` (bv. `GASDROP_100119_v101_Stage1.bin`)
+  i.p.v. de nietszeggende naam; een échte bronbestandsnaam wint altijd.
+- **Herkomst in Files**: Project (= projectbestand) en Stage (= versienaam)
+  worden gevuld; bij bestaande rijen alléén lege kolommen (backfill,
+  gebruikersmetadata blijft heilig).
+- **ECU-herkenning uit de bytes**: `recognize()` bij extractie; expliciet
+  gevonden ECU-familie in de ECU-kolom; wat er niet in staat blijft onbekend.
+
 ## V8.2-status (automatisch paren na BIN-analyse) — actueel
 
 **158/158 tests groen.**
