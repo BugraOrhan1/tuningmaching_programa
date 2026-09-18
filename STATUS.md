@@ -2,7 +2,27 @@
 
 Datum: 2026-09-10 (bijgewerkt na V3-ronde)
 
-## V8.0-status (volledige automatisering: bulk = hele pijplijn; ALLES-knop; slim advies) — actueel
+## V8.1-status (bugs uit de praktijk gefixt: []-telling, 'path'-KeyError, naamherkenning) — actueel
+
+**155/155 tests groen.** Aanleiding: screenshots van de gebruiker.
+
+- **"Automatisch geclassificeerd: []"**: de telling was de ruwe lijst — nu
+  `len(updated)` (service + weergave); legacy-lijsten in de samenvatting
+  worden nog steeds netjes geteld.
+- **"Actie niet uitgevoerd: 'path'"**: foutregels van process_all_roots
+  gebruiken sleutel 'root' (niet 'path') → KeyError in de samenvatting.
+  Nu `_bulk_result_lines()` (getest, zonder dialoog):robust tegen
+  path/root/filename + toont bij 0 voortgang een behulpzame tip
+  (1× Original + 1× Tuned handmatig → daarna automatiseert de rest).
+- **Auto-classificatie deed niets bij praktijknamen**: `classify_label`
+  kende geen Nederlandse woorden en geen tuning-jargon. Uitgebreid met
+  originals: origineel/originele/orgineel/factory/fabriek/standaard/standard;
+  tuned: pops/pop/bang (incl. "pops and bang"), vmax/v-max, decat/de-cat,
+  dpf/egr/adblue/scr + off/uit/delete, antilag, e85, chiptuning, optpower,
+  stage 1-4. Volgorde: tuned eerst (conservatief); gewone namen blijven
+  unknown. End-to-end getest via process_root_bulk.
+
+## V8.0-status (volledige automatisering: bulk = hele pijplijn; ALLES-knop; slim advies)
 
 **152/152 tests groen.**
 

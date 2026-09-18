@@ -305,3 +305,72 @@ def test_import_file_duplicate_size_mismatch_is_rejected(service, tmp_path):
     Path(managed).write_bytes(b"kort")  # corrumpeer: andere grootte
     with pytest.raises(ValueError):
         service.repo.import_file(source, "original")
+
+
+def test_classify_label_recognizes_real_world_names():
+    """Praktijknamen (WinOLS/tuners): Nederlands + tuning-jargon moet
+    herkend worden; gewone namen blijven unknown."""
+    from app.analysis.classification import classify_label
+    tuned = ["opel adam stage1", "audi rs3 stage 1 pops&bang", "bmw 330d tuned",
+             "mercedes c63 decat", "vw golf vmax", "dacia dokker dpf off",
+             "polo egroff", "audi s3 adblue_off", "golf remap", "bmw stg2",
+             "c63 chiptuning", "m140i v-max", "a3 pops and bang"]
+    for name in tuned:
+        label, _reason = classify_label(name)
+        assert label == "tuned", f"{name!r} moet tuned zijn, got {label}"
+    originals = ["bmw 330d origineel", "golf7 orgineel", "a4 stock",
+                 "vw polo fabriek", "audi factory", "c63 standard",
+                 "bmw orig", "auto backup", "audi oem"]
+    for name in originals:
+        label, _reason = classify_label(name)
+        assert label == "original", f"{name!r} moet original zijn, got {label}"
+    unknown = ["opel adam 1.4 87pk", "bmw 330d meetreeks", "audi rs3 ietsanders"]
+    for name in unknown:
+        label, _reason = classify_label(name)
+        assert label == "unknown", f"{name!r} moet unknown blijven, got {label}"
+
+
+def test_bulk_result_lines_are_counts_and_robust():
+    """Samenvatting toont aantallen (geen lijsten) en foutregels met
+    'root'-sleutel crashen niet meer (de 'path'-bug)."""
+    from app.ui.main_window import MainWindow
+    lines = MainWindow._bulk_result_lines({
+        "scanned": 13, "imported": 0, "skipped_existing": 13,
+        "ols_projects": 0, "auto_classified": [],   # oude vorm: lijst
+        "pairs_auto_confirmed": 0, "pairs_review": 0, "patterns_built": 0,
+        "errors": [{"root": "D:\\schijf_weg", "error": "OFFLINE"}],
+    })
+    text = "\n".join(lines)
+    assert "Automatisch geclassificeerd: 0" in text
+    assert "[]" not in text
+    assert "D:\\schijf_weg" in text        # root-fout zichtbaar, geen KeyError
+    assert "Tip:" in text                    # behulpzame hint bij 0 voortgang
+    lines_ok = MainWindow._bulk_result_lines({
+        "scanned": 5, "imported": 3, "skipped_existing": 2, "auto_classified": 2,
+        "pairs_auto_confirmed": 1, "pairs_review": 1, "patterns_built": 1,
+        "errors": [],
+    })
+    assert "Automatisch geclassificeerd: 2" in "\n".join(lines_ok)
+    assert "Tip:" not in "\n".join(lines_ok)
+
+
+def test_bulk_classifies_unknowns_by_filename_labels(service, tmp_path):
+    """Eind-to-eind: unknowns met praktijknamen worden door de bulk-pijplijn
+    automatisch original/tuned (label-bewijs), telling is een echt aantal."""
+    bron = tmp_path / "labels"
+    bron.mkdir()
+    payload = bytes([0]) + b"HEAD" + bytes(range(256)) * 2
+    (bron / "bmw330d_origineel.bin").write_bytes(payload)
+    (bron / "bmw330d_stage1_pops_bang.bin").write_bytes(bytes([0]) + b"HEAD" + bytes(range(256)) * 2)
+    (bron / "opel_adam_1.4.bin").write_bytes(bytes([0]) + b"HEAD" + bytes(range(200)) * 2)
+    # importeer met explicit 'unknown' zodat infer_type ze niet meteen typeert
+    for path in bron.glob("*.bin"):
+        service.repo.import_file(path, "unknown")
+    root = service.library.add_root(str(bron), "Labels")
+    result = service.process_root_bulk(root["id"])
+    assert isinstance(result["auto_classified"], int)
+    assert result["auto_classified"] == 2   # origineel + stage1; opel blijft unknown
+    files = {row["filename"]: row for row in service.repo.files(limit=0)}
+    assert files["bmw330d_origineel.bin"]["file_type"] == "original"
+    assert files["bmw330d_stage1_pops_bang.bin"]["file_type"] == "tuned"
+    assert files["opel_adam_1.4.bin"]["file_type"] == "unknown"

@@ -426,8 +426,9 @@ class Service(ServiceV3Mixin):
             try:
                 # 1) onbekende bestanden automatisch classificeren (alleen uniek bewijs)
                 classify = self.repo.auto_classify_evidence()
-                result["auto_classified"] = classify.get("updated", 0)
+                result["auto_classified"] = len(classify.get("updated") or [])
                 result["classify_review"] = len(classify.get("review") or [])
+                result["classify_errors"] = len(classify.get("errors") or [])
             except Exception as exc:  # elke auto-stap mag bulk nooit breken
                 result["auto_classified"] = 0
                 result["auto_classify_error"] = str(exc)

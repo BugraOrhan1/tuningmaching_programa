@@ -1457,8 +1457,10 @@ class MainWindow(QMainWindow):
                      callback=lambda result: self.safe(
                          lambda: self.show_bulk_result(result, alle_roots=True)))
 
-    def show_bulk_result(self, result, alle_roots=False):
-        self.refresh()
+    @staticmethod
+    def _bulk_result_lines(result: dict, alle_roots: bool = False) -> list:
+        """Leesbare samenvatting; foutregels zijn robust tegen verschillende
+        sleutels ('path' bij bestanden, 'root' bij roots)."""
         errors = result.get('errors') or []
         kop = ('ALLES automatisch afgehandeld.' if alle_roots
                else 'Root volledig verwerken klaar.')
@@ -1466,18 +1468,35 @@ class MainWindow(QMainWindow):
         if alle_roots:
             lines.append(f"Roots verwerkt: {result.get('roots_total', 0)} "
                          f"(offline: {result.get('roots_offline', 0)})")
+        classified = result.get('auto_classified', 0)
+        if not isinstance(classified, int):
+            classified = len(classified or [])
         lines += [f"Gescand (bestanden gevonden): {result.get('scanned', '—')}",
                   f"BIN/ORI nieuw naar Files: {result.get('imported', 0)}",
                   f"Al aanwezig (overgeslagen zonder lezen): {result.get('skipped_existing', 0)}",
                   f"OLS-projecten volledig verwerkt: {result.get('ols_projects', 0)}",
-                  f"Automatisch geclassificeerd (uniek bewijs): {result.get('auto_classified', 0)}",
+                  f"Automatisch geclassificeerd: {classified} · "
+                  f"voor review: {result.get('classify_review', 0)}",
                   f"Paren automatisch bevestigd (label+bewijs): {result.get('pairs_auto_confirmed', 0)} · "
                   f"voor review: {result.get('pairs_review', 0)}",
                   f"Patronen geleerd: {result.get('patterns_built', 0)}"]
+        if not classified and not result.get('imported'):
+            lines += ['',
+                      'Tip: blijven bestanden unknown? De app classificeert alleen met bewijs '
+                      '(label in naam, identieke inhoud, of unieke match met een bekend bestand). '
+                      'Zet één keer handmatig een bestand op Original en één op Tuned (Files-pagina) '
+                      '— daarna pakt de app de rest automatisch mee.']
         if errors:
             lines.append(f"Fouten: {len(errors)} (eerste 3)")
-            lines += [f"  • {item['path']}: {item['error']}" for item in errors[:3]]
-        QMessageBox.information(self, 'Root verwerkt', '\n'.join(lines))
+            for item in errors[:3]:
+                where = item.get('path') or item.get('root') or item.get('filename') or '?'
+                lines.append(f"  • {where}: {item.get('error') or item.get('reason') or '?'}")
+        return lines
+
+    def show_bulk_result(self, result, alle_roots=False):
+        self.refresh()
+        QMessageBox.information(self, 'Root verwerkt',
+                                '\n'.join(self._bulk_result_lines(result, alle_roots)))
 
     def refresh_library_locations(self):
         if not self.library_root_table.rowCount():
