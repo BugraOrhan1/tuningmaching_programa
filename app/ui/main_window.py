@@ -83,6 +83,10 @@ voor .ols-projecten.<br>
 toont alleen de 10 dagelijkse pagina's (en verbergt lege sectiekoppen); Expert
 toont alles (26). Je keuze blijft bewaard bij het herstarten.<br>
 <b>Library (V5)</b> — registreer hele bronmappen/schijven (D:\Tuning, E:\WinOLS…).
+Bovenaan staat de <b>Snelheid</b>-keuze: LOW = rustig · BALANCED = normaal ·
+HIGH = snel · MAX = vol gas (SSD/NVMe + veel vrije RAM). Geldt direct voor
+nieuwe scans en analyses; staan geschaald naar het aantal CPU-kernen van
+jouw PC.
 Bestanden blijven op hun plek; de app indexeert pad + SHA256. Gebouwd voor
 10TB+: <u>ongewijzigde bestanden worden nooit opnieuw gelezen</u> (2e scan =
 seconden), hashen gebeurt <u>parallel</u> (profiel LOW=1 / BALANCED=3 / HIGH=6
@@ -347,6 +351,14 @@ class MainWindow(QMainWindow):
 
     def _persist_ui_mode(self, mode: str) -> None:
         self._update_ui_store({'ui_mode': mode})
+
+    def change_speed_preset(self, preset: str):
+        """Snelheidsprofiel (LOW/BALANCED/HIGH/MAX) direct toepassen en
+        bewaren — geen herstart nodig."""
+        self.service.library.config['resource_preset'] = str(preset)
+        self._persist_profile(str(preset))
+        self.statusBar().showMessage(
+            f'Snelheid: {preset} — volgende scans/analyses gebruiken dit.', 5000)
 
     def _persist_profile(self, profile: str) -> None:
         """Resourceprofiel (LOW/BALANCED/HIGH) uit de first-run-wizard bewaren.
@@ -1574,6 +1586,19 @@ class MainWindow(QMainWindow):
                            '(dedup). Scans zijn incrementeel en hervatbaar.')
         self.library_root_table = self.table(layout, ['ID', 'Naam', 'Pad', 'Status', 'Files',
                                                       'Contents', 'Laatste scan', 'Health'])
+        speed_row = QHBoxLayout()
+        speed_row.addWidget(QLabel('Snelheid (CPU/schijf-gebruik):'))
+        self.library_speed_combo = QComboBox()
+        self.library_speed_combo.addItems(['LOW', 'BALANCED', 'HIGH', 'MAX'])
+        self.library_speed_combo.setCurrentText(
+            str(self.service.library.config.get('resource_preset', 'BALANCED')))
+        self.library_speed_combo.currentTextChanged.connect(self.change_speed_preset)
+        speed_row.addWidget(self.library_speed_combo)
+        speed_row.addWidget(QLabel(
+            'LOW = rustig (laptop/HDD) · BALANCED = normaal · HIGH = snel · '
+            'MAX = vol gas (SSD/NVMe). Geldt meteen voor nieuwe scans en analyses.'))
+        speed_row.addStretch(1)
+        layout.addLayout(speed_row)
         row = QHBoxLayout()
         add_btn = QPushButton('Library root toevoegen…')
         add_btn.clicked.connect(self.add_library_root)
@@ -1885,14 +1910,15 @@ class MainWindow(QMainWindow):
         page.setTitle('Resourceprofiel en eerste scan')
         layout = QVBoxLayout(page)
         combo = QComboBox()
-        combo.addItems(['LOW', 'BALANCED', 'HIGH'])
+        combo.addItems(['LOW', 'BALANCED', 'HIGH', 'MAX'])
         combo.setObjectName('profileCombo')
         layout.addWidget(QLabel('Resourceprofiel (aantal hash/analyse-workers):'))
         layout.addWidget(combo)
         start = QCheckBox('Direct ALLES automatisch afhandelen: scan + importeren + classificeren + paren + leren (hervatbaar)')
         start.setChecked(True)
         layout.addWidget(start)
-        layout.addWidget(QLabel('LOW = minste disk-I/O en CPU; HIGH = snelste scan.'))
+        layout.addWidget(QLabel('LOW = rustig · HIGH = snel · MAX = vol gas '
+                                '(aanbevolen bij SSD/NVMe en voldoende vrije RAM).'))
         layout.addStretch(1)
         page.setLayout(layout)
         # NB: QWizard.registerField bestaat niet meer in PySide6 6.11+; de

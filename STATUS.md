@@ -2,6 +2,31 @@
 
 Datum: 2026-09-10 (bijgewerkt na V3-ronde)
 
+## V8.7-status (Snelheid: CPU-gestuurde presets + MAX + GUI-keuze) — actueel
+
+**171 passed / 1 guard-skip groen.**
+
+- Klacht: "7% CPU, 700 MB geheugen, 32 GB vrij — hij is sloom." Oorzaak:
+  vaste worker-limieten (HIGH = 6 hash-workers, BALANCED = 3; analyse max 4)
+  → op grote machines lag de CPU stil.
+- Presets nu geschaald naar `os.cpu_count()`:
+  `PRESET_HASH_WORKERS {LOW:2, BALANCED:cpu/4, HIGH:cpu/2, MAX:min(16,cpu-1)≥8}`,
+  `PRESET_ANALYSIS_WORKERS {…HIGH:max(4,cpu/4)≤8, MAX:max(6,cpu/2)≤12}`,
+  `PRESET_SCAN_CHUNK {LOW:32, BALANCED:64, HIGH:128, MAX:256}` (minder
+  transacties/checkpoints per bestand).
+- Nieuwe preset **MAX** (vol gas, SSD/NVMe-advies); wizard biedt hem aan.
+- **Globale override**: `library.config['resource_preset']` wint van de bij
+  add_root opgeslagen root-preset (scan én analyse lezen hem) — wisselen
+  werkt dus zonder herstart/zonder roots opnieuw aan te maken.
+- **GUI**: snelheid-combo bovenaan Library (LOW/BALANCED/HIGH/MAX),
+  `_change_speed_preset` → direct actief + bewaard via ui.json (hergebruikt
+  V8.6.1-profielopslag); handleiding-sectie bijgewerkt.
+- Sandbox-benchmark: NVMe/cache zit al bij 3 workers op ~700 MB/s (disk-bound);
+  winst zit op echte machines met tragere schijven/meerdere kernen (I/O-
+  overlapping) en in de CPU-side van analyse.
+- Tests: preset-ordering + MAX≥8≤16; e2e scan met MAX → hash_workers≥8,
+  chunk≥128 in library_scans.config.
+
 ## V8.6.1-status (HOTFIX: first-run wizard crash) — actueel
 
 **169 passed / 1 guard-skip groen.**

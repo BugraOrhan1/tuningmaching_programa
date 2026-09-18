@@ -19,10 +19,32 @@ from pathlib import Path
 
 LIBRARY_EXTENSIONS = {".bin", ".ori", ".ols"}
 FUTURE_EXTENSIONS = {".hex", ".s19", ".mot", ".txt", ".csv", ".zip", ".7z"}
-RESOURCE_PRESETS = {"LOW": 1, "BALANCED": 2, "HIGH": 4}
 SCAN_BATCH = 500
 SCAN_CHUNK = 64          # bestanden per hash/workwrite-chunk (checkpoint + 1 transactie)
-PRESET_HASH_WORKERS = {"LOW": 1, "BALANCED": 3, "HIGH": 6}
+
+
+def _cpu_count() -> int:
+    try:
+        return os.cpu_count() or 4
+    except Exception:
+        return 4
+
+
+# Presets schalen mee met de machine (gebruikerscrash-verhaal: op een 32-thread
+# pc gaf HIGH maar 6 hash-workers → ~7% CPU). MAX = vol gas voor SSD/NVMe.
+PRESET_HASH_WORKERS = {
+    "LOW": 2,
+    "BALANCED": max(3, _cpu_count() // 4),
+    "HIGH": max(6, _cpu_count() // 2),
+    "MAX": min(16, max(8, _cpu_count() - 1)),
+}
+PRESET_ANALYSIS_WORKERS = {
+    "LOW": 1,
+    "BALANCED": 2,
+    "HIGH": max(4, min(8, _cpu_count() // 4)),
+    "MAX": max(6, min(12, _cpu_count() // 2)),
+}
+PRESET_SCAN_CHUNK = {"LOW": 32, "BALANCED": 64, "HIGH": 128, "MAX": 256}
 STAT_KEYS = ("discovered", "hashed", "new", "unchanged", "modified", "moved",
              "missing", "duplicate", "errors", "skipped_by_resume",
              "bytes_hashed")
@@ -249,7 +271,8 @@ class LibraryEngine:
         if root is None:
             raise ValueError("Onbekende library root")
         root_path = Path(root["path"])
-        preset = root["config"].get("preset", "BALANCED")
+        preset = (self.config.get("resource_preset")
+                  or root["config"].get("preset", "BALANCED"))
         max_file_mb = int(self.config.get("max_file_mb", 64))
         if not root_path.exists():
             with self.repo.db.connect() as db:
@@ -259,7 +282,8 @@ class LibraryEngine:
                             "bestaande locaties worden NIET als MISSING gemarkeerd."}
         workers = int(self.config.get(
             "scan_hash_workers", PRESET_HASH_WORKERS.get(preset, 3)))
-        chunk_size = max(8, int(self.config.get("scan_chunk", SCAN_CHUNK)))
+        chunk_size = max(8, int(self.config.get(
+            "scan_chunk", PRESET_SCAN_CHUNK.get(preset, SCAN_CHUNK))))
         batch_limit = int(self.config.get("scan_batch", SCAN_BATCH))
         previous = self.interrupted_scan(root_id) if resume else None
         with self.repo.db.connect() as db:
@@ -688,9 +712,9 @@ class LibraryEngine:
 
         from app.scheduler import DiskScheduler
         workers = int(self.config.get("analysis_workers",
-                                      {"LOW": 1, "BALANCED": 2, "HIGH": 4}.get(
+                                      PRESET_ANALYSIS_WORKERS.get(
                                           self.config.get("resource_preset",
-                                                          "BALANCED"), 1)))
+                                                          "BALANCED"), 2)))
         outcome = DiskScheduler(workers=workers).run(
             groups, task, should_stop=should_stop, checkpoint=checkpoint,
             progress=lambda item: progress(f"Analyse {item['id']}")

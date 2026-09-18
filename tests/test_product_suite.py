@@ -541,3 +541,35 @@ def test_auto_backup_once_per_day(service):
     assert second is None
     info = service.last_backup_info()
     assert info and info["complete"] and info["age_hours"] < 24
+
+
+def test_speed_presets_scale_with_cpu():
+    """V8.7: presets zijn CPU-gestuurd en MAX >= HIGH >= BALANCED >= LOW."""
+    from app.library import PRESET_HASH_WORKERS, PRESET_ANALYSIS_WORKERS, PRESET_SCAN_CHUNK
+    for table in (PRESET_HASH_WORKERS, PRESET_ANALYSIS_WORKERS, PRESET_SCAN_CHUNK):
+        assert set(table) == {"LOW", "BALANCED", "HIGH", "MAX"}
+        assert table["LOW"] <= table["BALANCED"] <= table["HIGH"] <= table["MAX"]
+    assert PRESET_HASH_WORKERS["MAX"] >= 8      # vol gas op elke serieuze machine
+    assert PRESET_HASH_WORKERS["MAX"] <= 16     # maar nooit schijf-verslindend
+
+
+def test_scan_uses_max_preset_globally(service, tmp_path):
+    """Global resource_preset=MAX wint van de root-preset: scan-config toont
+    >= 8 hash-workers en grotere chunks (meer CPU/schijf-parallelisme)."""
+    import json
+    source = tmp_path / "speed_src"
+    source.mkdir()
+    payload = b"\x00SW:TEST_SW HW:TEST_HW\x00" + bytes(range(256)) * 8
+    for index in range(5):
+        (source / f"f{index}.bin").write_bytes(payload + bytes([index]))
+    service.library.add_root(source)
+    root_id = service.library.roots()[0]["id"]
+    service.library.config["resource_preset"] = "MAX"
+    result = service.library.scan_root(root_id)
+    assert result["status"] in ("done", "completed", "finished")
+    scan_row = service.repo.db.rows(
+        "SELECT config FROM library_scans WHERE root_id=? ORDER BY id DESC LIMIT 1",
+        (root_id,))[0]
+    scan_config = json.loads(scan_row["config"])
+    assert scan_config["hash_workers"] >= 8
+    assert scan_config["chunk"] >= 128
