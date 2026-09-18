@@ -2,7 +2,26 @@
 
 Datum: 2026-09-10 (bijgewerkt na V3-ronde)
 
-## V7.8-status (Eenvoudig/Expert-modus + root-bulk-verwerking "1 knop") — actueel
+## V7.9-status (lokale Assistent + auto-confirm van sterke BIN-paren) — actueel
+
+**150/150 tests groen.**
+
+- **Assistent** (START, Eenvoudig-modus): lokale agent (app/assistant.py)
+  die live meekijkt in de database — intents: volgende stappen, waarom
+  matcht mijn BIN niet (drempel/bewijs + laatste rapport), reviewwachtrij,
+  tune-recepten, snelheid; antwoordt met échte cijfers, volledig offline
+  (past bij geen-cloud-eis). GUI: chatlog + 5 snelle vragen + vrije vraag.
+- **auto_confirm_binary_pairs(min_score=90)**: losse BIN-paren worden
+  automatisch bevestigd ALLEEN bij expliciet tuning-label (stage/pops&
+  bang/vmax/dpf/…) + score ≥90 + geen tegenstrijdige metadata; de rest
+  blijft bewust in review. Ingebouwd in `process_root_bulk` (suggereert
+  eerst, bevestigt dan); samenvatting toont "automatisch bevestigd / voor
+  review"; audit-regel per bevestiging.
+- Nav: 27 pagina's / 33 nav-items; Assistent in SIMPLE_PAGES (11).
+- Tests: assistent-intents + GUI-chat + auto-confirm-label/score-regel +
+  bulk-auto-confirm.
+
+## V7.8-status (Eenvoudig/Expert-modus + root-bulk-verwerking "1 knop")
 
 **146/146 tests groen.**
 

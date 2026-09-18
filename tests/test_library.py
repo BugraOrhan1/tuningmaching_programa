@@ -325,3 +325,48 @@ def test_process_root_bulk_resumes_after_crash(service, tmp_path):
     assert result["imported"] >= 1
     assert len([row for row in service.repo.files(limit=0)
                 if row["source_path"].startswith(str(bron))]) == 4
+
+
+def test_auto_confirm_pairs_requires_label_and_score(service, tmp_path):
+    """Auto-bevestiging alleen bij expliciet label + sterke score; een
+    sterkt paar zonder label blijft bewust in de reviewwachtrij."""
+    payload = bytes([0]) + b"HEAD" + bytes(range(256)) * 4
+    original = tmp_path / "ECU123_original.bin"
+    tuned = tmp_path / "ECU123_stage1_pops_bang.bin"
+    mystery = tmp_path / "mysteryfile.bin"
+    original.write_bytes(payload)
+    tweaked = bytearray(payload)
+    tweaked[100:108] = bytes([0xAA]) * 8
+    tuned.write_bytes(bytes(tweaked))
+    mystery.write_bytes(bytes(tweaked))
+    original_id = service.repo.import_file(original, "original")
+    tuned_id = service.repo.import_file(tuned, "tuned")
+    mystery_id = service.repo.import_file(mystery, "tuned")
+    # voorstellen genereren (blijft onbevestigd)
+    proposals = service.repo.suggest_binary_relationships()
+    assert proposals
+    result = service.repo.auto_confirm_binary_pairs(min_score=90)
+    assert result["confirmed"] == 1          # stage1+pops&bang-label + sterke match
+    assert result["review"] >= 1             # mystery zonder label → review
+    confirmed_rows = [row for row in service.repo.pairs() if row["confirmed"] == 1]
+    assert confirmed_rows, "het gelabelde paar moet bevestigd zijn"
+    unconfirmed = [row for row in service.repo.pairs() if row["confirmed"] == 0]
+    assert unconfirmed, "het ongelabelde paar blijft voor review"
+
+
+def test_bulk_auto_confirms_pairs_in_flow(service, tmp_path):
+    """De bulk-verwerking bevestigt sterke gelabelde paren automatisch mee."""
+    bron = tmp_path / "bronbulk"
+    bron.mkdir()
+    payload = bytes([0]) + b"HEAD" + bytes(range(256)) * 4
+    (bron / "auto_orig.bin").write_bytes(payload)
+    tweaked = bytearray(payload)
+    tweaked[200:204] = bytes([0xBB]) * 4
+    (bron / "auto_stage1.bin").write_bytes(bytes(tweaked))
+    root = service.library.add_root(str(bron), "BulkAuto")
+    # eerst handmatig beide importeren als original/tuned zodat types kloppen
+    service.repo.import_file(bron / "auto_orig.bin", "original")
+    service.repo.import_file(bron / "auto_stage1.bin", "tuned")
+    result = service.process_root_bulk(root["id"], resume=True)
+    assert result["skipped_existing"] == 2   # beide al aanwezig
+    assert result.get("pairs_auto_confirmed", 0) >= 1

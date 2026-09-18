@@ -55,6 +55,10 @@ kandidaatbestand (checksums niet gecorrigeerd: eerst WinOLS-controle).</li>
 <h3>START</h3>
 <p><b>Dashboard</b> — live status (roots online, bestanden/contents, kennis, taken) en
 de genummerde snelstart. Begin hier.<br>
+<b>Assistent</b> — jouw lokale AI-gids: stel vragen als "Wat moet ik nu doen?",
+"Waarom matcht mijn BIN niet?", "Wat ligt er ter review?", "Welke tunes kan ik
+bouwen?" of "Hoe krijg ik mijn 10TB snel geladen?" — hij antwoordt met échte
+cijfers uit jouw database, volledig lokaal (geen cloud).<br>
 <b>Uitleg &amp; Handleiding</b> — dit document.</p>
 
 <h3>BIBLIOTHEEK</h3>
@@ -82,7 +86,10 @@ inhoud. Alles wat een scan vindt, verschijnt óók onderaan de Files-pagina.<br>
 de geselecteerde root en verwerkt daarna AUTOMATISCH alles (BIN/ORI naar
 Files, elk .ols volledig). Miljoenen bestanden? Eén keer starten en laten
 draaien — hervatbaar na onderbreking, en al-aanwezig wordt overgeslagen
-zonder lezen. Handmatig Library→Files selecteren is niet meer nodig.<br>
+zonder lezen. Handmatig Library→Files selecteren is niet meer nodig.
+Sterke losse BIN-paren (expliciet stage/add-on-label + ≥90% score + geen
+tegenstrijdige metadata) worden hierbij automatisch bevestigd; de rest
+blijft bewust in de reviewwachtrij.<br>
 <b>WinOLS</b> — importeer een .ols-project (één bestand). De app leest versies,
 extraheert bewezen binaries naar Files, bepaalt Original/Tuned-rollen uit
 expliciete WinOLS-labels en stelt paren voor bij gelijke werkelijke
@@ -217,6 +224,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(root)
         self.nav_section('START')
         self.build_dashboard()
+        self.build_assistant()
         self.build_manual()
         self.nav_section('BIBLIOTHEEK')
         self.build_files()
@@ -256,7 +264,7 @@ class MainWindow(QMainWindow):
         if first_run:
             self.maybe_first_run()
 
-    SIMPLE_PAGES = {'Dashboard', 'Uitleg & Handleiding', 'Files', 'Library (V5)',
+    SIMPLE_PAGES = {'Dashboard', 'Assistent', 'Uitleg & Handleiding', 'Files', 'Library (V5)',
                     'WinOLS', 'Original/Tuned Pairs', 'BIN Analyseren (V3)',
                     "Diff & Regio's", 'Tune Bouwer (V7)', 'Jobs & Audit'}
 
@@ -460,6 +468,51 @@ class MainWindow(QMainWindow):
         browser.setOpenExternalLinks(False)
         browser.setHtml(MANUAL_HTML)
         layout.addWidget(browser)
+
+    def build_assistant(self):
+        layout = self.page('Assistent', 'Je lokale tuning-assistent: kijkt live mee in '
+                           'jouw database en geeft concrete antwoorden en volgende stappen. '
+                           'Volledig lokaal (geen cloud).')
+        self.assistant_log = QTextBrowser()
+        self.assistant_log.setOpenExternalLinks(False)
+        self.assistant_log.setPlainText(
+            'Assistent: Hallo! Vraag me iets over jouw bestanden, matches, '
+            'review-wachtrij of de Tune Bouwer. Ik kijk dan live in jouw data.\n')
+        layout.addWidget(self.assistant_log, 1)
+        for question in ('Wat moet ik nu doen?', 'Waarom matcht mijn BIN niet?',
+                         'Wat ligt er ter review?', 'Welke tunes kan ik bouwen?',
+                         'Hoe krijg ik mijn 10TB snel geladen?'):
+            self.button(layout, question,
+                        lambda _checked=False, q=question: self.ask_assistant(q))
+        ask_row = QHBoxLayout()
+        self.assistant_input = QLineEdit()
+        self.assistant_input.setPlaceholderText(
+            'Stel je vraag… (bijv. waarom matcht mijn BIN niet?)')
+        self.assistant_input.returnPressed.connect(self.ask_assistant)
+        ask_row.addWidget(self.assistant_input, 1)
+        ask_btn = QPushButton('Vraag')
+        ask_btn.clicked.connect(self.ask_assistant)
+        ask_row.addWidget(ask_btn)
+        layout.addLayout(ask_row)
+
+    def ask_assistant(self, question=None):
+        text = question if isinstance(question, str) else None
+        if not text:
+            text = self.assistant_input.text().strip()
+            self.assistant_input.clear()
+        if not text:
+            return
+        context = {'last_report': getattr(self, 'report', None)}
+        try:
+            result = self.service.assistant.answer(text, context)
+        except Exception as exc:
+            result = {'answer': f'Assistent kon het antwoord niet opbouwen: {exc}',
+                      'topic': 'fout'}
+        log = self.assistant_log
+        log.setPlainText(log.toPlainText()
+                         + f'\nJij: {text}\nAssistent: {result["answer"]}\n')
+        scrollbar = log.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
 
     def build_dashboard(self):
         layout = self.page('Dashboard', 'Welkom. Werk van links naar rechts door de '
@@ -1386,7 +1439,9 @@ class MainWindow(QMainWindow):
                  f"Gescand (bestanden gevonden): {result.get('scanned', '—')}",
                  f"BIN/ORI nieuw naar Files: {result.get('imported', 0)}",
                  f"Al aanwezig (overgeslagen zonder lezen): {result.get('skipped_existing', 0)}",
-                 f"OLS-projecten volledig verwerkt: {result.get('ols_projects', 0)}"]
+                 f"OLS-projecten volledig verwerkt: {result.get('ols_projects', 0)}",
+                 f"Paren automatisch bevestigd (label+bewijs): {result.get('pairs_auto_confirmed', 0)} · "
+                 f"voor review: {result.get('pairs_review', 0)}"]
         if errors:
             lines.append(f"Fouten: {len(errors)} (eerste 3)")
             lines += [f"  • {item['path']}: {item['error']}" for item in errors[:3]]

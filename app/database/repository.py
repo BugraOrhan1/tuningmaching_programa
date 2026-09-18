@@ -1106,6 +1106,51 @@ class Repository(RepositoryV3Mixin):
                 proposals.append(proposal)
         return proposals
 
+    TUNING_LABEL_RE = re.compile(
+        r"stage\s*[1-4]|pops?\s*&?\s*bang|popcorn|vmax|v-?max|decat|dpf|egr|adblue|scr|"
+        r"e85|swad|speed.?limit|antilag|launch|burble|remap|opt.?power", re.IGNORECASE)
+
+    def auto_confirm_binary_pairs(self, min_score: int = 90,
+                                  limit: int = 2000) -> dict:
+        """Bevestig losse BIN-paren automatisch ALLEEN met sterk bewijs:
+        expliciet tuning-label op de tuned-bestandsnaam + matchscore ≥
+        min_score + geen tegenstrijdige metadata (ecu/hw/sw). Alles wat
+        minder bewijs heeft blijft bewust onbevestigd voor review."""
+        label = self.TUNING_LABEL_RE
+        confirmed = review = 0
+        examples = []
+        with self.db.connect() as db:
+            pairs = [dict(row) for row in db.execute(
+                "SELECT id, original_file_id, tuned_file_id FROM file_pairs "
+                "WHERE confirmed=0 ORDER BY id LIMIT ?", (limit,))]
+        for pair in pairs:
+            tuned_row = self.file(pair["tuned_file_id"])
+            original_row = self.file(pair["original_file_id"])
+            if not label.search(tuned_row.get("filename") or ""):
+                review += 1
+                continue
+            if (original_row.get("ecu_family") and tuned_row.get("ecu_family")
+                    and original_row["ecu_family"] != tuned_row["ecu_family"]):
+                review += 1
+                continue
+            original_data = self.data(pair["original_file_id"])
+            tuned_data = self.data(pair["tuned_file_id"])
+            evidence = compare(original_data, tuned_data, original_row, tuned_row,
+                               self.config["block_size"])
+            if int(evidence.get("match_score", 0)) < min_score:
+                review += 1
+                continue
+            with self.db.connect() as db:
+                db.execute("UPDATE file_pairs SET confirmed=1, confidence=? WHERE id=?",
+                           (evidence.get("compatibility_confidence"), pair["id"]))
+            self.audit("auto_confirm_pair", "file_pair", pair["id"],
+                       after={"match_score": evidence.get("match_score"),
+                              "reason": "label+score-autobewijs"})
+            confirmed += 1
+            if len(examples) < 5:
+                examples.append(tuned_row.get("filename"))
+        return {"confirmed": confirmed, "review": review, "examples": examples}
+
     def pairs(self) -> list[dict]:
         return self.db.rows("SELECT * FROM file_pairs ORDER BY id DESC")
 

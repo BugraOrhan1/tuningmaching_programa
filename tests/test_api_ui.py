@@ -73,8 +73,9 @@ def test_gui_smoke(service, pair, monkeypatch, tmp_path):
     window.apply_ui_mode('expert')  # volledige nav voor deze test
     window.show()
     application.processEvents()
-    assert window.page_count == 26  # na consolidatie: dubbele pagina's samengevoegd
-    assert window.nav.count() == 32  # 26 pagina's + 6 groepskoppen
+    assert window.page_count == 27  # + Assistent (lokale AI-gids)
+    assert window.nav.count() == 33  # 27 pagina's + 6 groepskoppen
+    assert window.navigate('Assistent') is True
     assert window.navigate('Uitleg & Handleiding') is True
     # gebruikersvriendelijkheid: direct navigeren en paginazoeker werken
     assert window.navigate('Library (V5)') is True
@@ -201,10 +202,37 @@ def test_ui_simple_mode_by_default_and_expert_toggle(service, monkeypatch, tmp_p
     visible = [window.nav.item(row).text() for row in range(window.nav.count())
                if not window.nav.item(row).isHidden()
                and window.nav.item(row).data(Qt.ItemDataRole.UserRole) == 'page']
-    assert len(visible) == window.page_count == 26
+    assert len(visible) == window.page_count == 27
     window.apply_ui_mode('eenvoudig')
     window.close()
     # keuze is bewaard: een volgend venster start weer in Eenvoudig
     window2 = MainWindow(service)
     assert window2._ui_mode == 'eenvoudig'
     window2.close()
+
+
+def test_assistant_answers_use_real_state(service, monkeypatch):
+    """De lokale assistent antwoordt met échte cijfers uit deze installatie."""
+    monkeypatch.setenv('QT_QPA_PLATFORM', 'offscreen')
+    answer = service.assistant.answer('Wat moet ik nu doen?')
+    assert 'library-roots' in answer['answer'] or 'Root volledig' in answer['answer']
+    match_answer = service.assistant.answer('Waarom matcht mijn BIN niet?', {'last_report': None})
+    assert 'drempel' in match_answer['answer']
+    review = service.assistant.answer('Wat ligt er ter review?')
+    assert '0 unknown-bestanden' in review['answer']
+    onbekend = service.assistant.answer('blabla allemaal rare woorden')
+    assert 'probeer' in onbekend['answer'].casefold()
+
+
+def test_assistant_page_answers_in_gui(service, pair, monkeypatch):
+    """Assistent-pagina in de GUI beantwoordt vragen en logt het gesprek."""
+    monkeypatch.setenv('QT_QPA_PLATFORM', 'offscreen')
+    from PySide6.QtWidgets import QApplication
+    from app.ui.main_window import MainWindow
+    application = QApplication.instance() or QApplication([])
+    window = MainWindow(service)
+    window.navigate('Assistent')
+    window.ask_assistant('Wat moet ik nu doen?')
+    log = window.assistant_log.toPlainText()
+    assert 'Jij: Wat moet ik nu doen?' in log and 'Assistent:' in log
+    window.close()

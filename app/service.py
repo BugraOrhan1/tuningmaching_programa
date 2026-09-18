@@ -29,6 +29,8 @@ class Service(ServiceV3Mixin):
         self.library = LibraryEngine(self.repo, config, service=self)
         self.km = KnowledgeModelEngine(self)
         self.tune_builder = TuneBuilder(self)
+        from app.assistant import Assistant
+        self.assistant = Assistant(self)
 
     def analyze(self, path: str, progress=None) -> dict:
         query = read_binary(path, self.repo.config['max_file_mb'])
@@ -420,6 +422,15 @@ class Service(ServiceV3Mixin):
                                  f"{result['skipped_existing']} al aanwezig · "
                                  f"{result['ols_projects']} OLS · "
                                  f"{len(result['errors'])} fouten")
+            try:
+                # eerst voorstellen (blijft unconfirmed), dan bewijs-gestuurd bevestigen
+                self.repo.suggest_binary_relationships()
+                confirm = self.repo.auto_confirm_binary_pairs(min_score=90)
+                result["pairs_auto_confirmed"] = confirm["confirmed"]
+                result["pairs_review"] = confirm["review"]
+            except Exception as exc:  # auto-confirm mag bulk nooit breken
+                result["pairs_auto_confirmed"] = 0
+                result["auto_confirm_error"] = str(exc)
             self.repo.finish_run(run_id, "done", result)
         except Exception:
             self.repo.checkpoint_run(run_id, {"last_id": last_id}, result)
