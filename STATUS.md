@@ -2,7 +2,23 @@
 
 Datum: 2026-09-10 (bijgewerkt na V3-ronde)
 
-## V7.7-status (10TB deel 2: her-import 20× sneller + scandir-ontdekking + scan-snelheid) — actueel
+## V7.8-status (Eenvoudig/Expert-modus + root-bulk-verwerking "1 knop") — actueel
+
+**146/146 tests groen.**
+
+- **⭐ Root volledig verwerken** (Library-pagina): één knop — scant de root en
+  verwerkt daarna AUTOMATISCH élke locatie (BIN/ORI → Files met skip-existing
+  zonder lezen; elk .ols volledig). Keyset-paginering (id>) schaalt naar
+  miljoenen; hervatbaar via run-checkpoints (`root_bulk`), resume na crash
+  getest; tweede keer ~gratis (alles overgeslagen).
+- **Eenvoudig/Expert-modus** boven de navigatie: Eenvoudig = 10 dagelijkse
+  pagina's + sectiekoppen alleen bij zichtbare pagina's; Expert = alles (26).
+  Keuze blijft bewaard (data/ui.json); filter_nav is modus-bewust; navigate()
+  werkt ook naar verborgen pagina's.
+- Handleiding bijgewerkt; tests: modus-default/-wissel/-persistentie +
+  bulk-volledig + bulk-resume.
+
+## V7.7-status (10TB deel 2: her-import 20× sneller + scandir-ontdekking + scan-snelheid)
 
 **143/143 tests groen. Benchmark:** her-import zelfde map (400×256KB) =
 **29,1 s → 1,5 s (20×)** door skip-zonder-lezen; 30.000 bestanden ontdekken =

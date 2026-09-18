@@ -68,6 +68,9 @@ Library-scans op je bronmappen vonden, met root, type, grootte en SHA-8.
 Selecteer rijen en gebruik "Selectie → Files (BIN/ORI)" om ze één voor één
 naar Files te halen (bron blijft altijd staan), of "→ WinOLS verwerken"
 voor .ols-projecten.<br>
+<b>Modus: Eenvoudig / Expert</b> — linksboven in de navigatie. Eenvoudig
+toont alleen de 10 dagelijkse pagina's (en verbergt lege sectiekoppen); Expert
+toont alles (26). Je keuze blijft bewaard bij het herstarten.<br>
 <b>Library (V5)</b> — registreer hele bronmappen/schijven (D:\Tuning, E:\WinOLS…).
 Bestanden blijven op hun plek; de app indexeert pad + SHA256. Gebouwd voor
 10TB+: <u>ongewijzigde bestanden worden nooit opnieuw gelezen</u> (2e scan =
@@ -75,6 +78,11 @@ seconden), hashen gebeurt <u>parallel</u> (profiel LOW=1 / BALANCED=3 / HIGH=6
 workers) en de GUI blijft responsief (paginaladen). Scans hervatten na
 onderbreking. Daarna "analyseren" verwerkt nieuwe content één keer per unieke
 inhoud. Alles wat een scan vindt, verschijnt óók onderaan de Files-pagina.<br>
+<b>⭐ Root volledig verwerken</b> — de grote knop op de Library-pagina: scant
+de geselecteerde root en verwerkt daarna AUTOMATISCH alles (BIN/ORI naar
+Files, elk .ols volledig). Miljoenen bestanden? Eén keer starten en laten
+draaien — hervatbaar na onderbreking, en al-aanwezig wordt overgeslagen
+zonder lezen. Handmatig Library→Files selecteren is niet meer nodig.<br>
 <b>WinOLS</b> — importeer een .ols-project (één bestand). De app leest versies,
 extraheert bewezen binaries naar Files, bepaalt Original/Tuned-rollen uit
 expliciete WinOLS-labels en stelt paren voor bij gelijke werkelijke
