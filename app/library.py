@@ -399,6 +399,11 @@ class LibraryEngine:
                     report()
                 report(force=True)
 
+            # V8.10.1: de afrondfase (MISSING/MOVED/DUPLICATE) kan bij grote
+            # bibliotheken + trage schijf minuten duren — meld het expliciet
+            if progress:
+                progress(f"Scan klaar ({stats['discovered']} bestanden bezocht) — "
+                         "afronden: ontbrekend/dubbel markeren…")
             # MISSING: bekende paden die deze scan niet zag (en niet waren overgeslagen)
             missing_rows = []
             for key, row in previous_rows.items():

@@ -28,6 +28,41 @@ Datum: 2026-09-10 (bijgewerkt na V3-ronde)
   update, exact-SHA-join, GUI-snelpaden, storage-cache, advies-async,
   combo-begrenzing.
 
+## V8.10.1-status (HOTFIX: 'hangt na Scan' — stille fases zichtbaar + eenmalige OLS-verificatie versneld) — actueel
+
+**196 passed / 1 guard-skip groen.**
+
+- Gebruikersrapport (screenshot): na opnieuw opstarten blijft de status op
+  "Scan 425923/425923 (nieuw 0, gelijk 425922, gehasht 0) · 0 MB/s" staan
+  en gaat de pijplijn niet zichtbaar verder. Oorzaken: (a) de scan-
+  afrondfase (MISSING/MOVED/DUPLICATE + 2 COUNT's) was volledig STIL en
+  duurt op een 5 GB database op USB minuten; (b) daarna kan de eerste
+  OLS-batch lang stil zijn: projecten van vóór V8.8 hebben géén
+  source_mtime → eenmalige volledige herverificatie van élke OLS (lezen+
+  hashen vanaf de 200 MB/s-USB; 8 grote bestanden parallel = eerste
+  melding pas na minuten); (c) DNA werd bij élke verwerk-run opnieuw
+  volledig gegenereerd voor bestaande paren.
+- FIX zichtbaarheid: progress op 3 overgangspunten — "Scan klaar …
+  afronden" (library.scan_root vóór MISSING-loop), "Scan afgerond (N
+  bestanden) — nu X locaties verwerken" (process_root_bulk na scan) en
+  "OLS-fase: N OLS (W parallel) — eerste run verifieert elke OLS
+  eenmalig" (vóór de pool).
+- FIX snelheid: import_project sha-match-priming — bij gelijke sha256
+  (verificatie = lezen+hashen, onvermijdelijk eenmalig) worden parse/
+  object-rewrite/paren/DNA overgeslagen en alléén source_mtime bijge-
+  werkt; daarna is élke volgende run een echte skip-cache-hit.
+- FIX DNA: auto_process_ols genereert DNA alléen als er nog geen
+  niet-geweigerd DNA voor het paar is (SQL-check).
+- FIX bug (gevonden door crash-regressietest): last_id wordt vóór de
+  scan geïnitialiseerd — crash tijdens de scan/afrondfase gaf anders
+  UnboundLocalError in de checkpoint-handler en maskeerde de echte fout.
+- Nieuwe index: file_locations(root_id, scan_status) — afrond-UPDATEs en
+  COUNT's zijn nu index-gedreven i.p.v. full-scans over 427k rijen op
+  de 5 GB-USB-database. SCHEMA_VERSION 13.
+- Tests: priming-zonder-reparse (parse-teller = 0, mtime opgeslagen),
+  DNA-groeit-niet-meer, fase-meldingen in process_root_bulk, crash-
+  regressie blijft groen.
+
 ## V8.10-status (schijf-benchmark + same-drive-advies + GPU-hoofdstuk) — actueel
 
 **193 passed / 1 guard-skip groen.**

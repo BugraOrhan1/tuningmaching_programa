@@ -301,6 +301,13 @@ class Service(ServiceV3Mixin):
         dna = []
         for pair in pairs:
             if pair.get('confirmed') and pair.get('pair_id'):
+                # V8.10.1: DNA is eenmalig per paar — alleen (her)genereren als
+                # er nog geen is (was: élke verwerk-run volledige diff+regions)
+                existing_dna = self.repo.db.rows(
+                    "SELECT id FROM tuning_dna WHERE pair_id=? AND status<>'rejected'",
+                    (pair['pair_id'],))
+                if existing_dna:
+                    continue
                 try:
                     report = self.generate_tuning_dna(pair['pair_id'])
                     dna.append({'pair_id': pair['pair_id'], 'regions': len(report['regions']),
@@ -449,6 +456,9 @@ class Service(ServiceV3Mixin):
         run_id = run["id"] if run else self.repo.start_run(
             "root_bulk", {"root_id": root_id})
         start_after = int(run["checkpoint"].get("last_id", 0)) if run else 0
+        last_id = start_after  # V8.10.1: vóór de scan initialiseren — een
+        # crash tijdens de scan/afrondfase mag de checkpoint-handler niet
+        # breken met UnboundLocalError (gevonden door de crash-regressietest)
         result = dict(run["stats"] if run else {})
         result.setdefault("scanned", 0)
         result.setdefault("imported", 0)
@@ -460,7 +470,14 @@ class Service(ServiceV3Mixin):
                 scan = self.library.scan_root(root_id, progress=progress)
                 result["scanned"] = scan.get("discovered", 0)
                 result["status"] = scan.get("status", "done")
-            last_id = start_after
+                # V8.10.1: zichtbare overgang — de stilte na de scan was de
+                # afrondfase + eerste OLS-batch; de gebruiker zag een "hang"
+                locations_total = self.repo.db.rows(
+                    "SELECT COUNT(*) AS n FROM file_locations WHERE root_id=?",
+                    (root_id,))[0]["n"]
+                if progress:
+                    progress(f"Scan afgerond ({result['scanned']} bestanden) — "
+                             f"nu {locations_total} locaties verwerken…")
             from app.library import PRESET_ANALYSIS_WORKERS
             ols_workers = max(1, min(8, int(self.repo.config.get(
                 "ols_workers", PRESET_ANALYSIS_WORKERS.get(
@@ -500,6 +517,11 @@ class Service(ServiceV3Mixin):
                                  f"{result['ols_projects']} OLS · "
                                  f"{len(result['errors'])} fouten")
                 if ols_rows:
+                    if progress:
+                        progress(f"OLS-fase: {len(ols_rows)} OLS in deze batch "
+                                 f"({ols_workers} parallel) — melding na elk "
+                                 "klaar bestand; de eerste run na een update "
+                                 "verifieert elke OLS eenmalig (daarna skip-cache)")
                     with ThreadPoolExecutor(max_workers=min(
                             ols_workers, len(ols_rows))) as pool:
                         futures = {pool.submit(self.auto_process_ols, str(Path(row["path"]))): row

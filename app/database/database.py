@@ -175,8 +175,9 @@ CREATE INDEX IF NOT EXISTS idx_contents_state ON content_objects(analysis_state)
 CREATE INDEX IF NOT EXISTS idx_ols_objects_role ON ols_objects(role);
 CREATE INDEX IF NOT EXISTS idx_files_sha256 ON files(sha256);
 CREATE INDEX IF NOT EXISTS idx_files_size_kind ON files(file_size, file_type);
+CREATE INDEX IF NOT EXISTS idx_locations_root_scan ON file_locations(root_id, scan_status);
 '''
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 
 class Database:

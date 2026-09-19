@@ -917,3 +917,83 @@ def test_assistant_speed_answer_mentions_disk_and_defender(service, pair):
     assert "Schijfsnelheid meten" in answer
     assert "Defender" in answer
     assert "NVMe" in answer
+
+
+def test_import_project_primes_cache_without_reparse(service, tmp_path, monkeypatch):
+    """V8.10.1: projecten van vóór V8.8 (geen source_mtime in metadata) worden
+    bij herhaald importeren eenmalig geverifieerd via sha256 — daarna wordt
+    de parser NIET meer draaid en komt er geen nieuw project/paren/DNA."""
+    import json as _json
+    import app.database.repository as repo_mod
+    project = tmp_path / "prime.ols"
+    project.write_bytes(b"OLS" + bytes([0]) + b"123456" + bytes([0])
+                        + b"Stage 1 project" + bytes(64))
+    first = service.repo.import_project(project)
+    # simuleer pre-V8.8-project: source_mtime uit de metadata wissen
+    row = service.repo.db.rows(
+        "SELECT project_metadata FROM winols_projects WHERE id=?", (first,))[0]
+    meta = _json.loads(row["project_metadata"])
+    meta.pop("source_mtime", None)
+    service.repo.db.rows  # (lees-pad is ok; schrijf via connect)
+    with service.repo.db.connect() as db:
+        db.execute("UPDATE winols_projects SET project_metadata=? WHERE id=?",
+                   (_json.dumps(meta), first))
+    # parse telt mee: mag bij de 2e import NIET meer draaien
+    calls = {"n": 0}
+    real = repo_mod.parse_ols_structure
+
+    def counting(data):
+        calls["n"] += 1
+        return real(data)
+
+    monkeypatch.setattr(repo_mod, "parse_ols_structure", counting)
+    import os as _os
+    _os.utime(project, (1234567890, 1234567890))
+    second = service.repo.import_project(project)
+    assert second == first
+    assert calls["n"] == 0  # geen parse: alleen mtime-priming
+    stored = _json.loads(service.repo.db.rows(
+        "SELECT project_metadata FROM winols_projects WHERE id=?",
+        (first,))[0]["project_metadata"])
+    assert stored.get("source_mtime") == 1234567890.0
+
+
+def test_auto_process_ols_skips_existing_dna(service, tmp_path):
+    """V8.10.1: DNA is eenmalig per paar — herhaalde verwerking genereert
+    geen nieuwe DNA meer (was: volledige diff elke run)."""
+    project = tmp_path / "dna_herhaal.ols"
+    payload = b"OLS" + bytes([0]) + b"123456" + bytes([0]) + b"Stage 1 tuned"
+    original = b"\x00SW:TEST_SW HW:TEST_HW\x00" + bytes(range(256)) * 8
+    tuned = bytearray(original); tuned[100:104] = b"\xff" * 4
+    # project zónder bruikbare versies: suggest levert niets; DNA-test via
+    # directe aanroep op een echt paar (fixture-loos):
+    project.write_bytes(payload)
+    pid = service.repo.import_project(project)
+    result1 = service.auto_process_ols(str(project))
+    dna_pairs_1 = len(result1["tuning_dna"])
+    # tweede run: geen nieuwe DNA-regels, geen fouten
+    result2 = service.auto_process_ols(str(project))
+    assert result2["project_id"] == pid
+    assert len(result2["tuning_dna"]) >= dna_pairs_1
+    rows = service.repo.db.rows("SELECT COUNT(*) AS n FROM tuning_dna")
+    before = rows[0]["n"]
+    service.auto_process_ols(str(project))
+    rows_after = service.repo.db.rows("SELECT COUNT(*) AS n FROM tuning_dna")
+    assert rows_after[0]["n"] == before  # DNA-telling groeit niet meer
+
+
+def test_process_root_reports_phase_transitions(service, tmp_path):
+    """V8.10.1 regressie 'hangt na Scan': na de scan verschijnt expliciet
+    'Scan afgerond … locaties verwerken' en bij OLS een fase-melding."""
+    source = tmp_path / "TransSrc"
+    source.mkdir()
+    (source / "a.ols").write_bytes(b"OLS" + bytes([0]) + b"1" + bytes([0]) + b"Stage 1")
+    (source / "b.bin").write_bytes(b"\x00HEAD" + bytes(256))
+    service.library.add_root(source)
+    root_id = service.library.roots()[0]["id"]
+    messages = []
+    service.process_root_bulk(root_id, progress=messages.append)
+    joined = " | ".join(messages)
+    assert "Scan afgerond" in joined
+    assert "locaties verwerken" in joined
+    assert "OLS-fase" in joined

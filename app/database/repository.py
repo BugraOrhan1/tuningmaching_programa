@@ -257,7 +257,7 @@ class Repository(RepositoryV3Mixin):
             raise ValueError(f"OLS niet leesbaar: {path}") from exc
         from app.winols.ols_reader import PARSER_VERSION as _parser_version
         existing = self.db.rows(
-            "SELECT id, file_size, parser_version, project_metadata "
+            "SELECT id, file_size, parser_version, project_metadata, sha256 "
             "FROM winols_projects WHERE source_path=? ORDER BY id DESC LIMIT 1",
             (str(path),))
         if existing and existing[0]["file_size"] == stat.st_size \
@@ -271,9 +271,24 @@ class Repository(RepositoryV3Mixin):
         data = read_ols(path, self.config["max_file_mb"])
         details = inspect_ols(data)
         details["source_mtime"] = stat.st_mtime
+        digest = details.pop("hashes")
+        # V8.10.1 eenmalige cache-vulling: projecten van vóór V8.8 hebben geen
+        # source_mtime in de metadata. Als de inhoud (sha256) ongewijzigd is,
+        # volstaat nu: mtime bijwerken + teruggeven — GEEN parse/object-rewrite
+        # en géén paren/DNA opnieuw. Na deze ene pass is élke volgende run
+        # een echte skip-cache-hit.
+        if existing and existing[0]["parser_version"] == _parser_version:
+            previous_id = existing[0]["id"]
+            if digest["sha256"] == existing[0]["sha256"]:
+                merged = json.loads(existing[0]["project_metadata"] or "{}")
+                merged["source_mtime"] = stat.st_mtime
+                with self.db.connect() as db:
+                    db.execute(
+                        "UPDATE winols_projects SET project_metadata=? WHERE id=?",
+                        (json.dumps(merged, ensure_ascii=False), previous_id))
+                return previous_id
         structure = parse_ols_structure(data)
         maps_by_offset = {item["offset"]: item for item in structure.get("maps", [])}
-        digest = details.pop("hashes")
         target = self.root / "winols_projects" / (digest["sha256"] + ".ols")
         try:
             with target.open("xb") as stream:
