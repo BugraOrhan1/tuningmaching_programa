@@ -28,6 +28,32 @@ Datum: 2026-09-10 (bijgewerkt na V3-ronde)
   update, exact-SHA-join, GUI-snelpaden, storage-cache, advies-async,
   combo-begrenzing.
 
+## V8.11-status (Tune Bouwer leert beter + diagnose-knop) — actueel
+
+**200 passed / 1 guard-skip groen.**
+
+- Gebruikersrapport: "de tunebuilder stages werken denk niet of hij heeft
+  niet geleerd". Diagnose: recepten komen alléén uit bevestigde paren met
+  stage-labels; bij zijn data ontbraken die nog (of de labels ontbraken).
+- **`service.tune_builder_diagnostics()`**: echte cijfers (bevestigde/
+  te-reviewen paren, paren met stage-label, OLS-versierollen original/
+  tuned/unknown, unknown-objecten, geleerde recepten/stages/add-ons) +
+  concrete volgende stappen op basis van de aantallen.
+- **GUI**: nieuwe knop "Diagnose: waarom kan hij (nog) niet bouwen?" op
+  de Tune Bouwer; bij 0 recepten wijst de output naar die knop.
+- **Assistent**: "stages werken niet/niet geleerd/0 recepten" →
+  leerstatus-antwoord met cijfers + stappen.
+- **Meer bewijsbronnen**: óók de OLS-PROJECTNAAM telt als expliciet label
+  (de gebruiker noemt projecten zelf "… VW Golf … Stage 1…"); volgorde
+  versienaam > projectnaam > metadata > bestandsnaam. Geen gokjes —
+  alléén expliciete tekst.
+- **Snelheid**: recipes() gebruikt opgeslagen diffs (COUNT) i.p.v. per
+  refresh élk paar opnieuw volledig te diffen; fallback diff() alleen
+  bij nog-ongediffde paren.
+- Tests: diagnose-cijfers/-stappen, projectnaam-label via
+  ols_version_binaries-koppeling, stored-diffs (diff-mag-niet-meer-runnen),
+  assistent-antwoord.
+
 ## V8.10.1-status (HOTFIX: 'hangt na Scan' — stille fases zichtbaar + eenmalige OLS-verificatie versneld) — actueel
 
 **196 passed / 1 guard-skip groen.**

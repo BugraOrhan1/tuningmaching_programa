@@ -54,6 +54,9 @@ class Assistant:
 
         if re.search(r"match|waarom|drempel|95|procent|herkent|nieuwe bin", q):
             return self._match_answer(q, context, c)
+        if re.search(r"stages?\s+(werkt?|werken)\s+niet|niet\s+geleerd|leert?\s+niet"
+                     r"|recepten?\s+leeg|0\s+recepten", q):
+            return self._tune_learning_answer()
         if re.search(r"recept|tune bouwer|bouwen|stage|pops|bang|add-?on|vmax", q):
             return self._recipes_answer(c)
         if re.search(r"review|onbekend|unknown|wachtrij|twijfel|candidate|kandidaat", q):
@@ -146,6 +149,27 @@ class Assistant:
             "Automatisch: .ols-projecten paren op expliciete WinOLS-versielabels; losse BIN-paren met "
             "duidelijk stage/add-on-label én ≥90% score worden bij '⭐ Root volledig verwerken' "
             "automatisch bevestigd — de rest blijft bewust voor jouw review."]), "topic": "paren"}
+
+    def _tune_learning_answer(self) -> dict:
+        try:
+            diag = self.service.tune_builder_diagnostics()
+        except Exception:
+            diag = None
+        if not diag:
+            return {"answer": "Kon de diagnose niet ophalen; open de Tune Bouwer "
+                              "en gebruik de diagnose-knop.", "topic": "tune-bouwer"}
+        lines = ["Tune Bouwer-leerstatus (uit jouw database):",
+                 f"• Bevestigde paren: {diag['confirmed_pairs']} (te reviewen: "
+                 f"{diag['unconfirmed_pairs']})",
+                 f"• OLS-versierollen: original {diag['ols_version_roles']['original']} · "
+                 f"tuned {diag['ols_version_roles']['tuned']} · "
+                 f"unknown {diag['ols_version_roles']['unknown']}",
+                 f"• Recepten geleerd: {diag['recipes']} "
+                 f"(stages: {', '.join(diag['stages']) or '—'})", "",
+                 "Volgende stappen:"]
+        lines.extend(f"{index}. {step}" for index, step
+                     in enumerate(diag["next_steps"], 1))
+        return {"answer": "\n".join(lines), "topic": "tune-bouwer"}
 
     def _recipes_answer(self, c) -> dict:
         return {"answer": "\n".join([

@@ -997,3 +997,83 @@ def test_process_root_reports_phase_transitions(service, tmp_path):
     assert "Scan afgerond" in joined
     assert "locaties verwerken" in joined
     assert "OLS-fase" in joined
+
+
+def test_tune_builder_diagnostics_reports_learning_state(service, pair, tmp_path):
+    """V8.11: diagnose zegt met cijfers waarom de bouwer (nog) niet bouwt —
+    en wat de volgende stap is."""
+    diag = service.tune_builder_diagnostics()
+    assert diag["confirmed_pairs"] >= 1
+    assert diag["ols_projects"] == 0
+    assert diag["next_steps"], "altijd minstens een status/stap-regel"
+    # met stage-label op de tuned-kant: recepten geteld
+    def fid(path):
+        return service.repo.db.rows(
+            "SELECT id FROM files WHERE source_path=?", (str(path.resolve()),))[0]["id"]
+    service.repo.update_metadata(fid(pair[2]), {"stage": "stage1"})
+    diag2 = service.tune_builder_diagnostics()
+    assert diag2["recipes"] >= 1
+    assert "stage1" in diag2["stages"]
+    assert any("Klaar om te bouwen" in step for step in diag2["next_steps"])
+
+
+def test_project_name_is_stage_label_evidence(service, tmp_path):
+    """V8.11: de OLS-projectnaam ('... VW Golf ... Stage 1....ols') telt als
+    expliciet label-bewijs voor de tuned-kant (na de versienaam)."""
+    import json as _json
+    project = tmp_path / "WinOLS 5 VW Golf 6 2.0 TDI Stage 1 project.ols"
+    project.write_bytes(b"OLS" + bytes([0]) + b"123456" + bytes([0]) + b"tuned"
+                        + bytes(64))
+    project_id = service.repo.import_project(project)
+    project_row = service.repo.db.rows(
+        "SELECT id, sha256 FROM winols_projects WHERE id=?", (project_id,))[0]
+    # tuned-bestand gekoppeld als ols-extract zonder versienaam
+    tuned_path = tmp_path / "extract_v1.bin"
+    tuned_path.write_bytes(b"\x00SW:TEST_SW HW:TEST_HW\x00" + bytes(range(256)) * 8)
+    tuned_id = service.repo.import_file(tuned_path, "tuned")
+    with service.repo.db.connect() as db:
+        db.execute("UPDATE files SET source_path=? WHERE id=?",
+                   (f"ols://{project_row['sha256']}/v1", tuned_id))
+        db.execute(
+            """INSERT INTO ols_version_binaries
+               (project_id, version_index, version_name, role, role_confidence,
+                complete, file_id, binary_sha256)
+               VALUES (?, 1, '', 'tuned', 100, 1, ?, ?)""",
+            (project_id, tuned_id, "x" * 64))
+    original_path = tmp_path / "extract_original.bin"
+    original_path.write_bytes(b"\x00SW:TEST_SW HW:TEST_HW\x00" + bytes(range(256)) * 8)
+    original_id = service.repo.import_file(original_path, "original")
+    pair_id = service.repo.pair(original_id, tuned_id, True)
+    recipes = service.tune_builder.recipes()
+    match = [r for r in recipes if r["pair_id"] == pair_id]
+    assert match, "paar moet een recept opleveren"
+    assert match[0]["stage"] == "stage1"  # uit de PROJECTNAAM
+
+
+def test_recipes_use_stored_diffs(service, pair, monkeypatch):
+    """V8.11 snelheid: als diffs al opgeslagen zijn, doet recipes() géén
+    nieuwe volledige diff meer."""
+    def fid(path):
+        return service.repo.db.rows(
+            "SELECT id FROM files WHERE source_path=?", (str(path.resolve()),))[0]["id"]
+    tuned_id = fid(pair[2])
+    service.repo.update_metadata(tuned_id, {"stage": "stage1"})
+    original_id = fid(pair[1])
+    pair_id = service.repo.db.rows(
+        "SELECT id FROM file_pairs WHERE original_file_id=? AND tuned_file_id=?",
+        (original_id, tuned_id))[0]["id"]
+    service.diff(pair_id)  # eenmalig: diffs-tabel gevuld
+    import app.service as service_mod
+
+    def explode(_pair_id):
+        raise AssertionError("recipes() mag geen nieuwe diff draaien")
+
+    monkeypatch.setattr(service_mod.Service, "diff", explode)
+    recipes = service.tune_builder.recipes()
+    assert any(r["pair_id"] == pair_id for r in recipes)
+
+
+def test_assistant_tune_learning_answer(service, pair):
+    answer = service.assistant.answer("de tunebuilder stages werken niet, heeft hij niet geleerd?")["answer"]
+    assert "Bevestigde paren" in answer
+    assert "Volgende stappen" in answer

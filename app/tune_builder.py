@@ -136,12 +136,19 @@ class TuneBuilder:
             if project_ref.startswith("ols://"):
                 sha_part = project_ref[6:].rsplit("/v", 1)[0]
                 rows = self.repo.db.rows(
-                    """SELECT v.version_name FROM ols_version_binaries v
+                    """SELECT v.version_name, p.filename AS project_name
+                       FROM ols_version_binaries v
                        JOIN winols_projects p ON p.id=v.project_id
                        WHERE p.sha256=? AND v.file_id=?""",
                     (sha_part, tuned["id"]))
-                if rows and rows[0]["version_name"]:
-                    label_sources.insert(0, rows[0]["version_name"])
+                if rows:
+                    # V8.11: óók de projectnaam is expliciete evidence — de
+                    # gebruiker noemt zijn projecten zelf "… VW Golf … Stage 1…".
+                    # Volgorde: versienaam > projectnaam > metadata > bestandsnaam.
+                    if rows[0]["version_name"]:
+                        label_sources.insert(0, rows[0]["version_name"])
+                    if rows[0]["project_name"]:
+                        label_sources.insert(1, rows[0]["project_name"])
             parsed = {"stage": None, "addons": [], "intensity": None}
             for source in label_sources:
                 candidate = parse_recipe_label(source or "")
@@ -151,7 +158,13 @@ class TuneBuilder:
                         parsed["addons"].append(addon)
                 parsed["intensity"] = parsed["intensity"] or candidate["intensity"]
             try:
-                regions = len(self.service.diff(pair["id"])["blocks"])
+                # V8.11: diff is al eenmalig opgeslagen (diffs-tabel) — tel
+                # die; alleen bij een nog-ongedifft paar één keer diff()
+                stored = self.repo.db.rows(
+                    "SELECT COUNT(*) AS n FROM diffs WHERE pair_id=?",
+                    (pair["id"],))[0]["n"]
+                regions = stored if stored else \
+                    len(self.service.diff(pair["id"])["blocks"])
             except (OSError, ValueError):
                 continue
             recipes.append({

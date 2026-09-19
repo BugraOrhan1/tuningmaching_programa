@@ -1101,6 +1101,62 @@ class Service(ServiceV3Mixin):
     # ------------------------------------------------------------------
     # V7: Tune Bouwer — origineel erin, kandidaat terug (stage + add-ons)
     # ------------------------------------------------------------------
+    def tune_builder_diagnostics(self) -> dict:
+        """Waarom kan de Tune Bouwer (nog) niet bouwen? V8.11: zegt het met
+        echte cijfers uit deze installatie + concrete volgende stap."""
+        def one(sql: str, args: tuple = ()) -> int:
+            return self.repo.db.rows(sql, args)[0]["n"]
+        confirmed = one("SELECT COUNT(*) AS n FROM file_pairs WHERE confirmed=1")
+        unconfirmed = one("SELECT COUNT(*) AS n FROM file_pairs WHERE confirmed=0")
+        ols_projects = one("SELECT COUNT(*) AS n FROM winols_projects")
+        ols_roles = {"original": 0, "tuned": 0, "unknown": 0}
+        for row in self.repo.db.rows(
+                "SELECT role, COUNT(*) AS n FROM ols_version_binaries GROUP BY role"):
+            if row["role"] in ols_roles:
+                ols_roles[row["role"]] = row["n"]
+        ols_unknown_objects = one(
+            "SELECT COUNT(*) AS n FROM ols_objects WHERE role='unknown'")
+        recipes = self.tune_builder.recipes()
+        stages = sorted({r["stage"] for r in recipes if r["stage"]})
+        addons = sorted({a for r in recipes for a in r["addons"]})
+        pairs_with_stage = one(
+            """SELECT COUNT(*) AS n FROM file_pairs fp
+               JOIN files f ON f.id=fp.tuned_file_id
+               WHERE fp.confirmed=1 AND (f.stage LIKE '%stage%'
+                  OR f.filename LIKE '%stage%'
+                  OR f.source_path LIKE 'ols://%')""")
+        unknowns = one("SELECT COUNT(*) AS n FROM files WHERE file_type='unknown'")
+        steps = []
+        if confirmed == 0 and unconfirmed == 0:
+            steps.append("Er zijn nog géén paren: importeer/verwerk OLS-projecten "
+                         "(stap 2 op het Dashboard) of maak handmatig een paar op "
+                         "de Original/Tuned Pairs-pagina.")
+        if unconfirmed:
+            steps.append(f"{unconfirmed} paren wachten op jou: Review-center → "
+                         "'Onbevestigde paren' → bevestigen. Alléén bevestigde "
+                         "paren leert de bouwer (bewijsregel).")
+        if confirmed and pairs_with_stage == 0:
+            steps.append("Bevestigde paren hebben nog geen stage-label: geef het "
+                         "tuned-bestand een naam of metadata mét 'Stage 1'/'Stage "
+                         "2' (Files-pagina), of hernoem de OLS-versie in WinOLS — "
+                         "expliciete tekst is het bewijs.")
+        if ols_roles["unknown"] and not recipes:
+            steps.append(f"{ols_roles['unknown']} OLS-versies hebben een onbekende "
+                         "rol (unknown): geef versies expliciete namen met 'orig'/"
+                         "'original' en 'tuned'/'stage 1' in WinOLS, of markeer ze "
+                         "handmatig op de WinOLS-pagina — dan ontstaan automatisch "
+                         "bevestigde paren.")
+        if recipes:
+            steps.append(f"Klaar om te bouwen: {len(recipes)} recepten "
+                         f"(stages: {', '.join(stages) or '—'}; add-ons: "
+                         f"{', '.join(addons) or '—'}).")
+        return {"confirmed_pairs": confirmed, "unconfirmed_pairs": unconfirmed,
+                "pairs_with_stage_label": pairs_with_stage,
+                "ols_projects": ols_projects, "ols_version_roles": ols_roles,
+                "ols_unknown_objects": ols_unknown_objects,
+                "unknown_files": unknowns, "recipes": len(recipes),
+                "stages": stages, "addons": addons, "next_steps": steps}
+
     def tune_recipes(self) -> dict:
         """Welke stage/add-on-recepten zijn bouwbaar volgens bevestigde kennis?"""
         return self.tune_builder.available_options()

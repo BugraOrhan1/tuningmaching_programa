@@ -2167,6 +2167,9 @@ class MainWindow(QMainWindow):
         self.tune_transfer.setChecked(True)
         layout.addWidget(self.tune_transfer)
         self.button(layout, 'Recepten vernieuwen', self.refresh_tune_builder)
+        diagnose_btn = QPushButton('Diagnose: waarom kan hij (nog) niet bouwen?')
+        diagnose_btn.clicked.connect(self.tune_builder_diagnose)
+        layout.addWidget(diagnose_btn)
         self.button(layout, 'Kandidaat bouwen', self.run_tune_build)
         self.tune_output = QLabel('Kies een origineel en een recept. De builder '
                                   'gebruikt alléén bevestigde kennis.')
@@ -2182,6 +2185,31 @@ class MainWindow(QMainWindow):
     def refresh_tune_builder(self):
         self.run_job(lambda progress: self.service.tune_recipes(),
                      callback=self._tune_recipes_loaded, job_name='recepten ophalen')
+
+    def tune_builder_diagnose(self):
+        """V8.11: waarom kan de bouwer (nog) niet bouwen — met echte cijfers
+        uit deze installatie en de concrete volgende stap."""
+        def ready(diag):
+            def apply():
+                lines = [f"Bevestigde paren: {diag['confirmed_pairs']} · "
+                         f"te reviewen: {diag['unconfirmed_pairs']} · "
+                         f"met stage-label: {diag['pairs_with_stage_label']}",
+                         f"OLS-projecten: {diag['ols_projects']} · versierollen: "
+                         f"original {diag['ols_version_roles']['original']} / "
+                         f"tuned {diag['ols_version_roles']['tuned']} / "
+                         f"unknown {diag['ols_version_roles']['unknown']} · "
+                         f"unknown-objecten: {diag['ols_unknown_objects']}",
+                         f"Aangeleerde recepten: {diag['recipes']} "
+                         f"(stages: {', '.join(diag['stages']) or '—'} · "
+                         f"add-ons: {', '.join(diag['addons']) or '—'})",
+                         "", "Volgende stappen:"]
+                lines.extend(f"  {index}. {step}"
+                             for index, step in enumerate(diag['next_steps'], 1))
+                QMessageBox.information(self, 'Tune Bouwer diagnose',
+                                        '\n'.join(lines))
+            self.safe(apply)
+        self.run_job(lambda progress: self.service.tune_builder_diagnostics(),
+                     callback=ready, job_name='tune bouwer diagnose')
 
     def _tune_recipes_loaded(self, options):
         def apply():
@@ -2199,10 +2227,17 @@ class MainWindow(QMainWindow):
             self.tune_intensity.addItem('(beschikbaar)', None)
             for intensity in options['intensities']:
                 self.tune_intensity.addItem(f'{intensity}%', intensity)
-            self.tune_output.setText(
-                f"{len(options['recipes'])} bouwbare recepten · stages: "
-                f"{', '.join(options['stages']) or '—'} · add-ons: "
-                f"{', '.join(options['addons']) or '—'}\n{options['note']}")
+            if options['recipes']:
+                self.tune_output.setText(
+                    f"{len(options['recipes'])} bouwbare recepten · stages: "
+                    f"{', '.join(options['stages']) or '—'} · add-ons: "
+                    f"{', '.join(options['addons']) or '—'}\n{options['note']}")
+            else:
+                self.tune_output.setText(
+                    "Nog 0 bouwbare recepten. De bouwer leert alléén van "
+                    "BEVESTIGDE paren met stage/add-on-labels (bewijsregel). "
+                    "Klik op 'Diagnose: waarom kan hij (nog) niet bouwen?' "
+                    "hierboven voor jouw cijfers en de exacte volgende stap.")
         self.safe(apply)
 
     def _selected_tune_addons(self) -> list:
