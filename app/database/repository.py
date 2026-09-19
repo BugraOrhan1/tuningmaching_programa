@@ -1,6 +1,7 @@
 """Managed immutable snapshots, searchable metadata, explicit pair review."""
 import hashlib
 import json
+import numpy as np
 import logging
 import os
 import re
@@ -97,6 +98,30 @@ class Repository(RepositoryV3Mixin):
             sql += " LIMIT ?"
             args.append(effective)
         return self.db.rows(sql, tuple(args))
+
+    def sample_payload(self, file_id: int, file_size: int,
+                       chunks: int = 8, chunk: int = 8192) -> bytes:
+        """Verspreide steekproef uit de beheerkopie (V8.9 snelheid): chunks x
+        chunk bytes gelijkmatig over het bestand via seeks — goedkoop
+        voorproeven vóór een volledige compare. Leesfout -> lege bytes
+        (aanroeper doet dan gewoon de volledige compare)."""
+        try:
+            row = self.file(file_id)
+            path = Path(row["filepath"])
+            size = path.stat().st_size
+            if size <= chunk * chunks:
+                with path.open("rb") as stream:
+                    return stream.read()
+            step = size // chunks
+            parts = []
+            with path.open("rb") as stream:
+                for index in range(chunks):
+                    start = min(index * step, max(size - chunk, 0))
+                    stream.seek(start)
+                    parts.append(stream.read(chunk))
+            return b"".join(parts)
+        except (OSError, ValueError):
+            return b""
 
     def files_by_kind(self, kind: str, limit: int = 500) -> list[dict]:
         """V8.8.1: combo-lijsten — geïndexeerde kind-query i.p.v. alle files
@@ -1001,8 +1026,17 @@ class Repository(RepositoryV3Mixin):
                                "reason": f"beheerde kopie onleesbaar: {exc}"})
                 continue
             best_by_type = {}
+            row_sample = self.sample_payload(row["id"], row["file_size"])
             for item in same_size:
                 try:
+                    # V8.9 voorproefje: zie suggest_binary_relationships
+                    item_sample = self.sample_payload(item["id"], item["file_size"])
+                    if row_sample and item_sample and \
+                            len(item_sample) == len(row_sample):
+                        equal = np.frombuffer(row_sample, dtype=np.uint8) == \
+                            np.frombuffer(item_sample, dtype=np.uint8)
+                        if float(np.count_nonzero(equal)) / len(equal) < 0.70:
+                            continue
                     evidence = compare(data, self.data(item["id"]), row, item,
                                        self.config["block_size"])
                 except (OSError, ValueError):
@@ -1202,11 +1236,14 @@ class Repository(RepositoryV3Mixin):
         """
         if limit_per_tuned < 1:
             raise ValueError("limit_per_tuned must be positive")
-        originals = [row for row in self.files() if row["file_type"] == "original"]
-        tuned = [row for row in self.files() if row["file_type"] == "tuned"]
+        # V8.9: kandidaten via geïndexeerde size-query (geen cap op de
+        # nieuwste 400; alle originals van die grootte komen in aanmerking)
+        tuned = self.files_by_kind("tuned", limit=400)
         proposals = []
         for tuned_row in tuned:
-            compatible = [row for row in originals if row["file_size"] == tuned_row["file_size"]]
+            compatible = self.db.rows(
+                """SELECT * FROM files WHERE file_type='original' AND file_size=?
+                   ORDER BY id DESC""", (tuned_row["file_size"],))
             if not compatible:
                 continue
 
@@ -1217,7 +1254,21 @@ class Repository(RepositoryV3Mixin):
             compatible.sort(key=metadata_rank, reverse=True)
             ranked = []
             tuned_data = self.data(tuned_row["id"])
+            tuned_sample = self.sample_payload(tuned_row["id"], tuned_row["file_size"])
             for original_row in compatible[:max(limit_per_tuned * 4, 20)]:
+                # V8.9 voorproefje: 8 verspreide 8KB-monsters; een kandidaat
+                # met <70% sample-gelijkheid kan de vereiste score (>=90 voor
+                # auto-bevestiging, >=99.5 voor classificatie) niet halen
+                # (totale score <60 -> incompatible_base). Voorkomt de
+                # volledige 2-4MB compare per kandidaat.
+                original_sample = self.sample_payload(
+                    original_row["id"], original_row["file_size"])
+                if tuned_sample and original_sample and \
+                        len(original_sample) == len(tuned_sample):
+                    equal = np.frombuffer(original_sample, dtype=np.uint8) == \
+                        np.frombuffer(tuned_sample, dtype=np.uint8)
+                    if float(np.count_nonzero(equal)) / len(equal) < 0.70:
+                        continue
                 original_data = self.data(original_row["id"])
                 evidence = compare(original_data, tuned_data, original_row, tuned_row,
                                    self.config["block_size"])

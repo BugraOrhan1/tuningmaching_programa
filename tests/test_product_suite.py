@@ -808,3 +808,75 @@ def test_classify_exact_sha_via_sql_join(service, tmp_path):
     assert hit["kind"] == "original"
     assert hit["reason"] == "exacte SHA256-overeenkomst"
     assert service.repo.file(kopie_id)["sha256"] == service.repo.file(original_id)["sha256"]
+
+
+def test_sample_prefilter_skips_bad_candidates(service, tmp_path):
+    """V8.9: kandidaten met <70% sample-gelijkheid krijgen geen volledige
+    compare meer; het goede paar komt er nog steeds uit."""
+    import app.database.repository as repo_mod
+    source = tmp_path / "PreSrc"
+    source.mkdir()
+    base = bytes(range(256)) * 512            # 128 KB basis
+    good = bytearray(base); good[5000:5100] = b"\xAA" * 100   # ~0.08% anders
+    bad = bytearray(base)
+    for start in range(0, len(bad), 10):       # ~40% anders
+        bad[start:start + 4] = b"\xBB" * 4
+    (source / "ORI_good.bin").write_bytes(bytes(good))
+    (source / "ORI_bad.bin").write_bytes(bytes(bad))
+    tuned_path = source / "MOD_tuned_stage1.bin"
+    tuned = bytearray(good); tuned[20000:20100] = b"\xCC" * 100
+    tuned_path.write_bytes(bytes(tuned))
+    service.repo.import_file(source / "ORI_good.bin", "original")
+    service.repo.import_file(source / "ORI_bad.bin", "original")
+    service.repo.import_file(tuned_path, "tuned")
+    calls = {"n": 0}
+    real_compare = repo_mod.compare
+
+    def counting(*args, **kwargs):
+        calls["n"] += 1
+        return real_compare(*args, **kwargs)
+
+    service.repo.compare = staticmethod(counting)
+    try:
+        proposals = service.repo.suggest_binary_relationships()
+    finally:
+        del service.repo.compare
+    good_row = next(row for row in service.repo.files(limit=0)
+                    if row["filename"] == "ORI_good.bin")
+    assert any(p["original_id"] == good_row["id"] for p in proposals)
+    assert calls["n"] <= 2  # slechte kandidaat overgeslagen door de sample
+
+
+def test_stage_combo_labels_and_research_tokens():
+    """V8.9 (research): 'Stage 1+2' = hogere stage; delete-varianten herkend."""
+    from app.tune_builder import parse_recipe_label as parse_labels
+    assert parse_labels("Stage 1+2")["stage"] == "stage2"
+    assert parse_labels("Stage 1 & 2")["stage"] == "stage2"
+    assert parse_labels("Stage 1+")["stage"] == "stage1"
+    assert "dpf_off" in parse_labels("DPF delete")["addons"]
+    assert "egr_off" in parse_labels("EGR delete")["addons"]
+    assert "adblue_off" in parse_labels("NOx off / SCR delete")["addons"]
+
+
+def test_stage1_reference_in_build_report(service, pair):
+    """V8.9: het bouwrapport noemt de referentiekaartklassen, expliciet
+    gemarkeerd als algemene kennis (géén bewijs)."""
+    def fid(path):
+        return service.repo.db.rows(
+            "SELECT id FROM files WHERE source_path=?", (str(path.resolve()),))[0]["id"]
+    service.repo.update_metadata(fid(pair[2]), {"stage": "stage1"})
+    result = service.build_tune(original_file_id=fid(pair[1]), stage="stage1",
+                                dry_run=True)
+    assert result["status"] == "dry_run"
+    assert any("REFERENTIE" in warning for warning in result["warnings"])
+    assert any("torque limiter" in warning.lower() for warning in result["warnings"])
+
+
+def test_tuning_knowledge_module():
+    from app.analysis.tuning_knowledge import (STAGE1_MAP_CLASSES, DELETES,
+                                               HOW_TUNING_WORKS,
+                                               stage1_explanation)
+    assert "torque limiter-maps" in STAGE1_MAP_CLASSES["diesel"][0].lower()
+    assert "checksum" in HOW_TUNING_WORKS[2].lower()
+    text = stage1_explanation("benzine")
+    assert "REFERENTIE" in text and "boost" in text.lower()

@@ -28,6 +28,31 @@ Datum: 2026-09-10 (bijgewerkt na V3-ronde)
   update, exact-SHA-join, GUI-snelpaden, storage-cache, advies-async,
   combo-begrenzing.
 
+## V8.9-status (Research-verrijking + sample-prefilter) — actueel
+
+**190 passed / 1 guard-skip groen.**
+
+- Web-research (file-services + tuning-documentatie): stage-1 wijzigt
+  torque limiters, drivers wish, inspuit-hoeveelheid/timing, boost
+  targets, rail pressure, smoke limiter, lambda; "Stage 1+" is een eigen
+  niveau; "Stage 1+2" betekent het hogere niveau; deletes = DPF/EGR/
+  AdBlue(SCR/NOx)/OPF/DTC. Verwerkt in `app/analysis/tuning_knowledge.py`
+  (STAGE1_MAP_CLASSES diesel/benzine, HOW_TUNING_WORKS, DELETES) —
+  expliciet REFERENTIE-kennis, nooit bewijs.
+- Tune Bouwer-rapport + handleiding: referentie-sectie "hoe tuning
+  werkt" (lezen → maps wijzigen → CHECKSUMS corrigeren → flashen; app
+  doet stap 2 als bewezen kandidaat).
+- Label-parser: "Stage 1+2"/"Stage 1 & 2" → stage2 (max-regel);
+  tokens: dpf/egr/adblue delete + "weg", NOx off, SCR delete.
+- **Snelheid:** `sample_payload` (8x8KB seeks); sample-prefilter (<70%)
+  in suggest_binary_relationships + auto_classify loop — geen volledige
+  compare meer voor kansloze kandidaten; suggest gebruikt nu
+  geïndexeerde size-query (alle originals van die grootte, niet alleen
+  de nieuwste 400). Benchmark: 6x20MB kandidaten in 0,85s (5 geskipt,
+  goede gevonden).
+- Tests: prefilter-skip + juiste paar, stage-combo, research-tokens,
+  referentie in rapport, kennis-module.
+
 ## V8.8.1-status (GUI-vrij bij opstart + OLS parallel + classificatie-SQL) — actueel
 
 **186 passed / 1 guard-skip groen.**

@@ -146,6 +146,14 @@ COD/ACT en back-to-stock. De planner kiest het beste dekkende recept en
 ketent bevestigde recepten voor ontbrekende add-ons; elke regio alleen met
 regionaal bewijs (≥98%), overlappen worden nooit dubbel toegepast. Output = nieuw bestand +
 waarschuwingen (checksums NIET gecorrigeerd — eerst WinOLS-controle).
+<b>Hoe tuning werkt</b> (referentie): 1) origineel uitlezen (OBD/bench,
+1–8 MB) → 2) maps wijzigen — bij stage-1 diesel o.a. torque limiters,
+drivers wish, inspuithoeveelheid/timing, boost targets, rail pressure,
+smoke limiter, lambda; bij benzine o.a. boost, fuelling/lambda,
+ontstekingstiming, torque limiters → 3) <u>checksums corrigeren</u>
+(verplicht, anders weigert de ECU het bestand) → 4) flashen. Deze app
+doet stap 2 als bewezen kandidaat (nieuw bestand + rapport) en laat
+stap 1/3/4 bewust aan jou.<br>
 <b>Kennis-overdracht</b> (standaard aan): geen eigen tuned-bestand van die
 auto? Dan past de bouwer consistente wijzigingen toe die bij ≥2 bevestigde
 paren van vergelijkbare auto's (zelfde ECU + softwarefamilie) identiek

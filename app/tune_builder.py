@@ -40,9 +40,11 @@ KNOWN_ADDONS = ("pops_bang", "vmax", "dpf_off", "egr_off", "adblue_off",
 ADDON_TOKENS = {
     "pops_bang": ("pops", "bang", "pops and bang", "pops&bang", "crackle"),
     "vmax": ("vmax", "v-max"),
-    "dpf_off": ("dpf", "dpf off", "dpf-off", "roetfilter", "roet filter"),
-    "egr_off": ("egr", "egr off", "egr-off"),
-    "adblue_off": ("adblue", "scr off"),
+    "dpf_off": ("dpf", "dpf off", "dpf-off", "dpf delete", "dpf weg",
+                "roetfilter", "roet filter"),
+    "egr_off": ("egr", "egr off", "egr-off", "egr delete", "egr weg"),
+    "adblue_off": ("adblue", "scr off", "scr off", "scr delete", "nox off",
+                   "nox off", "adblue delete", "adblue weg"),
     "speed_limit_off": ("speed limit", "vmax off", "limiter off"),
     "decat": ("decat", "de-cat", "kat off", "katalysator off", "catalytic off"),
     "antilag": ("antilag", "anti-lag", "anti lag"),
@@ -70,6 +72,8 @@ ADDON_TOKENS = {
     "back_to_stock": ("back 2 stock", "back to stock", "back2stock",
                       "origineel terugzetten"),
 }
+from app.analysis.tuning_knowledge import stage1_explanation
+
 STAGE_PATTERN = re.compile(r"stage\s*([1-5])\s*\+?", re.IGNORECASE)
 INTENSITY_PATTERN = re.compile(r"(?:^|[\s\-])(\d{2,3})\s*%?(?:$|[\s\-)])")
 
@@ -78,8 +82,14 @@ def parse_recipe_label(label: str) -> dict:
     """Stage/add-ons/intensiteit uit een expliciete label (versienaam of
     bestandsnaam). Alleen expliciete tekst is bewijs; niets raden."""
     text = (label or "").casefold()
-    stage_match = STAGE_PATTERN.search(text)
-    stage = f"stage{stage_match.group(1)}" if stage_match else None
+    # V8.9: "Stage 1+2" / "Stage 1 & 2" = in de praktijk het HOGERE niveau
+    # (bestand is stage 2); "Stage 1+" (plus-niveau) blijft stage1.
+    combo = re.search(r"stage\s*([1-5])\s*(?:\+|&|en|and)\s*([1-5])", text)
+    if combo:
+        stage = f"stage{max(int(combo.group(1)), int(combo.group(2)))}"
+    else:
+        stage_match = STAGE_PATTERN.search(text)
+        stage = f"stage{stage_match.group(1)}" if stage_match else None
     addons = []
     for addon, tokens in ADDON_TOKENS.items():
         if any(token in text for token in tokens):
@@ -329,6 +339,10 @@ class TuneBuilder:
             "provenance": provenance,
             "warnings": [
                 "KANDIDAAT — NOT VERIFIED — FOR TECHNICIAN REVIEW.",
+                stage1_explanation("benzine" if any(
+                    keyword in (target.get("filename") or "").casefold()
+                    for keyword in ("tfsi", "tsi", "gti", "gtd", "petrol", "benzine"))
+                    else "diesel"),
                 "ECU-checksums zijn NIET gecorrigeerd: controleer/corrigeer in "
                 "WinOLS vóór enig gebruik; het bestand is niet flash-klaar.",
                 "Gebouwd uit bevestigde kennis met regionaal bewijs, maar nooit "
