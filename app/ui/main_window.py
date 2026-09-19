@@ -102,7 +102,8 @@ toont alles (26). Je keuze blijft bewaard bij het herstarten.<br>
 <b>Library (V5)</b> — registreer hele bronmappen/schijven (D:\Tuning, E:\WinOLS…).
 Bovenaan staat de <b>Snelheid</b>-keuze: LOW = rustig · BALANCED = normaal ·
 HIGH = snel · MAX = vol gas (SSD/NVMe + veel vrije RAM). Geldt direct voor
-nieuwe scans en analyses; staan geschaald naar het aantal CPU-kernen van
+nieuwe scans, analyses én OLS-verwerking (bij HIGH/MAX worden meerdere
+OLS-bestanden parallel verwerkt); geschaald naar het aantal CPU-kernen van
 jouw PC.
 Bestanden blijven op hun plek; de app indexeert pad + SHA256. Gebouwd voor
 10TB+: <u>ongewijzigde bestanden worden nooit opnieuw gelezen</u> (2e scan =
