@@ -1,7 +1,11 @@
 """Managed immutable snapshots, searchable metadata, explicit pair review."""
+import hashlib
 import json
+import numpy as np
 import logging
+import os
 import re
+import zlib
 from pathlib import Path
 from app.database.database import Database
 from app.analysis.binary_reader import read_binary
@@ -15,6 +19,8 @@ from app.analysis.signatures import discover_candidate_signatures
 from app.analysis.signatures import matches_signature
 from app.winols.ols_reader import read_ols, inspect_ols
 from app.winols.ols_importer import OlsImporter
+from app.winols.ols_structure import parse_ols_structure
+from app.database.knowledge_repo import RepositoryV3Mixin
 
 LOG = logging.getLogger(__name__)
 
@@ -29,7 +35,29 @@ def pair_key(filename: str) -> str:
     return re.sub(r"[^a-z0-9]", "", stem)
 
 
-class Repository:
+def _sanitize_name(value: str) -> str:
+    """Leesbare veilige bestandsnaam-component; leeg → leeg."""
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", value or "").strip("_.")
+    return cleaned
+
+
+def ols_extract_filename(project_name: str, version_name: str | None,
+                         display_index: int, source_filename: str | None) -> str:
+    """Betekenisvolle naam voor een geëxtraheerde OLS-versie-binary:
+    <project>_v<index>[_<versienaam>].bin. Een échte bronbestandsnaam uit het
+    project wint altijd; zonder projectnaam valt het terug op de oude vorm."""
+    if source_filename:
+        return source_filename
+    raw_stem = Path(project_name).stem if (project_name and Path(project_name).suffix) else project_name
+    stem = _sanitize_name(raw_stem) or "ols_project"
+    parts = [stem, f"v{display_index}"]
+    version = _sanitize_name(version_name or "")
+    if version:
+        parts.append(version)
+    return "_".join(parts) + ".bin"
+
+
+class Repository(RepositoryV3Mixin):
     def __init__(self, config: dict):
         self.config = config
         self.root = Path(config["data_dir"])
@@ -38,11 +66,69 @@ class Repository:
         for name in ("originals", "tuned", "unknown", "winols_projects", "reports"):
             (self.root / name).mkdir(parents=True, exist_ok=True)
 
-    def files(self, query: str = "") -> list[dict]:
+    FILE_PAGE_LIMIT = 400  # GUI laadt pagina's; zoeken verfijnt (10TB-proof)
+
+    def files_count(self, query: str = "") -> int:
+        if not query:
+            # V8.8.1 snelle pad: zonder zoekterm geen LIKE-scan over 450k rijen
+            return self.db.rows("SELECT COUNT(*) AS n FROM files")[0]["n"]
         columns = ("filename", "file_type", *FIELDS)
         where = " OR ".join(f"coalesce({c},'') LIKE ? ESCAPE '\\'" for c in columns)
         term = '%' + query.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') + '%'
-        return self.db.rows(f"SELECT * FROM files WHERE {where} ORDER BY id DESC", (term,) * len(columns))
+        rows = self.db.rows(f"SELECT COUNT(*) AS n FROM files WHERE {where}",
+                            (term,) * len(columns))
+        return rows[0]["n"]
+
+    def files(self, query: str = "", limit: int | None = None) -> list[dict]:
+        effective = self.FILE_PAGE_LIMIT if limit is None else limit
+        if not query:
+            # V8.8.1 snelle pad: geen LIKE-scan wanneer er niet gezocht wordt
+            sql = "SELECT * FROM files ORDER BY id DESC"
+            args: list = []
+            if effective:
+                sql += " LIMIT ?"
+                args.append(effective)
+            return self.db.rows(sql, tuple(args))
+        columns = ("filename", "file_type", *FIELDS)
+        where = " OR ".join(f"coalesce({c},'') LIKE ? ESCAPE '\\'" for c in columns)
+        term = '%' + query.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') + '%'
+        sql = f"SELECT * FROM files WHERE {where} ORDER BY id DESC"
+        args = [term] * len(columns)
+        if effective:
+            sql += " LIMIT ?"
+            args.append(effective)
+        return self.db.rows(sql, tuple(args))
+
+    def sample_payload(self, file_id: int, file_size: int,
+                       chunks: int = 8, chunk: int = 8192) -> bytes:
+        """Verspreide steekproef uit de beheerkopie (V8.9 snelheid): chunks x
+        chunk bytes gelijkmatig over het bestand via seeks — goedkoop
+        voorproeven vóór een volledige compare. Leesfout -> lege bytes
+        (aanroeper doet dan gewoon de volledige compare)."""
+        try:
+            row = self.file(file_id)
+            path = Path(row["filepath"])
+            size = path.stat().st_size
+            if size <= chunk * chunks:
+                with path.open("rb") as stream:
+                    return stream.read()
+            step = size // chunks
+            parts = []
+            with path.open("rb") as stream:
+                for index in range(chunks):
+                    start = min(index * step, max(size - chunk, 0))
+                    stream.seek(start)
+                    parts.append(stream.read(chunk))
+            return b"".join(parts)
+        except (OSError, ValueError):
+            return b""
+
+    def files_by_kind(self, kind: str, limit: int = 500) -> list[dict]:
+        """V8.8.1: combo-lijsten — geïndexeerde kind-query i.p.v. alle files
+        laden en in Python filteren (was 3x de hele tabel per refresh)."""
+        return self.db.rows(
+            "SELECT * FROM files WHERE file_type=? ORDER BY id DESC LIMIT ?",
+            (kind, limit))
 
     def file(self, file_id: int) -> dict:
         rows = self.db.rows("SELECT * FROM files WHERE id=?", (file_id,))
@@ -52,14 +138,26 @@ class Repository:
 
     def data(self, file_id: int) -> bytes:
         row = self.file(file_id)
+        if not Path(row["filepath"]).exists():
+            raise OSError(
+                f"Beheerde kopie van '{row['filename']}' ontbreekt op schijf "
+                f"({row['filepath']}). Dit gebeurt bij een database die van een "
+                f"andere computer komt. Importeer het bronbestand opnieuw "
+                f"(bronpad: {row['source_path']}) of gebruik Library-mode, waar "
+                f"bestanden op hun eigen plek blijven staan.")
         data = read_binary(row["filepath"], self.config["max_file_mb"])
         if hashes(data)["sha256"] != row["sha256"]:
             raise ValueError(f"Integriteitsfout in beheerde kopie: {row['filename']}")
         return data
 
-    def projects(self, query: str = "") -> list[dict]:
+    def projects(self, query: str = "", limit: int = 0) -> list[dict]:
         term = '%' + query.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') + '%'
-        projects = self.db.rows("SELECT * FROM winols_projects WHERE filename LIKE ? ESCAPE '\\' OR source_path LIKE ? ESCAPE '\\' ORDER BY id DESC", (term, term))
+        sql = "SELECT * FROM winols_projects WHERE filename LIKE ? ESCAPE '\\' OR source_path LIKE ? ESCAPE '\\' ORDER BY id DESC"
+        args = [term, term]
+        if limit:
+            sql += " LIMIT ?"
+            args.append(limit)
+        projects = self.db.rows(sql, tuple(args))
         for project in projects:
             metadata = json.loads(project["project_metadata"])
             project["suggested_type"] = metadata.get("suggested_type", "unknown")
@@ -83,10 +181,98 @@ class Repository:
         row = self.project(project_id)
         return self.ols_importer.extract_project_structure(row["filepath"], self.config["max_file_mb"])
 
+    def reparse_project(self, project_id: int) -> dict:
+        """Her-interpretatie zonder data-verlies (§19): leest de bekende
+        projectbestanden opnieuw (read-only), vergelijkt met de opgeslagen
+        raw evidence en registreert de nieuwe parser-versie. Oude records
+        blijven bewaard; bronbestanden worden nooit gewijzigd."""
+        from app.winols.ols_reader import PARSER_VERSION, inspect_ols
+        from app.winols.ols_structure import parse_ols_structure
+        rows = self.db.rows("SELECT * FROM winols_projects WHERE id=?", (project_id,))
+        if not rows:
+            raise ValueError("Onbekend project")
+        project = rows[0]
+        path = Path(project["filepath"])
+        data = path.read_bytes()
+        current_sha = hashes(data)["sha256"]
+        if current_sha != project["sha256"]:
+            raise ValueError("Projectbestand is gewijzigd sinds de laatste import")
+        before_records = self.db.rows(
+            "SELECT COUNT(*) AS n FROM ols_records WHERE project_id=?",
+            (project_id,))[0]["n"]
+        before_maps = self.db.rows(
+            "SELECT COUNT(*) AS n FROM ols_map_objects WHERE project_id=?",
+            (project_id,))[0]["n"]
+        details = inspect_ols(data)
+        structure = parse_ols_structure(data)
+        drift = {
+            "parser_version": PARSER_VERSION,
+            "records_before": before_records,
+            "records_detected": len(details.get("records", [])) or None,
+            "maps_detected": len(structure.get("maps", [])),
+            "maps_before": before_maps,
+            "structure_signature_unchanged": (
+                structure.get("format_signature") == "WinOLS File"),
+            "reparse_note": "raw evidence en oude records blijven bewaard; "
+                            "vergelijking bewaard in project_metadata.",
+        }
+        metadata = json.loads(project["project_metadata"])
+        metadata.setdefault("reparse", []).append(drift)
+        with self.db.connect() as db:
+            db.execute(
+                """UPDATE winols_projects SET project_metadata=?, parser_version=?
+                   WHERE id=?""",
+                (json.dumps(metadata, ensure_ascii=False), PARSER_VERSION, project_id))
+        self.audit("reparse_project", "winols_project", project_id,
+                   after={"parser_version": PARSER_VERSION, "drift": drift})
+        return {"project_id": project_id, **drift,
+                "source_unchanged": True}
+
+    def add_readout(self, customer: str, vehicle: str, stage: str = "",
+                    technician: str | None = None, readout_date: str | None = None,
+                    file_id: int | None = None, project_id: int | None = None,
+                    note: str = "") -> int:
+        with self.db.connect() as db:
+            cursor = db.execute(
+                """INSERT INTO readouts(customer,vehicle,stage,technician,
+                   readout_date,file_id,project_id,note) VALUES (?,?,?,?,?,?,?,?)""",
+                (customer, vehicle, stage, technician, readout_date, file_id,
+                 project_id, note))
+            return cursor.lastrowid
+
+    def readouts(self, query: str = "") -> list[dict]:
+        like = f"%{query}%"
+        return self.db.rows(
+            """SELECT * FROM readouts WHERE customer LIKE ? OR vehicle LIKE ?
+               OR stage LIKE ? ORDER BY id DESC LIMIT 200""", (like, like, like))
+
     def import_project(self, path: Path) -> int:
         path = path.resolve()
+        # V8.8 snelheid: ongewijzigd OLS (zelfde size+mtime, zelfde parser)
+        # wordt NIET opnieuw gelezen/gehasht/geparst — bij 4000+ OLS-bestanden
+        # was dat de grootste vertraging in "ALLES automatisch afhandelen".
+        try:
+            stat = path.stat()
+        except OSError as exc:
+            raise ValueError(f"OLS niet leesbaar: {path}") from exc
+        from app.winols.ols_reader import PARSER_VERSION as _parser_version
+        existing = self.db.rows(
+            "SELECT id, file_size, parser_version, project_metadata "
+            "FROM winols_projects WHERE source_path=? ORDER BY id DESC LIMIT 1",
+            (str(path),))
+        if existing and existing[0]["file_size"] == stat.st_size \
+                and (existing[0]["parser_version"] or "") == _parser_version:
+            try:
+                stored_mtime = json.loads(existing[0]["project_metadata"] or "{}").get("source_mtime")
+            except (TypeError, ValueError):
+                stored_mtime = None
+            if stored_mtime == stat.st_mtime:
+                return existing[0]["id"]
         data = read_ols(path, self.config["max_file_mb"])
         details = inspect_ols(data)
+        details["source_mtime"] = stat.st_mtime
+        structure = parse_ols_structure(data)
+        maps_by_offset = {item["offset"]: item for item in structure.get("maps", [])}
         digest = details.pop("hashes")
         target = self.root / "winols_projects" / (digest["sha256"] + ".ols")
         try:
@@ -100,6 +286,9 @@ class Repository:
         with self.db.connect() as db:
             db.execute(f"INSERT OR IGNORE INTO winols_projects ({','.join(row)}) VALUES ({','.join('?' for _ in row)})", tuple(row.values()))
             project_id = db.execute("SELECT id FROM winols_projects WHERE source_path=? AND sha256=?", (str(path), digest["sha256"])).fetchone()[0]
+            from app.winols.ols_reader import PARSER_VERSION
+            db.execute("UPDATE winols_projects SET parser_version=? WHERE id=?",
+                       (PARSER_VERSION, project_id))
             for obj in details.get("objects", []):
                     db.execute(
                     """INSERT INTO ols_objects
@@ -122,6 +311,12 @@ class Repository:
                      obj["detection_method"], json.dumps(obj.get("evidence", []), ensure_ascii=False)),
                 )
             forensic = details.get("forensic", {})
+            db.execute("DELETE FROM ols_evidence WHERE project_id=?", (project_id,))
+            db.execute("DELETE FROM ols_map_objects WHERE project_id=?", (project_id,))
+            db.execute("DELETE FROM ols_binaries WHERE project_id=?", (project_id,))
+            db.execute("DELETE FROM ols_version_relations WHERE project_id=?", (project_id,))
+            db.execute("DELETE FROM ols_record_references WHERE project_id=?", (project_id,))
+            db.execute("DELETE FROM ols_records WHERE project_id=?", (project_id,))
             record_db_ids = {}
             for record in details.get("records", []):
                 cursor = db.execute(
@@ -137,18 +332,28 @@ class Repository:
                 record_db_ids[record["record_id"]] = db.execute(
                     "SELECT id FROM ols_records WHERE project_id=? AND record_id=?",
                     (project_id, record["record_id"])).fetchone()[0]
-            db.execute("DELETE FROM ols_evidence WHERE project_id=?", (project_id,))
-            db.execute("DELETE FROM ols_map_objects WHERE project_id=?", (project_id,))
-            db.execute("DELETE FROM ols_binaries WHERE project_id=?", (project_id,))
-            db.execute("DELETE FROM ols_version_relations WHERE project_id=?", (project_id,))
-            db.execute("DELETE FROM ols_record_references WHERE project_id=?", (project_id,))
             for record in details.get("records", []):
                 if record["record_type"] == "map_label":
-                    db.execute("""INSERT INTO ols_map_objects
-                        (project_id, record_id, map_name_raw, confidence, status, evidence)
-                        VALUES (?,?,?,?,?,?)""",
-                               (project_id, record_db_ids[record["record_id"]], record["value_raw"],
-                                record["confidence"], "label_only", record["evidence"]))
+                    parsed = maps_by_offset.get(record["offset"])
+                    if parsed:
+                        db.execute("""INSERT INTO ols_map_objects
+                            (project_id, record_id, map_name_raw, address, dimensions, factor,
+                             axis_information, confidence, status, evidence)
+                            VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                                   (project_id, record_db_ids[record["record_id"]], record["value_raw"],
+                                    parsed.get("address"),
+                                    json.dumps(parsed["dimension_candidates"]) if parsed.get("dimension_candidates") else None,
+                                    parsed["factor_candidates"][0] if parsed.get("factor_candidates") else None,
+                                    json.dumps({"address_candidates": parsed.get("address_candidates", []),
+                                                "factor_candidates": parsed.get("factor_candidates", [])}),
+                                    parsed["confidence"], parsed["status"],
+                                    json.dumps(parsed["evidence"], ensure_ascii=False)))
+                    else:
+                        db.execute("""INSERT INTO ols_map_objects
+                            (project_id, record_id, map_name_raw, confidence, status, evidence)
+                            VALUES (?,?,?,?,?,?)""",
+                                   (project_id, record_db_ids[record["record_id"]], record["value_raw"],
+                                    record["confidence"], "label_only", record["evidence"]))
                 if record["record_type"] == "version_or_role_label":
                     db.execute("""INSERT INTO ols_version_relations
                         (project_id, source_record_id, relation_type, confidence, evidence)
@@ -175,7 +380,141 @@ class Repository:
                             json.dumps(item, ensure_ascii=False)))
         self._index_external_ols_references(project_id, details.get("records", []))
         LOG.info("Import WinOLS project=%s sha256=%s id=%s", path, digest["sha256"], project_id)
+        self._store_ols_structure(project_id, data, structure)
         return project_id
+
+    def _store_ols_structure(self, project_id: int, data: bytes, structure: dict) -> None:
+        """Persist proven version binaries, extract them into Files and link evidence."""
+        with self.db.connect() as db:
+            db.execute("DELETE FROM ols_version_binaries WHERE project_id=?", (project_id,))
+        extras = 0
+        project_rows = self.db.rows("SELECT filename FROM winols_projects WHERE id=?", (project_id,))
+        project_name = project_rows[0]["filename"] if project_rows else None
+        for item in structure["version_binaries"]:
+            binary = item.get("binary")
+            version_index = item.get("version_index")
+            display_index = version_index
+            if version_index is None:
+                extras += 1
+                display_index = 100 + extras
+            file_id = None
+            filename = ols_extract_filename(project_name, item.get("name"),
+                                            display_index, item.get("source_filename"))
+            evidence = []
+            if binary:
+                blob = data[binary["start"]:binary["end"]]
+                role = item.get("role", "unknown")
+                kind = role if role in {"original", "tuned"} else "unknown"
+                suffix = "" if binary["complete"] else "_ONVOLLEDIG"
+                stem = Path(filename).stem or f"OLS_versie_{display_index}"
+                filename = f"{stem}{suffix}.bin"
+                source_path = f"ols://{structure['sha256']}/v{display_index}"
+                evidence = [e for e in [item.get("relation_evidence", ""), *binary.get("evidence", [])] if e]
+                file_id = self.upsert_ols_file(
+                    source_path, filename, blob, kind,
+                    "ols_version_label" if kind != "unknown" else "ols_binary_extract",
+                    float(item.get("role_confidence", item.get("confidence") or 0.0)),
+                    evidence, project_id,
+                    project_name=project_name, version_name=item.get("name"))
+            with self.db.connect() as db:
+                db.execute("""INSERT INTO ols_version_binaries
+                    (project_id, version_index, version_name, role, role_confidence, role_evidence,
+                     source_path, binary_offset, binary_length, binary_sha256, complete, file_id,
+                     relation_type, relation_confidence, relation_evidence, evidence)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                           (project_id, display_index, item.get("name"), item.get("role", "unknown"),
+                            float(item.get("role_confidence", item.get("confidence") or 0.0)),
+                            item.get("reason", ""),
+                            item.get("path"), binary["start"] if binary else None,
+                            binary["length"] if binary else None,
+                            binary["sha256"] if binary else None,
+                            int(bool(binary and binary["complete"])), file_id,
+                            item.get("relation_type", "target_unknown"),
+                            float(item.get("relation_confidence", item.get("confidence") or 0.0)),
+                            item.get("relation_evidence", ""),
+                            json.dumps(evidence, ensure_ascii=False)))
+        for binary in structure["binaries"]:
+            with self.db.connect() as db:
+                db.execute("""INSERT INTO ols_binaries
+                      (project_id, internal_id, offset, length, payload_offset, payload_length,
+                    end_boundary, source_offset, source_length, sha256, md5, content_available,
+                    source_reference, confidence, status, boundary_status, evidence)
+                      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                          (project_id, f"binary@{binary['start']}", binary["start"], binary["length"],
+                        binary.get("payload_offset", binary["start"]),
+                        binary.get("payload_length", binary["length"]),
+                        binary.get("end_boundary", binary["end"]),
+                        binary.get("source_offset", binary["start"]),
+                        binary.get("source_length", binary["length"]), binary["sha256"],
+                        binary.get("md5"), 1,
+                        binary.get("filename") or binary.get("identity_header"), binary["confidence"],
+                        "extracted" if binary["complete"] else "extracted_incomplete",
+                            binary.get("boundary_status", "COMPLETE" if binary["complete"] else "PARTIAL"),
+                        json.dumps(binary["evidence"], ensure_ascii=False)))
+
+    def upsert_ols_file(self, source_path: str, filename: str, data: bytes, kind: str,
+                        detection_method: str, confidence: float, evidence: list,
+                        project_id: int | None = None,
+                        project_name: str | None = None,
+                        version_name: str | None = None) -> int:
+        """Register an extracted OLS binary in Files without duplicating on reimport.
+
+        An existing row for the same OLS source and hash is reused so a human
+        reclassification always survives a reimport.
+        """
+        digest = hashes(data)
+        existing = self.db.rows("SELECT id FROM files WHERE source_path=? AND sha256=?",
+                                (source_path, digest["sha256"]))
+        if existing:
+            # achteraf vullen van alleen-lege herkomstkolommen (display-info)
+            updates, args = [], []
+            if project_name:
+                updates.append("project=COALESCE(NULLIF(project,''),?)")
+                args.append(project_name)
+            if version_name:
+                updates.append("stage=COALESCE(NULLIF(stage,''),?)")
+                args.append(version_name)
+            if updates:
+                args.append(existing[0]["id"])
+                with self.db.connect() as db:
+                    db.execute(f"UPDATE files SET {','.join(updates)} WHERE id=?", tuple(args))
+            return existing[0]["id"]
+        if kind not in {"original", "tuned", "unknown"}:
+            kind = "unknown"
+        folder = "originals" if kind == "original" else ("tuned" if kind == "tuned" else "unknown")
+        target = self.root / folder / (digest["sha256"] + ".bin")
+        try:
+            with target.open("xb") as stream:
+                stream.write(data)
+        except FileExistsError:
+            if hashes(target.read_bytes())["sha256"] != digest["sha256"]:
+                raise ValueError("Bestaande beheerde kopie heeft onjuiste hash")
+        row = dict(filename=filename, filepath=str(target.resolve()), source_path=source_path,
+                   file_type=kind, file_size=len(data), **digest, **extract_metadata(data))
+        if project_name and not row.get("project"):
+            row["project"] = project_name
+        if version_name and not row.get("stage"):
+            row["stage"] = version_name
+        if not row.get("ecu_family"):
+            ecu_hits = (recognize(data).get("ecu") or [])
+            if ecu_hits:
+                row["ecu_family"] = str(ecu_hits[0].get("value") or "") or None
+        with self.db.connect() as db:
+            db.execute(f"INSERT OR IGNORE INTO files ({','.join(row)}) VALUES ({','.join('?' for _ in row)})",
+                       tuple(row.values()))
+            file_id = db.execute("SELECT id FROM files WHERE source_path=? AND sha256=? AND file_type=?",
+                                 (source_path, digest["sha256"], kind)).fetchone()[0]
+            db.execute("INSERT OR IGNORE INTO fingerprints(file_id,fingerprint_type,fingerprint_data) VALUES (?,?,?)",
+                       (file_id, "blocks-histogram-v1", json.dumps(fingerprint(data, self.config["block_size"]))))
+            if project_id is not None:
+                db.execute("""INSERT INTO ols_evidence
+                    (project_id, evidence_type, subject_type, subject_id, value, offset, confidence, status)
+                    VALUES (?,?,?,?,?,?,?,?)""",
+                           (project_id, "extracted_binary", "file", str(file_id),
+                            json.dumps(evidence, ensure_ascii=False), None, confidence, "extracted"))
+        LOG.info("OLS binary gextraheerd file=%s kind=%s sha256=%s", filename, kind, digest["sha256"])
+        self.recognize_file(file_id, data)
+        return file_id
 
     def _index_external_ols_references(self, project_id: int, records: list[dict]) -> None:
         """Index referenced raw files only when their source path exists.
@@ -244,24 +583,149 @@ class Repository:
             row = db.execute("SELECT * FROM ols_objects WHERE id=?", (object_id,)).fetchone()
             if not row:
                 raise ValueError("Onbekend OLS-object-ID")
+            previous_role = row["role"]
             db.execute("""INSERT INTO ols_object_reviews(object_id,role,note,reviewer)
                          VALUES (?,?,?,?) ON CONFLICT(object_id) DO UPDATE SET
                          role=excluded.role, note=excluded.note, reviewer=excluded.reviewer,
                          created_at=CURRENT_TIMESTAMP""", (object_id, role, note, reviewer))
-            db.execute("UPDATE ols_objects SET role=?, confidence=?, detection_method=? WHERE id=?",
-                       (role, 100.0 if role != "unknown" else 0.0, "human_review", object_id))
+            db.execute("""UPDATE ols_objects SET role=?, confidence=?, detection_method=?,
+                evidence_level=? WHERE id=?""",
+                       (role, 100.0 if role != "unknown" else 0.0, "human_review",
+                        "TECHNICIAN_CONFIRMED", object_id))
+        self.audit("review_role", "ols_object", object_id, actor=reviewer or "technician",
+                   before={"role": previous_role}, after={"role": role}, reason=note)
         return self.db.rows("SELECT o.*, r.note, r.reviewer, r.created_at AS reviewed_at FROM ols_objects o JOIN ols_object_reviews r ON r.object_id=o.id WHERE o.id=?", (object_id,))[0]
 
-    def ols_unknown_objects(self, project_id: int | None = None) -> list[dict]:
-        if project_id is None:
-            return self.db.rows("SELECT * FROM ols_objects WHERE role='unknown' ORDER BY confidence DESC, id")
+    def ols_versions(self, project_id: int) -> list[dict]:
+        """Version records with their proven binary, extracted file and evidence."""
         self.project(project_id)
-        return self.db.rows("SELECT * FROM ols_objects WHERE project_id=? AND role='unknown' ORDER BY confidence DESC, id", (project_id,))
+        rows = self.db.rows("SELECT * FROM ols_version_binaries WHERE project_id=? ORDER BY version_index, id",
+                            (project_id,))
+        for row in rows:
+            row["evidence"] = json.loads(row["evidence"])
+        return rows
+
+    def suggest_ols_project_pairs(self, project_id: int) -> list[dict]:
+        """Pair Original → Tuned versions of one OLS project on explicit evidence.
+
+        A pair is created only for equal-size complete binaries. It is
+        auto-confirmed only when both roles come from explicit WinOLS version
+        labels; anything weaker stays unconfirmed for human review.
+        """
+        self.project(project_id)
+        rows = [row for row in self.ols_versions(project_id) if row["file_id"] and row["complete"]]
+        # WAARIMAGEWEZEN: de guard gebruikt de werkelijke geëxtraheerde
+        # bestandsgrootte, niet de geclaimde binary_length uit de OLS —
+        # WinOLS kan een andere interne opslagvorm hebben dan de export.
+        actual_sizes = {row["file_id"]: self.file(row["file_id"])["file_size"]
+                        for row in rows if row["file_id"]}
+        originals = [row for row in rows if row["role"] == "original"]
+        tuned = [row for row in rows if row["role"] == "tuned"]
+        results = []
+        for original in originals:
+            for candidate in tuned:
+                original_size = actual_sizes.get(original["file_id"])
+                candidate_size = actual_sizes.get(candidate["file_id"])
+                if original_size != candidate_size:
+                    # bestaand (mogelijk foutief bevestigd) paar zelfherstellend
+                    # ontkoppelen: grootteverschil = geen betrouwbaar diffbewijs
+                    with self.db.connect() as db:
+                        db.execute(
+                            """UPDATE file_pairs SET confirmed=0 WHERE original_file_id=?
+                               AND tuned_file_id=? AND confirmed=1""",
+                            (original["file_id"], candidate["file_id"]))
+                    self.audit("size_mismatch_unpaired", "file_pair",
+                               f"{original['file_id']}|{candidate['file_id']}",
+                               before={"confirmed": True}, after={"confirmed": False},
+                               reason="werkelijke imagegroottes verschillen; "
+                                      "technicusbeslissing vereist")
+                    results.append({"original_file_id": original["file_id"],
+                                    "tuned_file_id": candidate["file_id"],
+                                    "status": "size_mismatch_not_paired",
+                                    "reason": f"Werkelijke imagegroottes {original_size} ≠ "
+                                              f"{candidate_size} B (geclaimd "
+                                              f"{original['binary_length']}/"
+                                              f"{candidate['binary_length']}); diff is niet "
+                                              f"betrouwbaar zonder bewezen correspondentie."})
+                    continue
+                explicit = min(original["role_confidence"], candidate["role_confidence"]) >= 95.0
+                pair_id = self.pair(original["file_id"], candidate["file_id"], explicit, 90.0)
+                results.append({"pair_id": pair_id, "original_file_id": original["file_id"],
+                                "tuned_file_id": candidate["file_id"], "confirmed": bool(explicit),
+                                "status": "confirmed" if explicit else "suggested"})
+        return results
+
+    def add_tune_candidate(self, target_file_id: int, pair_id: int | None, threshold: float,
+                           match_score: float, applied: int, skipped: int, payload: dict,
+                           output_path: str, sha: dict, size: int) -> int:
+        with self.db.connect() as db:
+            existing = db.execute("""SELECT id FROM tune_candidates
+                WHERE target_file_id=? AND sha256=? AND status='candidate'
+                AND (pair_id=? OR (pair_id IS NULL AND ? IS NULL))
+                ORDER BY id LIMIT 1""",
+                                 (target_file_id, sha["sha256"], pair_id, pair_id)).fetchone()
+            if existing:
+                return existing[0]
+            cursor = db.execute("""INSERT INTO tune_candidates
+                (target_file_id, pair_id, threshold, match_score, applied_regions, skipped_regions,
+                 payload, output_path, sha256, size)
+                VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                               (target_file_id, pair_id, threshold, match_score, applied, skipped,
+                                json.dumps(payload, ensure_ascii=False), output_path,
+                                sha["sha256"], size))
+            return cursor.lastrowid
+
+    def tune_candidates(self, limit: int = 0) -> list[dict]:
+        sql = "SELECT * FROM tune_candidates ORDER BY id DESC"
+        args: tuple = ()
+        if limit:
+            sql += " LIMIT ?"
+            args = (limit,)
+        rows = self.db.rows(sql, args)
+        for row in rows:
+            row["payload"] = json.loads(row["payload"])
+        return rows
+
+    def ols_unknown_objects(self, project_id: int | None = None,
+                            limit: int = 0) -> list[dict]:
+        if project_id is None:
+            sql = "SELECT * FROM ols_objects WHERE role='unknown' ORDER BY confidence DESC, id"
+            args: tuple = ()
+        else:
+            self.project(project_id)
+            sql = ("SELECT * FROM ols_objects WHERE project_id=? AND role='unknown' "
+                   "ORDER BY confidence DESC, id")
+            args = (project_id,)
+        if limit:
+            sql += " LIMIT ?"
+            args = args + (limit,)
+        return self.db.rows(sql, args)
 
     def import_file(self, path: Path, kind: str = "auto") -> int:
         path = path.resolve()
-        data = read_binary(path, self.config["max_file_mb"])
-        digest = hashes(data)
+        if path.suffix.lower() not in {".bin", ".ori"}:
+            raise ValueError("Alleen raw .bin en .ori worden ondersteund; converteer Intel HEX eerst.")
+        # één leesbeurt: hashen én beheerkopie tegelijk schrijven (10TB-proof)
+        size_limit = self.config["max_file_mb"] * 1024 * 1024
+        sha = hashlib.sha256()
+        md5 = hashlib.md5(usedforsecurity=False)
+        crc = 0
+        buffer = bytearray()
+        with path.open("rb") as stream:
+            while True:
+                chunk = stream.read(1024 * 1024)
+                if not chunk:
+                    break
+                if len(buffer) + len(chunk) > size_limit:
+                    raise ValueError(f"Bestand groter dan ingestelde limiet: {path.name}")
+                sha.update(chunk)
+                md5.update(chunk)
+                crc = zlib.crc32(chunk, crc)
+                buffer += chunk
+        if not buffer:
+            raise ValueError(f"Leeg bestand: {path.name}")
+        data = bytes(buffer)
+        digest = {"sha256": sha.hexdigest(), "md5": md5.hexdigest(), "crc32": f"{crc:08x}"}
         if kind == "auto":
             kind = infer_type(path)
             if kind == "unknown":
@@ -272,12 +736,17 @@ class Repository:
             raise ValueError("Ongeldig bestandstype")
         folder = "originals" if kind == "original" else kind
         target = self.root / folder / (digest["sha256"] + ".bin")
-        try:
-            with target.open("xb") as stream:
+        if target.exists():
+            # inhoudsadressering: grootte-match is al vrijwel zeker; bij
+            # afwijking pas volledig controleren (scheelt een volledige herlezing)
+            if target.stat().st_size != len(data):
+                if hashes(target.read_bytes())["sha256"] != digest["sha256"]:
+                    raise ValueError("Bestaande beheerde kopie heeft onjuiste hash")
+        else:
+            temp = target.with_suffix(".tmp")
+            with temp.open("wb") as stream:
                 stream.write(data)
-        except FileExistsError:
-            if hashes(target.read_bytes())["sha256"] != digest["sha256"]:
-                raise ValueError("Bestaande beheerde kopie heeft onjuiste hash")
+            os.replace(temp, target)
         row = dict(filename=path.name, filepath=str(target.resolve()), source_path=str(path),
                    file_type=kind, file_size=len(data), **digest, **extract_metadata(data))
         with self.db.connect() as db:
@@ -305,11 +774,17 @@ class Repository:
         rows = self.db.rows("SELECT * FROM recognition_results WHERE file_id=? ORDER BY id DESC LIMIT 1", (file_id,))
         return json.loads(rows[0]["details"]) if rows else self.recognize_file(file_id)
 
-    def candidates(self, status: str = "candidate") -> list[dict]:
+    def candidates(self, status: str = "candidate", limit: int = 0) -> list[dict]:
         allowed = {"candidate", "approved", "rejected"}
         if status not in allowed:
             raise ValueError("Ongeldige candidate status")
-        rows = self.db.rows("SELECT * FROM knowledge_candidates WHERE status=? ORDER BY confidence DESC, id DESC", (status,))
+        sql = ("SELECT * FROM knowledge_candidates WHERE status=? "
+               "ORDER BY confidence DESC, id DESC")
+        args: list = [status]
+        if limit:
+            sql += " LIMIT ?"
+            args.append(limit)
+        rows = self.db.rows(sql, tuple(args))
         for row in rows:
             row["payload"] = json.loads(row["payload"])
         return rows
@@ -493,40 +968,96 @@ class Repository:
         score alone does not prove Original versus Tuned when both categories
         contain the same software family.
         """
-        unknown = [row for row in self.files() if row["file_type"] == "unknown"]
-        typed = [row for row in self.files() if row["file_type"] in {"original", "tuned"}]
-        updated, review, skipped = [], [], []
+        # V8.8.1 schaalbaarheid: geen volledige tabel meer in Python; alle
+        # fasen SQL-gedreven (geïndexeerde kind/sha/size-queries). De
+        # bewijsregels zijn onveranderd: pad-label, exacte SHA, of unieke
+        # same-size binary-match; ambiguïteit gaat naar review.
+        unknown = self.db.rows(
+            "SELECT * FROM files WHERE file_type='unknown' ORDER BY id")
+        updated, review, skipped, errors = [], [], [], []
+        # fase 2 (set-based): exacte SHA256 via join — één query voor alles
+        exact_by_id = {row["id"]: row["kind"] for row in self.db.rows(
+            """SELECT u.id AS id, MIN(t.file_type) AS kind,
+                      COUNT(DISTINCT t.file_type) AS types
+               FROM files u JOIN files t ON t.sha256 = u.sha256
+               WHERE u.file_type='unknown'
+                 AND t.file_type IN ('original','tuned')
+               GROUP BY u.id HAVING types = 1""")}
+        remaining = []
         for row in unknown:
             label = infer_path_type(Path(row["source_path"]))
             if label in {"original", "tuned"}:
-                reason = "expliciet label in bestandsnaam of map"
-                self.reclassify_files([row["id"]], label)
+                try:
+                    self.reclassify_files([row["id"]], label)
+                except (OSError, ValueError) as exc:
+                    errors.append({"id": row["id"], "filename": row["filename"],
+                                   "reason": f"classificatie onmogelijk: {exc}"})
+                    continue
                 updated.append({"id": row["id"], "filename": row["filename"], "kind": label,
-                                "confidence": 100.0, "reason": reason})
+                                "confidence": 100.0, "reason": "expliciet label in bestandsnaam of map"})
                 continue
-
-            exact_types = {item["file_type"] for item in typed if item["sha256"] == row["sha256"]}
-            if len(exact_types) == 1:
-                label = exact_types.pop()
-                self.reclassify_files([row["id"]], label)
-                updated.append({"id": row["id"], "filename": row["filename"], "kind": label,
+            exact_kind = exact_by_id.get(row["id"])
+            if exact_kind:
+                try:
+                    self.reclassify_files([row["id"]], exact_kind)
+                except (OSError, ValueError) as exc:
+                    errors.append({"id": row["id"], "filename": row["filename"],
+                                   "reason": f"classificatie onmogelijk: {exc}"})
+                    continue
+                updated.append({"id": row["id"], "filename": row["filename"], "kind": exact_kind,
                                 "confidence": 100.0, "reason": "exacte SHA256-overeenkomst"})
                 continue
-
-            same_size = [item for item in typed if item["file_size"] == row["file_size"]]
+            remaining.append(row)
+        unknown = remaining
+        for row in unknown:
+            same_size = self.db.rows(
+                """SELECT * FROM files WHERE file_type IN ('original','tuned')
+                   AND file_size=? AND sha256<>? LIMIT 4""",
+                (row["file_size"], row["sha256"]))
             if not same_size:
                 skipped.append({"id": row["id"], "reason": "geen bestand met dezelfde grootte"})
                 continue
-            data = self.data(row["id"])
+            try:
+                data = self.data(row["id"])
+            except (OSError, ValueError) as exc:
+                # zelfherstellend: beheerde kopie ontbreekt (bv. database van
+                # een andere machine) — overslaan, niet crashen
+                errors.append({"id": row["id"], "filename": row["filename"],
+                               "reason": f"beheerde kopie onleesbaar: {exc}"})
+                continue
             best_by_type = {}
+            row_sample = self.sample_payload(row["id"], row["file_size"])
             for item in same_size:
-                evidence = compare(data, self.data(item["id"]), row, item, self.config["block_size"])
+                try:
+                    # V8.9 voorproefje: zie suggest_binary_relationships
+                    item_sample = self.sample_payload(item["id"], item["file_size"])
+                    if row_sample and item_sample and \
+                            len(item_sample) == len(row_sample):
+                        equal = np.frombuffer(row_sample, dtype=np.uint8) == \
+                            np.frombuffer(item_sample, dtype=np.uint8)
+                        if float(np.count_nonzero(equal)) / len(equal) < 0.70:
+                            continue
+                    evidence = compare(data, self.data(item["id"]), row, item,
+                                       self.config["block_size"])
+                except (OSError, ValueError):
+                    errors.append({"id": item["id"], "filename": item["filename"],
+                                   "reason": "beheerde kopie onleesbaar; overgeslagen"})
+                    continue
                 best_by_type[item["file_type"]] = max(best_by_type.get(item["file_type"], 0.0), evidence["match_score"])
+            if not best_by_type:
+                skipped.append({"id": row["id"],
+                                "reason": "geen vergelijkbare bestanden leesbaar"})
+                continue
             ranked = sorted(best_by_type.items(), key=lambda item: item[1], reverse=True)
             if (len(ranked) == 1 or ranked[0][1] - ranked[1][1] >= 2.0) and ranked[0][1] >= 99.5:
                 label, score = ranked[0]
                 confidence = round(min(99.0, 80.0 + (score - 99.5) * 4), 2)
-                self.reclassify_files([row["id"]], label)
+                try:
+                    self.reclassify_files([row["id"]], label)
+                except (OSError, ValueError) as exc:
+                    errors.append({"id": row["id"], "filename": row["filename"],
+                                   "reason": f"classificatie onmogelijk: {exc}"})
+                    continue
                 updated.append({"id": row["id"], "filename": row["filename"], "kind": label,
                                 "confidence": confidence, "reason": "unieke binary-match",
                                 "match_score": round(score, 4)})
@@ -536,29 +1067,87 @@ class Repository:
                                               for kind, score in ranked],
                                "reason": "binary-match niet uniek genoeg"})
         return {"updated": updated, "review": review, "skipped": skipped,
+                "errors": errors,
                 "note": "Alleen eenduidige evidence is automatisch toegepast; reviewgevallen blijven unknown."}
 
-    def import_folder(self, folder: str, kind: str = "auto", progress=None) -> dict:
+    def import_folder(self, folder: str, kind: str = "auto", progress=None,
+                      resume: bool = False) -> dict:
+        """Import met fast-path: bestanden die al in de database staan (zelfde
+        source_path + ongewijzigde grootte + aanwezige beheerkopie) worden
+        overgeslagen ZONDER ze te lezen — herhaald importeren van grote
+        bronnen kost daardoor bijna geen tijd. Per bestand wordt een
+        checkpoint gezet zodat een crash exact kan hervatten."""
         source = Path(folder).resolve()
         if not source.is_dir():
             raise ValueError("Importmap bestaat niet")
-        paths = [p for p in source.rglob('*') if p.is_file() and p.suffix.lower() in {'.bin', '.ori', '.ols'}
-                 and not p.resolve().is_relative_to(self.root.resolve())]
-        result = {"processed": 0, "projects": 0, "errors": []}
-        for index, path in enumerate(paths):
-            try:
-                if path.suffix.lower() == '.ols':
-                    self.import_project(path)
-                    result["projects"] += 1
-                else:
-                    self.import_file(path, kind)
-                    result["processed"] += 1
-            except (OSError, ValueError) as exc:
-                result["errors"].append({"path": str(path), "error": str(exc)})
-                LOG.exception("Import failed: %s", path)
-            if progress:
-                progress(f"Import {index+1}/{len(paths)}: {path.name}")
+        paths = sorted((p for p in source.rglob('*')
+                        if p.is_file() and p.suffix.lower() in {'.bin', '.ori', '.ols'}
+                        and not p.resolve().is_relative_to(self.root.resolve())),
+                       key=lambda path: str(path).casefold())
+        run = self.resume_run("folder_import") if resume else None
+        if run:
+            expected = run["config"]
+            current_manifest = [str(path) for path in paths]
+            if (expected.get("folder") != str(source) or expected.get("kind") != kind
+                    or expected.get("paths") != current_manifest):
+                raise ValueError("Importfolder is gewijzigd sinds het checkpoint; resume geweigerd")
+        run_id = run["id"] if run else self.start_run(
+            "folder_import", {"folder": str(source), "kind": kind,
+                               "paths": [str(path) for path in paths]})
+        start_index = int(run["checkpoint"].get("next_index", 0)) if run else 0
+        result = dict(run["stats"] if run else {})
+        result.setdefault("processed", 0)
+        result.setdefault("projects", 0)
+        result.setdefault("skipped_existing", 0)
+        result.setdefault("errors", [])
+        result["skipped"] = start_index
+        try:
+            for index, path in enumerate(paths):
+                if index < start_index:
+                    continue
+                try:
+                    if path.suffix.lower() == '.ols':
+                        self.import_project(path)
+                        result["projects"] += 1
+                    elif self._already_imported(path, kind):
+                        result["skipped_existing"] += 1
+                    else:
+                        self.import_file(path, kind)
+                        result["processed"] += 1
+                except (OSError, ValueError) as exc:
+                    result["errors"].append({"path": str(path), "error": str(exc)})
+                    LOG.exception("Import failed: %s", path)
+                self.checkpoint_run(run_id, {"next_index": index + 1,
+                                             "last_path": str(path)}, result)
+                if progress:
+                    progress(f"Import {index + 1}/{len(paths)} "
+                             f"(nieuw {result['processed']}, "
+                             f"al aanwezig {result['skipped_existing']})")
+        except Exception:
+            self.checkpoint_run(run_id, {"next_index": index,
+                                         "last_path": str(paths[index]) if paths else None}, result)
+            self.finish_run(run_id, "interrupted", result)
+            raise
+        self.finish_run(run_id, "done", result)
+        result["run_id"] = run_id
         return result
+
+    def _already_imported(self, path: Path, kind: str) -> bool:
+        """True als dit bronbestand al veilig staat: zelfde source_path,
+        zelfde grootte en de beheerkopie bestaat nog op schijf."""
+        try:
+            size = path.stat().st_size
+        except OSError:
+            return False
+        rows = self.db.rows(
+            "SELECT id, file_size, filepath, file_type FROM files WHERE source_path=?",
+            (str(path),))
+        for row in rows:
+            if row["file_size"] != size or kind not in ("auto", row["file_type"]):
+                continue
+            if Path(row["filepath"]).exists():
+                return True
+        return False
 
     def update_metadata(self, file_id: int, values: dict) -> None:
         self.file(file_id)
@@ -605,6 +1194,10 @@ class Repository:
             with self.db.connect() as db:
                 db.execute("UPDATE files SET file_type=?, filepath=? WHERE id=?", (kind, str(target.resolve()), row["id"]))
         LOG.info("Reclassified files=%s kind=%s", [row["id"] for row in rows], kind)
+        for row in rows:
+            self.audit("reclassify", "file", row["id"],
+                       before={"file_type": row["file_type"]}, after={"file_type": kind},
+                       reason="technician classificatie")
         return len(rows)
 
     def pair(self, original_id: int, tuned_id: int, confirmed: bool = False, confidence: float = 100) -> int:
@@ -643,11 +1236,14 @@ class Repository:
         """
         if limit_per_tuned < 1:
             raise ValueError("limit_per_tuned must be positive")
-        originals = [row for row in self.files() if row["file_type"] == "original"]
-        tuned = [row for row in self.files() if row["file_type"] == "tuned"]
+        # V8.9: kandidaten via geïndexeerde size-query (geen cap op de
+        # nieuwste 400; alle originals van die grootte komen in aanmerking)
+        tuned = self.files_by_kind("tuned", limit=400)
         proposals = []
         for tuned_row in tuned:
-            compatible = [row for row in originals if row["file_size"] == tuned_row["file_size"]]
+            compatible = self.db.rows(
+                """SELECT * FROM files WHERE file_type='original' AND file_size=?
+                   ORDER BY id DESC""", (tuned_row["file_size"],))
             if not compatible:
                 continue
 
@@ -658,7 +1254,21 @@ class Repository:
             compatible.sort(key=metadata_rank, reverse=True)
             ranked = []
             tuned_data = self.data(tuned_row["id"])
+            tuned_sample = self.sample_payload(tuned_row["id"], tuned_row["file_size"])
             for original_row in compatible[:max(limit_per_tuned * 4, 20)]:
+                # V8.9 voorproefje: 8 verspreide 8KB-monsters; een kandidaat
+                # met <70% sample-gelijkheid kan de vereiste score (>=90 voor
+                # auto-bevestiging, >=99.5 voor classificatie) niet halen
+                # (totale score <60 -> incompatible_base). Voorkomt de
+                # volledige 2-4MB compare per kandidaat.
+                original_sample = self.sample_payload(
+                    original_row["id"], original_row["file_size"])
+                if tuned_sample and original_sample and \
+                        len(original_sample) == len(tuned_sample):
+                    equal = np.frombuffer(original_sample, dtype=np.uint8) == \
+                        np.frombuffer(tuned_sample, dtype=np.uint8)
+                    if float(np.count_nonzero(equal)) / len(equal) < 0.70:
+                        continue
                 original_data = self.data(original_row["id"])
                 evidence = compare(original_data, tuned_data, original_row, tuned_row,
                                    self.config["block_size"])
@@ -675,17 +1285,74 @@ class Repository:
                 proposals.append(proposal)
         return proposals
 
-    def pairs(self) -> list[dict]:
-        return self.db.rows("SELECT * FROM file_pairs ORDER BY id DESC")
+    TUNING_LABEL_RE = re.compile(
+        r"stage\s*[1-4]|pops?\s*&?\s*bang|popcorn|vmax|v-?max|decat|dpf|egr|adblue|scr|"
+        r"e85|swad|speed.?limit|antilag|launch|burble|remap|opt.?power", re.IGNORECASE)
+
+    def auto_confirm_binary_pairs(self, min_score: int = 90,
+                                  limit: int = 2000) -> dict:
+        """Bevestig losse BIN-paren automatisch ALLEEN met sterk bewijs:
+        expliciet tuning-label op de tuned-bestandsnaam + matchscore ≥
+        min_score + geen tegenstrijdige metadata (ecu/hw/sw). Alles wat
+        minder bewijs heeft blijft bewust onbevestigd voor review."""
+        label = self.TUNING_LABEL_RE
+        confirmed = review = 0
+        examples = []
+        with self.db.connect() as db:
+            pairs = [dict(row) for row in db.execute(
+                "SELECT id, original_file_id, tuned_file_id FROM file_pairs "
+                "WHERE confirmed=0 ORDER BY id LIMIT ?", (limit,))]
+        for pair in pairs:
+            tuned_row = self.file(pair["tuned_file_id"])
+            original_row = self.file(pair["original_file_id"])
+            if not label.search(tuned_row.get("filename") or ""):
+                review += 1
+                continue
+            if (original_row.get("ecu_family") and tuned_row.get("ecu_family")
+                    and original_row["ecu_family"] != tuned_row["ecu_family"]):
+                review += 1
+                continue
+            original_data = self.data(pair["original_file_id"])
+            tuned_data = self.data(pair["tuned_file_id"])
+            evidence = compare(original_data, tuned_data, original_row, tuned_row,
+                               self.config["block_size"])
+            if int(evidence.get("match_score", 0)) < min_score:
+                review += 1
+                continue
+            with self.db.connect() as db:
+                db.execute("UPDATE file_pairs SET confirmed=1, confidence=? WHERE id=?",
+                           (evidence.get("compatibility_confidence"), pair["id"]))
+            self.audit("auto_confirm_pair", "file_pair", pair["id"],
+                       after={"match_score": evidence.get("match_score"),
+                              "reason": "label+score-autobewijs"})
+            confirmed += 1
+            if len(examples) < 5:
+                examples.append(tuned_row.get("filename"))
+        return {"confirmed": confirmed, "review": review, "examples": examples}
+
+    def pairs(self, limit: int = 0) -> list[dict]:
+        sql = "SELECT * FROM file_pairs ORDER BY id DESC"
+        args: tuple = ()
+        if limit:
+            sql += " LIMIT ?"
+            args = (limit,)
+        return self.db.rows(sql, args)
 
     def confirm_pair(self, pair_id: int) -> None:
         with self.db.connect() as db:
             if not db.execute("UPDATE file_pairs SET confirmed=1 WHERE id=?", (pair_id,)).rowcount:
                 raise ValueError("Onbekend pair-ID")
+        self.audit("confirm_pair", "file_pair", pair_id, after={"confirmed": True})
 
     def dashboard(self) -> dict:
-        files = self.files()
-        return {"Total Files": len(files), "Original Files": sum(f['file_type']=='original' for f in files),
-                "Tuned Files": sum(f['file_type']=='tuned' for f in files), "WinOLS Projects": len(self.projects()), "Pairs": len(self.pairs()),
-                "ECU Families": self.db.rows("SELECT COUNT(*) AS count FROM ecu_families WHERE verified=1")[0]["count"],
-                "Software Versions": self.db.rows("SELECT COUNT(*) AS count FROM software_families WHERE verified=1")[0]["count"]}
+        """Tellingen via snelle COUNT-query's (V8.8: laadde vroeger ALLE
+        files in Python — dat vertraagde de opstart bij 100k+ bestanden)."""
+        def count(sql: str) -> int:
+            return self.db.rows(sql)[0]["count"]
+        return {"Total Files": count("SELECT COUNT(*) AS count FROM files"),
+                "Original Files": count("SELECT COUNT(*) AS count FROM files WHERE file_type='original'"),
+                "Tuned Files": count("SELECT COUNT(*) AS count FROM files WHERE file_type='tuned'"),
+                "WinOLS Projects": count("SELECT COUNT(*) AS count FROM winols_projects"),
+                "Pairs": count("SELECT COUNT(*) AS count FROM file_pairs"),
+                "ECU Families": count("SELECT COUNT(*) AS count FROM ecu_families WHERE verified=1"),
+                "Software Versions": count("SELECT COUNT(*) AS count FROM software_families WHERE verified=1")}

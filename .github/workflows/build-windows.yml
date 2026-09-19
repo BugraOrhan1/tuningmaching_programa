@@ -1,0 +1,75 @@
+name: Windows-build (exe + release)
+
+# Bouwt de Windows-exe op een echte Windows-runner en publiceert hem als
+# GitHub Release. Handmatig startbaar via Actions → "Run workflow", en
+# automatisch bij het pushen van een tag (v*).
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - name: Code ophalen
+        uses: actions/checkout@v4
+
+      - name: Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Dependencies installeren
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller pytest-timeout
+
+      - name: Tests draaien (resultaat wordt gerapporteerd, blokkeert de build niet)
+        continue-on-error: true
+        run: python -m pytest -q --timeout=180 --timeout-method=thread
+
+      - name: PyInstaller-build
+        run: pyinstaller packaging/tuningmatching.spec --noconfirm --clean
+
+      - name: Portable-map inpakken
+        run: Compress-Archive -Path dist/TuningMatching -DestinationPath TuningMatching-win64.zip
+
+      - name: Build bewaren als artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TuningMatching-win64
+          path: TuningMatching-win64.zip
+
+      - name: Release publiceren (tag-bepaald)
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          cat > NOTES.md <<'NOTES'
+          TuningMatching — Windows-portable build
+
+          Download: TuningMatching-win64.zip uitpakken waar je wilt
+          (bijv. C:\TuningMatching) en starten met TuningMatching.exe.
+          Geen Python of installatie nodig.
+
+          - Nieuw in deze versie: crash-handler (fouten altijd zichtbaar in
+            foutvenster + crash.log), gefixte eerste-start-wizard
+            (PySide6 6.11-compatibel), professionele BIN/OLS-import
+            (één voor één met typekeuze), complete in-app handleiding
+            (Uitleg & Handleiding), Tune Bouwer (stage + add-ons).
+          - Je bronbestanden (BIN/ORI/OLS) worden nooit gewijzigd.
+          - Kandidaat-output is bedoeld voor technicus-review in WinOLS;
+            checksums worden nooit automatisch gecorrigeerd.
+          NOTES
+          gh release create "$TAG" TuningMatching-win64.zip \
+            --title "TuningMatching $TAG — Windows" \
+            --notes-file NOTES.md \
+            --latest || gh release upload "$TAG" TuningMatching-win64.zip --clobber

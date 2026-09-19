@@ -1,4 +1,62 @@
-# Tuning File AI Assistant — V2
+# Tuning File AI Assistant — V2 + V3 Tuning Intelligence Engine
+
+## V5: lokale bibliotheek (10 TB blijft staan)
+
+**Library Mode**: registreer bronmappen (`D:\Tuning\`, `E:\WinOLS\`) en
+indexeer ze zonder te kopiëren. Content (SHA256) is los van Location (pad):
+duplicaten delen één content-object. Scans zijn incrementeel (hash-cache) en
+hervatbaar; offline schijven breken niets. GUI-pagina **Library (V5)**,
+CLI `library-add/library-list/library-scan/library-locations`, API
+`/libraries*`. Zie [LOCAL_LIBRARY.md](LOCAL_LIBRARY.md).
+
+## V6: kennislaag — ECU Image Identity, lineage, negatieve kennis, golden dataset
+
+- **ECU Image Identity**: technisch hetzelfde ECU-image herkend over
+  OLS-versies, BIN/ORI, backups en mappen (regels: exacte SHA · size+metadata
+  +diffratio ≤5% · size-only kandidaat; grootteverschil nooit samengevoegd).
+- **Project Families + Software Lineage**: projecten gegroepeerd per
+  (ECU, software); relaties SAME_CALIBRATION_FAMILY / SOFTWARE_UPDATE /
+  DERIVATIVE / UNKNOWN, alle met bewijs en confidence.
+- **Negatieve kennis**: `reject-match …` registreert A ≠ B permanent;
+  toekomstige voorstellen respecteren dat en rapporteren suppressies.
+- **Why this match?**: elk rapport kan met `explain` alle
+  scorecomponenten × gewicht × bewijsaantallen tonen — geen zwarte doos.
+- **Vergelijk A|B**: comparison workspace met gedeelde image-identiteit,
+  corresponderende structuren en beide Original→Tuned-kettingen.
+- **Golden Dataset**: 9 deterministisch bewaakte cases (incl. echte OLS);
+  `golden` bewaakt per engine-versie dat intelligence niet stilletjes
+  achteruit gaat; `snapshot` maakt kennis-regression zichtbaar.
+- **Parser-versioning**: `reparse-ols` her-interpreteert read-only met
+  drift-rapport; raw evidence blijft altijd bewaard.
+- **Disk-aware scheduling**: taken per schijf serieel, over schijven
+  parallel tot het resourceprofiel (geen HDD-storm).
+- Zie [KNOWLEDGE_MODEL.md](KNOWLEDGE_MODEL.md).
+
+## V3: leert van bevestigde Original → Tuned-paren
+
+V3 voegt een intelligence-laag toe: **TuningRegions** (rijke wijzigingsregio's
+met signatures en entropie), **Tuning DNA** (kandidaatkennis uit bevestigde
+paren), **patroonclustering** (deterministisch, met stages en
+software-varianten), **cross-software alignment** (patronen terugvinden op
+andere offsets in andere software), **map-structuurdetectie zonder namen**,
+**New BIN Analysis** (patronen + evidence + alle scorecomponenten),
+**technician review** (approve/reject/correct/mark per regio en patroon),
+hervatbare analyse-jobs en globaal zoeken. Alles UNKNOWN-first: zonder bewijs
+geen conclusie, nooit mapnamen, nooit automatische BIN-modificatie.
+
+Nieuwe GUI-pagina's: Patronen (V3), Region Viewer, New BIN Analyse (V3),
+OLS Explorer, Zoeken. Nieuwe CLI: `rebuild-patterns`, `patterns`,
+`align-pattern`, `regions`, `region`, `new-bin`, `map-structures`, `search`,
+`ols-graph`, `jobs`, `review-knowledge`. Nieuwe API: `/patterns*`,
+`/pairs/{id}/regions`, `/regions/{id}`, `/files/{id}/new-bin-report`,
+`/files/{id}/map-structures`, `/search`, `/winols-projects/{id}/graph`,
+`/jobs`.
+
+Documentatie: [TUNING_DNA.md](TUNING_DNA.md) · [ARCHITECTURE.md](ARCHITECTURE.md)
+· [EVIDENCE_MODEL.md](EVIDENCE_MODEL.md) · [DATABASE_SCHEMA.md](DATABASE_SCHEMA.md)
+· [ROADMAP.md](ROADMAP.md) · [STATUS.md](STATUS.md).
+
+## V2 (basis)
 
 Lokale Windows-desktopapp naast WinOLS 5. Importeer een BIN-bibliotheek en WinOLS `.ols`-projecten, controleer Original/Tuned-paren, vind overeenkomende originals en inspecteer daadwerkelijke wijzigingen. Er worden geen ECU-binaries aangepast of geflasht. Internet is alleen nodig voor de installatie van dependencies.
 
@@ -133,7 +191,9 @@ Tuning DNA bevat alleen traceerbare diff-regio's, relatieve offsets, context-has
 
 De projectlijst toont ook **Voorgesteld**: `original`, `tuned` of `unknown`. Dit wordt uitsluitend bepaald uit expliciete labels die in de zichtbare WinOLS-projecttekst staan, zoals `Original`, `OEM`, `Stage 1` of `Tuned`; de eigen projectnaam van WinOLS kan daardoor worden gebruikt als die als leesbare tekst in het `.ols`-bestand staat. Een nummer zonder label blijft `unknown`.
 
-OLS is een propriëtair projectformaat en is geen raw ECU-BIN. De app slaat het OLS-project en de gevonden records/evidence op, maar zet embedded binary-objecten nog niet automatisch om naar `files`: onbekende bytes mogen niet zonder bewezen grenzen als Original of Tuned worden geïmporteerd. Exporteer de relevante original/tuned data in WinOLS naar raw `.bin` of `.ori`, en importeer die bestanden voor bytevergelijking. Dit voorkomt dat projectmetadata ten onrechte als ECU-data wordt geïnterpreteerd.
+**Productiemodus leest OLS direct (WinOLS-first, V5):** registreer je bestaande WinOLS-mappen als library-root (`library-add D:\WinOLS`) — de projecten blijven op hun eigen schijf en worden **niet gekopieerd**. Versie-binaries worden op bewezen recordgrenzen uit de OLS geëxtraheerd (`ols_version_binaries`, automatisch als `ols://`-bestanden geïndexeerd), gehasht en gededupliceerd; Original/Tuned-rollen komen uit expliciete WinOLS-versielabels, paren worden alléén bij gelijke **werkelijke** imagegrootte voorgesteld (een size-mismatch, zoals een 855 KB-OBD-readout naast 2 MiB-full dumps, wordt never automatisch gepaard maar geregistreerd als UNKNOWN-relatie met reden). Handmatig BIN-export uit WinOLS is daarmee **niet** meer nodig; de beheerde kopie in `data/` blijft alleen voor development/demo.
+
+Zie [LOCAL_LIBRARY.md](LOCAL_LIBRARY.md) en [KNOWLEDGE_MODEL.md](KNOWLEDGE_MODEL.md) voor de volledige WinOLS-first pijplijn.
 
 ### V2 in drie delen
 
@@ -152,16 +212,35 @@ API-routes zijn `GET /winols-projects/{id}/objects`, `GET /winols-projects/{id}/
 
 ## Rapporten en WinOLS 5
 
-1. Importeer de `.ols`-projectmap; de projecten zijn daarna doorzoekbaar in **WinOLS**.
-2. Exporteer de relevante bestanden uit WinOLS als raw original/tuned BIN en importeer die.
-3. Controleer paren en analyseer een nieuwe original.
-4. Exporteer een analyse- of diffrapport naar een gekozen map.
-5. Open de projectmap via **WinOLS → WinOLS-projectmap openen**.
+1. Registreer je WinOLS-map als library-root (`library-add D:\WinOLS`) en scan — de projecten blijven op hun eigen schijf.
+2. `library-analyze` verwerkt nieuwe OLS-content automatisch (project → versies → binaries → paren op expliciete rollen bij gelijke werkelijke imagegrootte).
+3. Controleer voorgestelde paren (bevestigen = technicusbeslissing) en draai `rebuild-patterns`.
+4. Analyseer een nieuwe BIN met `new-bin-library` (multi-stage; een exacte content-hit hergebruikt bestaande kennis) en vraag `explain` voor het WHY-rapport.
+5. Exporteer rapporten met `report … --format md|html|csv|json`; open de projectmap via **WinOLS → WinOLS-projectmap openen**.
 6. Open de originele BIN handmatig in WinOLS 5 en controleer de gerapporteerde offsets.
 7. De technicus identificeert maps en maakt eventuele aanpassingen uitsluitend in WinOLS.
 8. Importeer de resulterende BIN als tuned voor een nieuwe vergelijking.
 
 Elk exportbestand krijgt een UUID-naam en wordt exclusief aangemaakt: JSON met volledige analyse, CSV met diffgebieden en pair-ID's, en een SHA256-manifest van beide rapporten. Input-SHA256's staan in de JSON. Er wordt geen gewijzigde BIN gegenereerd. Een analyzerexport bevat ook de bekende diffs in CSV. Rapporten zonder diffgebieden leveren alleen een CSV-header. CSV is een leesbaar controlerapport, geen beloofd WinOLS-importformaat. De app leest geen `.ols`-projecten en bestuurt geen WinOLS-executable.
+
+## V5-productlaag (jobs, audit, backup, rapporten)
+
+- **Library analyseren**: `library-analyze` (hervatbaar/pauzeerbaar),
+  GUI-knop op de Library-pagina; content wordt per SHA256 precies één keer
+  diep geanalyseerd.
+- **New BIN tegen de library**: `new-bin-library <pad>` — multi-stage
+  (exacte SHA256 → grootte → fingerprint → shortlist → kennis); een exacte
+  hit hergebruikt bestaande kennis zonder heranalyse.
+- **Watch folders**: `library-watch <root_id> --on [--auto-analyze]` —
+  NOOIT automatische Original/Tuned-rollen (alleen exact-duplicate
+  bewijsregel, expliciet aan te zetten).
+- **Job-manager**: `job pause|resume|cancel|show <id>` + GUI Jobs & Audit.
+- **Auditlog**: elke review/correctie/bevestiging wordt gelogd (§63) en
+  meegebacket.
+- **Backup/restore/health**: `backup --dir D`, `restore <map>` (met
+  SHA256-manifestverificatie + veiligheidsbackup), `health`.
+- **Rapportexport**: `report new_bin <id> --format md` (json/csv/md/html).
+- **Zoeken**: `library-search <term>` (FTS5, hash-prefix wordt ondersteund).
 
 ## API
 

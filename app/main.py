@@ -5,11 +5,61 @@ import logging
 import os
 import secrets
 import sys
+import traceback
+from datetime import datetime
 from pathlib import Path
 from app.utils.config import load_config
 
 
+def _install_crash_hook() -> None:
+    """Zorg dat een crash ALTIJD zichtbaar is: console, crash.log en dialoog.
+
+    Zonder deze hook sluit de console van de Windows-exe direct en is de
+    foutmelding onleesbaar. De hook schrijft het volledige traceback naar
+    crash.log naast de exe, probeert een Qt-dialoog te tonen en houdt de
+    console open tot de gebruiker op Enter drukt.
+    """
+    def hook(exc_type, exc_value, exc_tb):
+        text = ''.join(traceback.format_exception(exc_type, exc_value, exc_tb))
+        header = (f"[{datetime.now().isoformat(timespec='seconds')}] "
+                  "TuningMatching is gestopt met een fout\n")
+        try:
+            sys.stderr.write(header + text + '\n')
+            sys.stderr.flush()
+        except Exception:
+            pass
+        log_path = None
+        try:
+            log_path = Path.cwd() / 'crash.log'
+            with open(log_path, 'a', encoding='utf-8') as handle:
+                handle.write(header + text + '\n')
+        except Exception:
+            log_path = None
+        try:
+            from PySide6.QtWidgets import QApplication, QMessageBox
+            application = QApplication.instance() or QApplication(['TuningMatching'])
+            box = QMessageBox(
+                QMessageBox.Icon.Critical,
+                'TuningMatching — onverwachte fout',
+                f"De app is gestopt met een fout.\n\n"
+                f"{exc_type.__name__}: {exc_value}\n\n"
+                f"Volledige details staan in: {log_path or 'crash.log (programmamap)'}\n"
+                "Stuur dat bestand mee als je hulp vraagt.")
+            box.setDetailedText(text)
+            box.exec()
+        except Exception:
+            pass
+        if getattr(sys, 'frozen', False):
+            try:
+                input('Druk op Enter om dit venster te sluiten…')
+            except (EOFError, OSError):
+                pass
+
+    sys.excepthook = hook
+
+
 def main() -> None:
+    _install_crash_hook()
     parser = argparse.ArgumentParser(description='Tuning File AI Assistant')
     sub = parser.add_subparsers(dest='command')
     sub.add_parser('gui')
@@ -32,6 +82,14 @@ def main() -> None:
     ols_review.add_argument('--role', required=True, choices=['original', 'tuned', 'other', 'unknown'])
     ols_review.add_argument('--note', default='')
     sub.add_parser('suggest-pairs')
+    auto_ols = sub.add_parser('auto-ols', help='OLS volledig automatisch verwerken')
+    auto_ols.add_argument('path')
+    auto_process = sub.add_parser('auto-process', help='reeds geïmporteerd project automatisch verwerken')
+    auto_process.add_argument('project_id', type=int)
+    generate_candidate = sub.add_parser('generate-candidate', help='kandidaat-tune bij >= drempel match')
+    generate_candidate.add_argument('file_id', type=int)
+    generate_candidate.add_argument('--threshold', type=float, default=70.0)
+    sub.add_parser('tune-candidates')
     pairing = sub.add_parser('pair')
     pairing.add_argument('original_id', type=int)
     pairing.add_argument('tuned_id', type=int)
@@ -53,6 +111,98 @@ def main() -> None:
     approve.add_argument('candidate_id', type=int)
     reject = sub.add_parser('reject')
     reject.add_argument('candidate_id', type=int)
+    rebuild = sub.add_parser('rebuild-patterns', help='V3-patronen herbouwen (hervatbaar)')
+    rebuild.add_argument('--no-resume', action='store_true')
+    sub.add_parser('patterns', help='V3-tuningpatronen tonen')
+    pattern_align = sub.add_parser('align-pattern', help='patroon over software heen uitlijnen')
+    pattern_align.add_argument('pattern_id', type=int)
+    regions_cmd = sub.add_parser('regions', help='TuningRegions van een paar')
+    regions_cmd.add_argument('pair_id', type=int)
+    region_detail = sub.add_parser('region', help='een regio met evidence')
+    region_detail.add_argument('region_id', type=int)
+    newbin = sub.add_parser('new-bin', help='New BIN Analysis-rapport')
+    newbin.add_argument('file_id', type=int)
+    newbin.add_argument('--threshold', type=float, default=70.0)
+    mapdetect = sub.add_parser('map-structures', help='structuurkandidaten detecteren')
+    mapdetect.add_argument('file_id', type=int)
+    search_cmd = sub.add_parser('search', help='zoeken in files/patronen/projecten/regios')
+    search_cmd.add_argument('term')
+    ols_graph = sub.add_parser('ols-graph', help='OLS-projectgraph met bewezen relaties')
+    ols_graph.add_argument('project_id', type=int)
+    sub.add_parser('jobs', help='analyse-jobs tonen')
+    review_cmd = sub.add_parser('review-knowledge', help='patroon of regio reviewen')
+    review_cmd.add_argument('subject', choices=['pattern', 'region'])
+    review_cmd.add_argument('subject_id', type=int)
+    review_cmd.add_argument('action')
+    review_cmd.add_argument('--note', default='')
+    lib_add = sub.add_parser('library-add', help='library root registreren (bron blijft staan)')
+    lib_add.add_argument('path')
+    lib_add.add_argument('--name', default='')
+    sub.add_parser('library-list', help='library roots tonen')
+    lib_scan = sub.add_parser('library-scan', help='library incrementeel/resumabel scannen')
+    lib_scan.add_argument('root_id', type=int)
+    lib_scan.add_argument('--resume', action='store_true')
+    lib_loc = sub.add_parser('library-locations', help='locaties zoeken in een library')
+    lib_loc.add_argument('root_id', type=int)
+    lib_loc.add_argument('term', nargs='?', default='')
+    lib_analyze = sub.add_parser('library-analyze', help='nieuwe library-content diep analyseren (hervatbaar)')
+    lib_analyze.add_argument('root_id', nargs='?', type=int, default=None)
+    lib_analyze.add_argument('--limit', type=int, default=None)
+    lib_analyze.add_argument('--no-resume', action='store_true')
+    lib_search = sub.add_parser('library-search', help='bibliotheekbreed zoeken (FTS5)')
+    lib_search.add_argument('term')
+    lib_watch = sub.add_parser('library-watch', help='watch-folder instellen (nooit auto Original/Tuned)')
+    lib_watch.add_argument('root_id', type=int)
+    lib_watch.add_argument('--off', action='store_true')
+    lib_watch.add_argument('--auto-analyze', action='store_true')
+    lib_watch.add_argument('--classify-duplicates', action='store_true',
+                           help='alleen exacte byte-duplicaten classificeren (bewijsregel)')
+    sub.add_parser('library-watch-run', help='watch-roots nu verwerken')
+    newbinlib = sub.add_parser('new-bin-library', help='New BIN multi-stage tegen de library (§40)')
+    newbinlib.add_argument('path')
+    newbinlib.add_argument('--threshold', type=float, default=70.0)
+    job_cmd = sub.add_parser('job', help='taak pauzeren/hervatten/annuleren/bekijken')
+    job_cmd.add_argument('action', choices=['pause', 'resume', 'cancel', 'show'])
+    job_cmd.add_argument('run_id', type=int)
+    sub.add_parser('audit', help='auditlog tonen (§63)')
+    backup_cmd = sub.add_parser('backup', help='database+kennis+audit backuppen (§64)')
+    backup_cmd.add_argument('--dir', default='')
+    restore_cmd = sub.add_parser('restore', help='backup terugzetten (maakt eerst veiligheidsbackup)')
+    restore_cmd.add_argument('path')
+    sub.add_parser('health', help='databasegezondheid controleren')
+    report_cmd = sub.add_parser('report', help='kennisrapport exporteren (json/csv/md/html)')
+    report_cmd.add_argument('kind', choices=['new_bin', 'ols', 'calibration_object',
+                                             'calibration_identity', 'tuning_dna', 'pattern',
+                                             'evidence', 'library', 'knowledge_build'])
+    report_cmd.add_argument('subject_id', nargs='?', type=int, default=None)
+    report_cmd.add_argument('--format', choices=['json', 'csv', 'md', 'html'], default='json')
+    report_cmd.add_argument('--out', default='')
+    sub.add_parser('knowledge-model', help='V6-kennismodel herbouwen (images/families/lineage)')
+    sub.add_parser('golden', help='Golden Dataset-benchmark draaien (§9)')
+    sub.add_parser('snapshot', help='kennis-snapshot maken (knowledge regression §10)')
+    compare_cmd = sub.add_parser('compare', help='twee bestanden naast elkaar (§16)')
+    compare_cmd.add_argument('left_file_id', type=int)
+    compare_cmd.add_argument('right_file_id', type=int)
+    explain_cmd = sub.add_parser('explain', help='Why this match? (§15)')
+    explain_cmd.add_argument('file_id', type=int)
+    negative_cmd = sub.add_parser('reject-match', help='A ≠ B registreren (negatieve kennis §8)')
+    negative_cmd.add_argument('subject')
+    negative_cmd.add_argument('a_type')
+    negative_cmd.add_argument('a_id')
+    negative_cmd.add_argument('b_type')
+    negative_cmd.add_argument('b_id')
+    negative_cmd.add_argument('--reason', default='')
+    reparse_cmd = sub.add_parser('reparse-ols', help='OLS her-interpreteren (parser-versie §19)')
+    reparse_cmd.add_argument('project_id', type=int)
+    sub.add_parser('tune-recipes', help='welke stage/add-on-recepten zijn bouwbaar?')
+    build_cmd = sub.add_parser('tune-build', help='origineel → getunede KANDIDAAT (dry-run standaard)')
+    build_cmd.add_argument('path')
+    build_cmd.add_argument('--stage', default=None)
+    build_cmd.add_argument('--addon', action='append', default=[])
+    build_cmd.add_argument('--intensity', type=int, default=None)
+    build_cmd.add_argument('--threshold', type=float, default=85.0)
+    build_cmd.add_argument('--write', action='store_true',
+                           help='echt schrijven (zonder dit: dry-run)')
     api = sub.add_parser('api')
     api.add_argument('--port', type=int, default=8765)
     args = parser.parse_args()
@@ -72,11 +222,15 @@ def main() -> None:
         from app.service import Service
         service = Service(config)
         if args.command in (None, 'gui'):
+            logger = logging.getLogger(__name__)
+            logger.info('GUI: Qt laden…')
             from PySide6.QtWidgets import QApplication
             from app.ui.main_window import MainWindow
             application = QApplication(sys.argv[:1])
-            window = MainWindow(service)
+            logger.info('GUI: hoofdpagina opbouwen…')
+            window = MainWindow(service, first_run=True)
             window.show()
+            logger.info('GUI: venster zichtbaar — eventloop start')
             sys.exit(application.exec())
         elif args.command == 'api':
             import uvicorn
@@ -101,6 +255,15 @@ def main() -> None:
             result = service.repo.auto_classify_evidence()
         elif args.command == 'suggest-pairs':
             result = {'suggested': service.repo.suggest_pairs()}
+        elif args.command == 'auto-ols':
+            result = service.auto_process_ols(args.path)
+        elif args.command == 'auto-process':
+            project = service.repo.project(args.project_id)
+            result = service.auto_process_ols(project['filepath'])
+        elif args.command == 'generate-candidate':
+            result = service.generate_tune_candidate(args.file_id, args.threshold)
+        elif args.command == 'tune-candidates':
+            result = service.tune_candidates()
         elif args.command == 'pair':
             result = {'pair_id': service.repo.pair(args.original_id, args.tuned_id, args.confirm)}
         elif args.command == 'analyze':
@@ -109,6 +272,95 @@ def main() -> None:
             result = service.identify(args.path)
         elif args.command == 'diff':
             result = service.diff(args.pair_id)
+        elif args.command == 'rebuild-patterns':
+            result = service.run_pattern_job(resume=not args.no_resume)
+        elif args.command == 'patterns':
+            result = service.patterns_detail()
+        elif args.command == 'align-pattern':
+            result = service.align_pattern_across_software(args.pattern_id)
+        elif args.command == 'regions':
+            result = service.regions(args.pair_id)
+        elif args.command == 'region':
+            result = service.region_detail(args.region_id)
+        elif args.command == 'new-bin':
+            result = service.new_bin_report(args.file_id, args.threshold)
+        elif args.command == 'map-structures':
+            result = service.detect_map_structures(args.file_id)
+        elif args.command == 'search':
+            result = service.search(args.term)
+        elif args.command == 'ols-graph':
+            result = service.ols_graph(args.project_id)
+        elif args.command == 'library-add':
+            result = service.library.add_root(args.path, args.name or None)
+        elif args.command == 'library-list':
+            result = {'roots': service.library.roots(), 'storage': service.library.storage_summary()}
+        elif args.command == 'library-scan':
+            result = service.library.scan_root(args.root_id, resume=args.resume)
+        elif args.command == 'library-locations':
+            result = service.library.locations(args.root_id, args.term)
+        elif args.command == 'library-analyze':
+            result = service.library.analyze_pending(root_id=args.root_id, limit=args.limit,
+                                                     resume=not args.no_resume)
+        elif args.command == 'library-search':
+            result = service.library.search(args.term)
+        elif args.command == 'library-watch':
+            result = service.library.set_watch(
+                args.root_id, enabled=not args.off,
+                policy={'auto_analyze': args.auto_analyze,
+                        'classify_exact_duplicates': args.classify_duplicates})
+        elif args.command == 'library-watch-run':
+            result = service.library.process_watch()
+        elif args.command == 'new-bin-library':
+            result = service.new_bin_library_report(args.path, args.threshold)
+        elif args.command == 'job':
+            if args.action == 'pause':
+                result = service.job_pause(args.run_id)
+            elif args.action == 'resume':
+                result = service.job_resume(args.run_id)
+            elif args.action == 'cancel':
+                result = service.job_cancel(args.run_id)
+            else:
+                result = service.job(args.run_id)
+        elif args.command == 'audit':
+            result = {'entries': service.audit_log()}
+        elif args.command == 'backup':
+            result = service.backup(args.dir or None)
+        elif args.command == 'restore':
+            result = service.restore(args.path)
+        elif args.command == 'health':
+            result = service.health_check()
+        elif args.command == 'report':
+            result = service.export_report(args.kind, args.subject_id, args.format,
+                                           args.out or None)
+        elif args.command == 'knowledge-model':
+            result = service.build_knowledge_model()
+        elif args.command == 'golden':
+            result = service.evaluate_golden(save=True)
+        elif args.command == 'snapshot':
+            result = service.snapshot_knowledge()
+        elif args.command == 'compare':
+            result = service.compare_workspace(args.left_file_id, args.right_file_id)
+        elif args.command == 'explain':
+            result = service.explain_new_bin(args.file_id)
+        elif args.command == 'reject-match':
+            result = service.register_negative_match(
+                args.subject, (args.a_type, args.a_id), (args.b_type, args.b_id),
+                reason=args.reason)
+        elif args.command == 'reparse-ols':
+            result = service.repo.reparse_project(args.project_id)
+        elif args.command == 'tune-recipes':
+            result = service.tune_recipes()
+        elif args.command == 'tune-build':
+            result = service.build_tune(original_path=args.path, stage=args.stage,
+                                        addons=args.addon, intensity=args.intensity,
+                                        threshold=args.threshold, dry_run=not args.write)
+        elif args.command == 'jobs':
+            result = service.jobs()
+        elif args.command == 'review-knowledge':
+            if args.subject == 'pattern':
+                result = service.review_pattern(args.subject_id, args.action, note=args.note)
+            else:
+                result = service.review_region(args.subject_id, args.action, note=args.note)
         elif args.command == 'propose-families':
             result = service.repo.propose_families()
         elif args.command == 'generate-tuning-dna':

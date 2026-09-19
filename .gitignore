@@ -1,0 +1,22 @@
+__pycache__/
+*.py[cod]
+.venv/
+*.sqlite-shm
+*.sqlite-wal
+reports/
+app.log
+data_backup_*/
+data/originals/
+data/tuned/
+data/unknown/
+data/winols_projects/
+data/database.sqlite
+data/app.log
+data/backups/
+exports/
+*.restore.tmp
+
+# Windows-build artifacts (lokaal bouwen met packaging/build_windows.bat)
+build/
+dist/
+*.spec.bak
