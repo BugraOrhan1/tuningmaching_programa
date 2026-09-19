@@ -28,6 +28,29 @@ Datum: 2026-09-10 (bijgewerkt na V3-ronde)
   update, exact-SHA-join, GUI-snelpaden, storage-cache, advies-async,
   combo-begrenzing.
 
+## V8.10-status (schijf-benchmark + same-drive-advies + GPU-hoofdstuk) — actueel
+
+**193 passed / 1 guard-skip groen.**
+
+- Gebruikersvraag: "GPU erbij + CPU max + externe D:-schijf USB max
+  200 MB/s — sneller?" Eerlijk antwoord verwerkt in de app: bij USB is
+  de SCHIJF de bottleneck; CPU-hash (SHA-NI) meet 1146 MB/s in de
+  sandbox — GPU zou op de schijf wachten.
+- `service.disk_benchmark(root_id, megabytes)`: meet sequentiële
+  leessnelheid (grootste bestand, 4MB-chunks) + CPU-hashcapaciteit +
+  ETA eerste volledige scan van de root; oordeel TRAAG/USB/SNEL met
+  4 concrete tips (app op C:/NVMe, Defender-uitsluiting, USB3 direct,
+  herscans skip-cache). Knop "Schijfsnelheid meten" op Library.
+- `service.disk_advice()`: waarschuwt als de app/database op dezelfde
+  schijf staat als een library-root (conflicterende I/O); label op
+  Library-pagina (⚠/✓).
+- Assistent-snelheidantwoord + handleiding-hoofdstuk "Waarom GPU niets
+  doet — en wat wél helpt".
+- Benchmarkmeting sandbox: schijf 3702 MB/s, CPU-hash 1146 MB/s, klasse
+  SNEL; same-drive-conflict correct gedetecteerd.
+- Tests: benchmark-meetwaarden+verdict+gpu_note+eta, same-drive-advies,
+  assistent-antwoord (Defender/NVMe/Meet).
+
 ## V8.9-status (Research-verrijking + sample-prefilter) — actueel
 
 **190 passed / 1 guard-skip groen.**

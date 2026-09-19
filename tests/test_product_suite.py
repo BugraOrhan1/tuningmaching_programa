@@ -880,3 +880,40 @@ def test_tuning_knowledge_module():
     assert "checksum" in HOW_TUNING_WORKS[2].lower()
     text = stage1_explanation("benzine")
     assert "REFERENTIE" in text and "boost" in text.lower()
+
+
+def test_disk_benchmark_measures_and_verdicts(service, pair, tmp_path):
+    """V8.10: benchmark meet schijf + CPU-hash en geeft USB-/traag-/snel-
+    oordeel met GPU-notitie; kleine meetgrootte voor de test."""
+    source = tmp_path / "BenchSrc"
+    source.mkdir()
+    (source / "groot.bin").write_bytes(bytes(1536 * 1024))  # 1,5 MB < max_file_mb
+    service.library.add_root(source)
+    root_id = service.library.roots()[0]["id"]
+    service.library.scan_root(root_id)
+    result = service.disk_benchmark(root_id, megabytes=8)
+    assert result["disk_mbps"] > 0
+    assert result["cpu_hash_mbps"] > 100          # CPU haalt altijd > schijf
+    assert result["klasse"] in ("TRAAG", "USB", "SNEL")
+    assert "GPU" in result["gpu_note"]
+    assert result["eta_first_scan_hours"] is not None
+    assert len(result["tips"]) >= 3
+
+
+def test_disk_advice_flags_same_drive(service, tmp_path):
+    """V8.10: root op dezelfde schijf als de app/database -> waarschuwing
+    (in de sandbox POSIX: dezelfde tmp-boom telt als dezelfde 'schijf')."""
+    source = tmp_path / "SameDrive"
+    source.mkdir()
+    (source / "x.bin").write_bytes(b"Z" * 128)
+    service.library.add_root(source)
+    advice = service.disk_advice()
+    assert advice["conflicting_roots"], "sandbox-root moet als conflict tellen"
+    assert "Verplaats" in advice["warning"] or "verplaats" in advice["warning"]
+
+
+def test_assistant_speed_answer_mentions_disk_and_defender(service, pair):
+    answer = service.assistant.answer("hij is traag, kan sneller?")["answer"]
+    assert "Schijfsnelheid meten" in answer
+    assert "Defender" in answer
+    assert "NVMe" in answer

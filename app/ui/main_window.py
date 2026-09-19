@@ -146,6 +146,15 @@ COD/ACT en back-to-stock. De planner kiest het beste dekkende recept en
 ketent bevestigde recepten voor ontbrekende add-ons; elke regio alleen met
 regionaal bewijs (≥98%), overlappen worden nooit dubbel toegepast. Output = nieuw bestand +
 waarschuwingen (checksums NIET gecorrigeerd — eerst WinOLS-controle).
+<b>Waarom GPU niets doet — en wat wél helpt</b>: de snelheid bij een
+externe USB-schijf wordt begrensd door de schijf zelf (~200 MB/s bij
+USB). Één CPU-kern hash't met hardware-ondersteuning al >1000 MB/s, dus
+GPU-toevoeging zou op de schijf blijven wachten. Wél sneller: app +
+database op je snelste interne schijf (C:/NVMe) i.p.v. op dezelfde
+USB-schijf, Windows Defender-uitsluiting voor app- en bronmappen, USB
+rechtstreeks op een USB 3.0-poort, en ongewijzigde bestanden blijven
+automatisch ongemoeid. Meet het zelf met 'Schijfsnelheid meten' op de
+Library-pagina.<br>
 <b>Hoe tuning werkt</b> (referentie): 1) origineel uitlezen (OBD/bench,
 1–8 MB) → 2) maps wijzigen — bij stage-1 diesel o.a. torque limiters,
 drivers wish, inspuithoeveelheid/timing, boost targets, rail pressure,
@@ -379,6 +388,33 @@ class MainWindow(QMainWindow):
 
     def _persist_ui_mode(self, mode: str) -> None:
         self._update_ui_store({'ui_mode': mode})
+
+    def run_disk_benchmark(self):
+        root_id = self.selected_id(self.library_root_table)
+        if root_id is None:
+            QMessageBox.information(self, 'Schijfsnelheid',
+                                    'Selecteer eerst een root in de tabel.')
+            return
+
+        def ready(result):
+            def apply():
+                lines = [f"Schijf: {result['disk_mbps']} MB/s lezen · "
+                         f"CPU-hashcapaciteit: {result['cpu_hash_mbps']} MB/s "
+                         "(SHA-256, hardware-versneld)",
+                         f"Oordeel: {result['verdict']}",
+                         result.get('gpu_note', '')]
+                if result.get('eta_first_scan_hours') is not None:
+                    lines.append(f"Eerste volledige scan van deze root duurt "
+                                 f"ongeveer {result['eta_first_scan_hours']} uur "
+                                 "(daarna alleen nieuwe/gewijzigde bestanden).")
+                lines.append('')
+                lines.append('Wél sneller maken:')
+                lines.extend(f"  • {tip}" for tip in result['tips'])
+                QMessageBox.information(self, 'Schijfsnelheid', '\n'.join(lines))
+            self.safe(apply)
+
+        self.run_job(lambda progress: self.service.disk_benchmark(root_id),
+                     callback=ready, job_name='schijfsnelheid meten')
 
     def change_speed_preset(self, preset: str):
         """Snelheidsprofiel (LOW/BALANCED/HIGH/MAX) direct toepassen en
@@ -1661,8 +1697,15 @@ class MainWindow(QMainWindow):
         speed_row.addWidget(QLabel(
             'LOW = rustig (laptop/HDD) · BALANCED = normaal · HIGH = snel · '
             'MAX = vol gas (SSD/NVMe). Geldt meteen voor nieuwe scans en analyses.'))
+        bench_btn = QPushButton('Schijfsnelheid meten (geselecteerde root)')
+        bench_btn.clicked.connect(self.run_disk_benchmark)
+        speed_row.addWidget(bench_btn)
         speed_row.addStretch(1)
         layout.addLayout(speed_row)
+        self.disk_advice_label = QLabel('')
+        self.disk_advice_label.setWordWrap(True)
+        self.disk_advice_label.setStyleSheet('padding: 4px;')
+        layout.addWidget(self.disk_advice_label)
         row = QHBoxLayout()
         add_btn = QPushButton('Library root toevoegen…')
         add_btn.clicked.connect(self.add_library_root)
@@ -2339,6 +2382,15 @@ class MainWindow(QMainWindow):
                 self.location_hint.setText(
                     f"{len(rows)} locatie(s) zichtbaar (max 500). Status NEW = "
                     "nog niet geanalyseerd in de Library.")
+        except Exception:
+            pass
+        try:
+            if hasattr(self, 'disk_advice_label'):
+                advice = self.service.disk_advice()
+                self.disk_advice_label.setText(
+                    ('⚠ ' + advice['warning'] if advice['warning']
+                     else f"✓ App/database ({advice['data_drive']}) staat niet op "
+                          "een bron-schijf — goed voor de snelheid."))
         except Exception:
             pass
         try:

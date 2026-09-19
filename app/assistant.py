@@ -165,11 +165,16 @@ class Assistant:
             f"• Library: {c['roots']} root(s), {c['locations']} locaties geïndexeerd.",
             "• Ongewijzigde bestanden worden nooit opnieuw gelezen — een herscan van duizenden "
             "bestanden kost milliseconden.",
-            "• Hashen gebeurt parallel (profiel LOW=1/BALANCED=3/HIGH=6 workers) en schrijfwerk per "
-            "blok van 64 bestanden.",
-            "• '⭐ Root volledig verwerken' doet scan + import + paren automatisch en is hervatbaar: "
-            "na een onderbreking gewoon opnieuw starten.",
-            "• GUI-laadtijd: Files toont pagina's van 400 rijen — verfijn met het zoekveld."]), "topic": "snelheid"}
+            "• Hashen/OLS verlopen parallel (profiel LOW/BALANCED/HIGH/MAX — zie de "
+            "Snelheid-keuze op de Library-pagina).",
+            "• Meet je schijf met 'Schijfsnelheid meten' (Library). Bij een USB-schijf "
+            "(~200 MB/s) is de SCHIJF de bottleneck: CPU/GPU kan dat niet sneller maken.",
+            "• Wél sneller: 1) app+database op je snelste schijf (C:, NVMe) i.p.v. "
+            "dezelfde USB-schijf; 2) Windows Defender-uitsluiting voor app- en "
+            "bronmappen (scheelt vaak een helft); 3) USB rechtstreeks op een "
+            "USB 3.0-poort (geen hub); 4) actieve projecten kopiëren naar NVMe.",
+            "• '⭐ Root volledig verwerken' doet scan + import + paren automatisch en is hervatbaar.",
+            "• GUI-laadtijd: overzichten tonen begrensde pagina's — verfijn met het zoekveld."]), "topic": "snelheid"}
 
     def _fallback(self, question, c) -> dict:
         return {"answer": "\n".join([

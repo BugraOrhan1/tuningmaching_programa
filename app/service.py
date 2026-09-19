@@ -582,6 +582,104 @@ class Service(ServiceV3Mixin):
                 totals["errors"].append({"root": root.get("path"), "error": str(exc)})
         return totals
 
+    def disk_benchmark(self, root_id: int, megabytes: int = 256) -> dict:
+        """Meet de échte leessnelheid van de bron-schijf + de CPU-hash-
+        capaciteit (V8.10). Geeft een eerlijk oordeel: bij USB (<300 MB/s)
+        is de SCHIJF de bottleneck, niet de CPU en zeker niet de GPU
+        (één CPU-kern haalt met hardware-SHA al >1000 MB/s)."""
+        import time as _time
+        import hashlib as _hashlib
+        rows = self.repo.db.rows(
+            """SELECT path, size FROM file_locations
+               WHERE root_id=? AND scan_status!='ERROR'
+               ORDER BY size DESC LIMIT 1""", (root_id,))
+        if not rows:
+            raise ValueError("Geen leesbare bestanden in deze root om te meten.")
+        probe_path = Path(rows[0]["path"])
+        want = min(megabytes, 64) * 1024 * 1024
+        try:
+            size = probe_path.stat().st_size
+        except OSError as exc:
+            raise ValueError(f"Kan {probe_path} niet lezen: {exc}") from exc
+        read_bytes = min(want, size)
+        chunk = 4 * 1024 * 1024
+        with probe_path.open("rb") as stream:
+            read_bytes_total = 0
+            started = _time.monotonic()
+            while read_bytes_total < read_bytes:
+                data = stream.read(chunk)
+                if not data:
+                    break
+                read_bytes_total += len(data)
+            elapsed = max(_time.monotonic() - started, 0.001)
+        disk_mbps = read_bytes_total / elapsed / (1024 * 1024)
+        # CPU-hashcapaciteit (SHA-256 gebruikt op bijna elke moderne CPU
+        # hardware-versnelling; dit toont dat CPU/GPU NIET de bottleneck zijn)
+        blob = bytes(32 * 1024 * 1024)
+        started = _time.monotonic()
+        digest = b""
+        loops = 0
+        while _time.monotonic() - started < 0.5:
+            digest = _hashlib.sha256(blob).digest()
+            loops += 1
+        cpu_mbps = (loops * len(blob)) / max(_time.monotonic() - started, 0.001) / (1024 * 1024)
+        total_row = self.repo.db.rows(
+            "SELECT COALESCE(SUM(size),0) AS n FROM file_locations WHERE root_id=?",
+            (root_id,))[0]["n"]
+        eta_hours = (total_row / (disk_mbps * 1024 * 1024) / 3600) if disk_mbps else None
+        if disk_mbps < 150:
+            verdict, klass = ("TRAAG: dit is een trage schijf (USB-HDD of USB2?). "
+                              "Parallelle workers helpen hier nauwelijks — de schijf "
+                              "is de bottleneck. Kopieer actieve projecten naar een "
+                              "snelle (NVMe) schijf voor de grootste winst.", "TRAAG")
+        elif disk_mbps < 300:
+            verdict, klass = ("TYPISCH USB (SSD of harde schijf): ~jouw genoemde "
+                              "200 MB/s. De schijf is de bottleneck — extra CPU/GPU "
+                              "maakt het niet sneller. Zie advies hieronder.", "USB")
+        else:
+            verdict, klass = ("SNEL: interne/SSD-snelheid. Hier werkt de app op "
+                              "volgas; MAX-preset is veilig.", "SNEL")
+        tips = [
+            "Installeer de app + database op je snelste schijf (C:, NVMe). "
+            "Staat de app op dezelfde USB-schijf als je brondata, dan "
+            "concurreren database-schrijfacties met het uitlezen om dezelfde "
+            "200 MB/s.",
+            "Zet een Windows Defender-uitsluiting (uitzondering) voor de "
+            "app-map en je bronmappen: realtime-scanning leest élk bestand "
+            "twee keer en kan de snelheid halveren.",
+            "Sluit de USB-schijf direct aan op de PC (geen hub) op een "
+            "USB 3.0-poort (blauw); oudere kabels/hubs beperken tot USB2 "
+            "(~40 MB/s).",
+            "Herhaalde scans zijn altijd snel: ongewijzigde bestanden "
+            "(zelfde grootte+datum) worden opnieuw overgeslagen zonder lezen.",
+        ]
+        return {"disk_mbps": round(disk_mbps, 1), "cpu_hash_mbps": round(cpu_mbps, 1),
+                "gpu_note": ("GPU toevoegen loont hier niet: hashen met CPU "
+                             f"ondersteuning ({round(cpu_mbps)} MB/s per kern-capaciteit "
+                             "gemeten) ligt ver boven de schijfsnelheid — de GPU zou "
+                             "op de schijf wachten."),
+                "root_bytes": total_row,
+                "eta_first_scan_hours": round(eta_hours, 1) if eta_hours is not None else None,
+                "verdict": verdict, "klasse": klass, "tips": tips,
+                "note": "Eerste meting includeert opstart; refresh geeft een "
+                        "stabieler getal. Gemeten op het grootste bestand in de root."}
+
+    def disk_advice(self) -> dict:
+        """Staat de app/database op dezelfde schijf als een library-root?
+        Dan concurreren ze om dezelfde schijf-I/O (USB!)."""
+        data_drive = Path(self.repo.root).resolve().drive.upper() or "POSIX"
+        conflicts = []
+        for root in self.library.roots():
+            root_drive = Path(root["path"]).resolve().drive.upper() or "POSIX"
+            if root_drive == data_drive:
+                conflicts.append(root["path"])
+        return {"data_dir": str(self.repo.root), "data_drive": data_drive,
+                "conflicting_roots": conflicts,
+                "warning": (f"De app/database staat op schijf {data_drive} — "
+                            "dezelfde schijf als je brondata. Verplaats de app-map "
+                            "naar je snelste interne schijf (meestal C:) voor een "
+                            "duidelijke snelheidswinst.") if conflicts else ""}
+
     def review_queues(self, limit: int = 200) -> dict:
         """Alles wat menselijke aandacht nodig heeft, op één plek. Totalen
         komen uit snelle COUNT-query's; lijsten zijn begrensd op `limit`
