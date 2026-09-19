@@ -120,11 +120,13 @@ unknown die uniek en sterk matcht met één bekend original wordt tuned en
 gepaard — ≥95% = bevestigd paar, 90–95% = suggestie voor jouw review;
 inhoud identiek aan het original = geen paar (dat is geen tuning).<br>
 <b>Tune Bouwer (V7)</b> — origineel erin, getunede kandidaat terug: kies stage
-(1–5) en vink meerdere add-ons aan (pops &amp; bang, vmax, dpf off, egr off,
-adblue off, decat, antilag, launch control, E85, swirl off, cold start off,
-…). De planner kiest het beste dekkende recept en ketent bevestigde
-recepten voor ontbrekende add-ons; elke regio alleen met regionaal bewijs
-(≥98%), overlappen worden nooit dubbel toegepast. Output = nieuw bestand +
+(1–5) en vink meerdere add-ons aan — <b>25 stuks</b>, o.a. pops &amp; bang
+(ook non-turbo en in sportstand), burble, vmax, rev-limiter, dpf/roetfilter,
+egr, adblue, decat, opf, antilag, launch control, E85, swirl, cold start,
+dsg/automaat (+dsg farts), lambdasonde, foutcodes, hardcut/popcorn,
+COD/ACT en back-to-stock. De planner kiest het beste dekkende recept en
+ketent bevestigde recepten voor ontbrekende add-ons; elke regio alleen met
+regionaal bewijs (≥98%), overlappen worden nooit dubbel toegepast. Output = nieuw bestand +
 waarschuwingen (checksums NIET gecorrigeerd — eerst WinOLS-controle).
 <b>Kennis-overdracht</b> (standaard aan): geen eigen tuned-bestand van die
 auto? Dan past de bouwer consistente wijzigingen toe die bij ≥2 bevestigde
@@ -291,7 +293,7 @@ class MainWindow(QMainWindow):
         self.nav.currentRowChanged.connect(self._nav_changed)
         self.nav_filter.textChanged.connect(self.filter_nav)
         self.navigate('Dashboard')
-        self.refresh()
+        QTimer.singleShot(0, self._do_refresh)  # V8.8: venster eerst, data daarna
         if first_run:
             self.maybe_first_run()
         else:
@@ -732,6 +734,30 @@ class MainWindow(QMainWindow):
         self.smart_advice.setWordWrap(True)
         self.smart_advice.setStyleSheet('font-weight: bold; padding: 6px; background:#eef2ff;')
         layout.addWidget(self.smart_advice)
+        steps_head = QLabel('STAPPENPLAN — waar ben je nu?')
+        steps_head.setStyleSheet('font-weight: bold; padding: 6px 0;')
+        layout.addWidget(steps_head)
+        self.steps_labels = {}
+        self.steps_buttons = {}
+        steps_box = QVBoxLayout()
+        for number, title, target in (
+                (1, 'Bronmap/schijf toevoegen (je bestanden blijven op hun plek)', 'Library (V5)'),
+                (2, 'ALLES automatisch verwerken: scan + importeren + classificeren + paren + leren', 'Library (V5)'),
+                (3, 'Paren en unknowns bevestigen in het Review-center (hier leert hij van!)', 'Review-center'),
+                (4, 'Kennis groeit automatisch: patronen, DNA, recepten (even geduld of doorwerken)', 'Original/Tuned Pairs'),
+                (5, 'Tune bouwen: origineel kiezen → stage + add-ons aanvinken → bouwen', 'Tune Bouwer (V7)')):
+            row = QHBoxLayout()
+            label = QLabel()
+            label.setWordWrap(True)
+            label.setProperty('step_title', title)
+            self.steps_labels[number] = label
+            row.addWidget(label, 1)
+            btn = QPushButton(f'Stap {number} →')
+            btn.clicked.connect(lambda _c=False, page=target: self.navigate(page))
+            self.steps_buttons[number] = btn
+            row.addWidget(btn)
+            steps_box.addLayout(row)
+        layout.addLayout(steps_box)
         quick = QLabel('SNELSTART')
         quick.setStyleSheet('font-weight: bold; padding: 6px 0;')
         layout.addWidget(quick)
@@ -2206,6 +2232,27 @@ class MainWindow(QMainWindow):
         self.dna_output.setPlainText(json.dumps(dna, ensure_ascii=False, indent=2))
         self.refresh()
 
+    def _update_steps(self, roots, summary, patterns):
+        """Stappenplan-statussen: groen vinkje als de stap kan/bestaat."""
+        confirmed = self.repo.db.rows(
+            "SELECT COUNT(*) AS n FROM file_pairs WHERE confirmed=1")[0]['n']
+        unconfirmed = self.repo.db.rows(
+            "SELECT COUNT(*) AS n FROM file_pairs WHERE confirmed=0")[0]['n']
+        states = {
+            1: len(roots) > 0,
+            2: summary['locations'] > 0,
+            3: confirmed > 0 or unconfirmed > 0,
+            4: patterns > 0 or confirmed > 0,
+            5: True,
+        }
+        counts = {1: f"{len(roots)} root(s)", 2: f"{summary['locations']} locaties",
+                  3: f"{confirmed} bevestigd · {unconfirmed} te reviewen",
+                  4: f"{patterns} patronen", 5: "bouwen maar!"}
+        for number, label in self.steps_labels.items():
+            title = label.property('step_title') or ''
+            mark = '✅' if states[number] else '⬜'
+            label.setText(f"{mark} <b>Stap {number}.</b> {title} <i>({counts[number]})</i>")
+
     def refresh(self):
         """Directe (synchrone) verversing — gebruikt door knoppen en tests."""
         self._do_refresh()
@@ -2311,6 +2358,7 @@ class MainWindow(QMainWindow):
                     self.smart_advice.setText('🤖 Advies: ' + advice)
                 except Exception:
                     pass
+                self._update_steps(roots, summary, patterns)
                 parts = [f"Library: {len(roots)} root(s), {online} online · "
                          f"{summary['locations']} locaties / "
                          f"{summary['unique_contents']} unieke contents",

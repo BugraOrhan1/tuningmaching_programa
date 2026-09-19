@@ -306,14 +306,15 @@ class Service(ServiceV3Mixin):
                                 'confidence': report['confidence']})
                 except (ValueError, OSError) as exc:
                     pairs[pairs.index(pair)]['dna_error'] = str(exc)
-        files = [row for row in self.repo.files(limit=0) if str(row.get('source_path', '')).startswith('ols://')]
+        files_count = self.repo.db.rows(
+            "SELECT COUNT(*) AS n FROM files WHERE source_path LIKE 'ols://%'")[0]['n']
         return {
             'project_id': project_id,
             'versions': [{'version_index': v['version_index'], 'name': v['version_name'], 'role': v['role'],
                           'role_confidence': v['role_confidence'], 'complete': bool(v['complete']),
                           'file_id': v['file_id'], 'sha256': v['binary_sha256'],
                           'relation_type': v['relation_type']} for v in versions],
-            'files_extracted': len(files),
+            'files_extracted': files_count,
             'pairs': pairs,
             'tuning_dna': dna,
             'note': 'Binaries zijn gextraheerd op bewezen grenzen; rollen komen uit expliciete '

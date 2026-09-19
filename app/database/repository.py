@@ -205,8 +205,29 @@ class Repository(RepositoryV3Mixin):
 
     def import_project(self, path: Path) -> int:
         path = path.resolve()
+        # V8.8 snelheid: ongewijzigd OLS (zelfde size+mtime, zelfde parser)
+        # wordt NIET opnieuw gelezen/gehasht/geparst — bij 4000+ OLS-bestanden
+        # was dat de grootste vertraging in "ALLES automatisch afhandelen".
+        try:
+            stat = path.stat()
+        except OSError as exc:
+            raise ValueError(f"OLS niet leesbaar: {path}") from exc
+        from app.winols.ols_reader import PARSER_VERSION as _parser_version
+        existing = self.db.rows(
+            "SELECT id, file_size, parser_version, project_metadata "
+            "FROM winols_projects WHERE source_path=? ORDER BY id DESC LIMIT 1",
+            (str(path),))
+        if existing and existing[0]["file_size"] == stat.st_size \
+                and (existing[0]["parser_version"] or "") == _parser_version:
+            try:
+                stored_mtime = json.loads(existing[0]["project_metadata"] or "{}").get("source_mtime")
+            except (TypeError, ValueError):
+                stored_mtime = None
+            if stored_mtime == stat.st_mtime:
+                return existing[0]["id"]
         data = read_ols(path, self.config["max_file_mb"])
         details = inspect_ols(data)
+        details["source_mtime"] = stat.st_mtime
         structure = parse_ols_structure(data)
         maps_by_offset = {item["offset"]: item for item in structure.get("maps", [])}
         digest = details.pop("hashes")
@@ -1239,8 +1260,14 @@ class Repository(RepositoryV3Mixin):
         self.audit("confirm_pair", "file_pair", pair_id, after={"confirmed": True})
 
     def dashboard(self) -> dict:
-        files = self.files()
-        return {"Total Files": len(files), "Original Files": sum(f['file_type']=='original' for f in files),
-                "Tuned Files": sum(f['file_type']=='tuned' for f in files), "WinOLS Projects": len(self.projects()), "Pairs": len(self.pairs()),
-                "ECU Families": self.db.rows("SELECT COUNT(*) AS count FROM ecu_families WHERE verified=1")[0]["count"],
-                "Software Versions": self.db.rows("SELECT COUNT(*) AS count FROM software_families WHERE verified=1")[0]["count"]}
+        """Tellingen via snelle COUNT-query's (V8.8: laadde vroeger ALLE
+        files in Python — dat vertraagde de opstart bij 100k+ bestanden)."""
+        def count(sql: str) -> int:
+            return self.db.rows(sql)[0]["count"]
+        return {"Total Files": count("SELECT COUNT(*) AS count FROM files"),
+                "Original Files": count("SELECT COUNT(*) AS count FROM files WHERE file_type='original'"),
+                "Tuned Files": count("SELECT COUNT(*) AS count FROM files WHERE file_type='tuned'"),
+                "WinOLS Projects": count("SELECT COUNT(*) AS count FROM winols_projects"),
+                "Pairs": count("SELECT COUNT(*) AS count FROM file_pairs"),
+                "ECU Families": count("SELECT COUNT(*) AS count FROM ecu_families WHERE verified=1"),
+                "Software Versions": count("SELECT COUNT(*) AS count FROM software_families WHERE verified=1")}

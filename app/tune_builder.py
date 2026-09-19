@@ -32,11 +32,15 @@ from pathlib import Path
 KNOWN_ADDONS = ("pops_bang", "vmax", "dpf_off", "egr_off", "adblue_off",
                 "speed_limit_off", "torque_monitoring_off", "decat",
                 "antilag", "launch_control", "e85", "swirl_off",
-                "cold_start_off")
+                "cold_start_off",
+                # V8.8: uitgebreid met de volledige dienstenlijst:
+                "burble", "pops_non_turbo", "rev_limit", "dsg", "dsg_farts",
+                "lambda_off", "dtc_off", "hardcut", "opf_off", "cod_off",
+                "pops_sport", "back_to_stock")
 ADDON_TOKENS = {
     "pops_bang": ("pops", "bang", "pops and bang", "pops&bang", "crackle"),
     "vmax": ("vmax", "v-max"),
-    "dpf_off": ("dpf", "dpf off", "dpf-off"),
+    "dpf_off": ("dpf", "dpf off", "dpf-off", "roetfilter", "roet filter"),
     "egr_off": ("egr", "egr off", "egr-off"),
     "adblue_off": ("adblue", "scr off"),
     "speed_limit_off": ("speed limit", "vmax off", "limiter off"),
@@ -46,6 +50,25 @@ ADDON_TOKENS = {
     "e85": ("e85", "flex fuel", "ethanol"),
     "swirl_off": ("swirl", "swirlflap off"),
     "cold_start_off": ("cold start off", "coldstart", "kaltstart off"),
+    "burble": ("burble",),
+    "pops_non_turbo": ("pops non turbo", "non turbo pops", "pops & bangs non "
+                       "turbo", "pops of burble non turbo"),
+    "rev_limit": ("rev limiter", "rev limit", "begrenzer toerental",
+                  "toerental begrenzer"),
+    "dsg": ("dsg", "automaat tuning", "automaat icm"),
+    "dsg_farts": ("dsg farts", "farts"),
+    "lambda_off": ("lambdasonde", "lambda off", "lambda weg", "o2 off",
+                   "lambda sensor off"),
+    "dtc_off": ("foutcodes", "dtc off", "dtc-off", "error codes off",
+                "dtc delete"),
+    "hardcut": ("hardcut", "hard cut", "popcorn"),
+    "opf_off": ("opf",),
+    "cod_off": ("cod / act", "cod/act", "cod uit", "cod off", "act uit",
+                "act off", "cylinder on demand"),
+    "pops_sport": ("sportsand", "sport stand", "sportstand", "aircostand",
+                   "airco stand", "sport mode pops"),
+    "back_to_stock": ("back 2 stock", "back to stock", "back2stock",
+                      "origineel terugzetten"),
 }
 STAGE_PATTERN = re.compile(r"stage\s*([1-5])\s*\+?", re.IGNORECASE)
 INTENSITY_PATTERN = re.compile(r"(?:^|[\s\-])(\d{2,3})\s*%?(?:$|[\s\-)])")
@@ -61,6 +84,10 @@ def parse_recipe_label(label: str) -> dict:
     for addon, tokens in ADDON_TOKENS.items():
         if any(token in text for token in tokens):
             addons.append(addon)
+    # specificiteit: 'pops non turbo'/'pops in sportstand' wint van gewone
+    # pops & bangs (Anders zou beide aangevinkt worden)
+    if "pops_non_turbo" in addons or "pops_sport" in addons:
+        addons = [addon for addon in addons if addon != "pops_bang"]
     intensity = None
     if "pops" in text or "bang" in text:
         intensity_match = INTENSITY_PATTERN.search(text)
@@ -139,13 +166,15 @@ class TuneBuilder:
         """Overzicht voor de keuzemenu's: stages, add-ons, intensiteiten."""
         recipes = self.recipes()
         stages = sorted({recipe["stage"] for recipe in recipes if recipe["stage"]})
-        addons = sorted({addon for recipe in recipes for addon in recipe["addons"]})
+        addons = list(KNOWN_ADDONS)  # alles aangeboden; kennis bepaalt bouwbaar
         intensities = sorted({recipe["intensity"] for recipe in recipes
                               if recipe["intensity"]})
         return {"stages": stages, "addons": addons, "intensities": intensities,
                 "recipes": recipes,
-                "note": "Alleen recepten uit bevestigde paren; intensiteiten "
-                        "bestaan alleen als er kennis met dat label is."}
+                "note": f"{len(recipes)} bouwbare recepten uit bevestigde "
+                        "paren. Alle bekende add-ons kun je aanvinken — wat "
+                        "(nog) geen kennis heeft, wordt overgeslagen of via "
+                        "kennis-overdracht geprobeerd."}
 
     # ------------------------------------------------------------------
     # Receptselectie

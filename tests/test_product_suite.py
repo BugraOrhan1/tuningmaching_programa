@@ -597,3 +597,78 @@ def test_gui_tables_bounded(service, pair, tmp_path):
     assert len(service.repo.pairs(limit=1)) <= 1
     assert service.repo.tune_candidates(limit=5) == []
     assert len(service.patterns_detail(limit=3)) <= 3
+
+
+def test_price_list_addons_recognised():
+    """V8.8: de volledige dienstenlijst (28 regels) wordt herkend, inclusief
+    de Nederlandse formuleringen; pops-varianten vervangen gewone pops."""
+    from app.tune_builder import parse_recipe_label as parse_recipe_labels, KNOWN_ADDONS
+    assert len(KNOWN_ADDONS) == 25
+    assert parse_recipe_labels("Burble Tunes")["addons"] == ["burble"]
+    result = parse_recipe_labels("Stage 1 en pops of burble non turbo")
+    assert "pops_non_turbo" in result["addons"] and "burble" in result["addons"]
+    assert result["stage"] == "stage1"
+    assert "pops_bang" not in result["addons"]          # specifieke variant wint
+    assert "dsg" in parse_recipe_labels("Dsg / Automaat tuning")["addons"]
+    assert "dsg_farts" in parse_recipe_labels("Dsg farts")["addons"]
+    assert "rev_limit" in parse_recipe_labels("Rev-limiter icm stage 1 (begrenzer toerental)")["addons"]
+    assert "hardcut" in parse_recipe_labels("Hardcut limiter / Popcorn")["addons"]
+    assert "lambda_off" in parse_recipe_labels("Lambdasonde wegschrijven")["addons"]
+    assert "dtc_off" in parse_recipe_labels("Diverse andere p-foutcodes wegschrijven")["addons"]
+    assert "opf_off" in parse_recipe_labels("OPF delete(Software matig)")["addons"]
+    assert "cod_off" in parse_recipe_labels("COD / ACT uitschakelen")["addons"]
+    assert "back_to_stock" in parse_recipe_labels("Auto orgineel terugzetten (back 2 stock)")["addons"]
+    sport = parse_recipe_labels("Pops and bangs in sportsand of aircostand")
+    assert "pops_sport" in sport["addons"] and "pops_bang" not in sport["addons"]
+    assert "dpf_off" in parse_recipe_labels("Roetfilter wegschrijven")["addons"]
+
+
+def test_available_options_offers_all_known_addons(service):
+    """De GUI-aanvinklijst toont ALLE 25 bekende add-ons (kennis bepaalt
+    bouwbaarheid), ook zonder recepten."""
+    options = service.tune_recipes()
+    assert len(options["addons"]) == 25
+    assert "cod_off" in options["addons"] and "dsg_farts" in options["addons"]
+
+
+def test_dashboard_counts_via_sql(service, pair, tmp_path):
+    """V8.8: dashboard() telt met COUNT-query's (laadt nooit alle files)."""
+    extra = tmp_path / "dash_extra.bin"
+    extra.write_bytes(b"\\x00SW:TEST_SW HW:TEST_HW\\x00" + bytes(range(256)) * 8)
+    service.repo.import_file(extra, "unknown")
+    stats = service.repo.dashboard()
+    total_known = service.repo.files_count("")
+    assert stats["Total Files"] == total_known
+    assert stats["Original Files"] == 1
+    assert stats["Pairs"] >= 1
+
+
+def test_import_project_skips_unchanged_ols(service, tmp_path):
+    """V8.8: hetzelfde OLS-bestand tweemaal importeren = één parse; na
+    wijziging (andere size) wordt wel opnieuw verwerkt."""
+    import os
+    project = tmp_path / "herhaal.ols"
+    project.write_bytes(b"OLS\x00herhaal-test\x00" + bytes(512))
+    first = service.repo.import_project(project)
+    stamp = os.stat(project).st_mtime
+    second = service.repo.import_project(project)
+    assert first == second
+    rows = service.repo.db.rows(
+        "SELECT COUNT(*) AS n FROM winols_projects WHERE source_path=?",
+        (str(project.resolve()),))
+    assert rows[0]["n"] == 1
+    # inhoud wijzigt (andere grootte) → opnieuw parsen
+    project.write_bytes(b"OLS\x00herhaal-test\x00" + bytes(1024))
+    os.utime(project, (stamp + 5, stamp + 5))
+    third = service.repo.import_project(project)
+    assert third != first
+
+
+def test_hot_indexes_exist(service):
+    """V8.8: GUI/dashboard-indexen bestaan na database-init (grote libraries)."""
+    names = {row["name"] for row in service.repo.db.rows(
+        "SELECT name FROM sqlite_master WHERE type='index'")}
+    for expected in ("idx_files_file_type", "idx_pairs_confirmed",
+                     "idx_kc_status", "idx_patterns_status",
+                     "idx_locations_state", "idx_files_sha256"):
+        assert expected in names

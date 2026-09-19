@@ -2,6 +2,36 @@
 
 Datum: 2026-09-10 (bijgewerkt na V3-ronde)
 
+## V8.8-status (Snelheid @450k files, OLS-cache, 25 add-ons, stappenplan) — actueel
+
+**178 passed / 1 guard-skip groen.**
+
+- Gebruikersdata: 450.000+ files verwerkt (sinds de 22e), 4173 OLS,
+  database ~500 MB. Klachten: OLS-verwerking extreem traag, opstart
+  extreem traag; vraag: volledige dienstenlijst als add-ons + stappenplan.
+- **OLS-snelheid (2 bottlenecks weg):**
+  1. `import_project` skip-cache: zelfde source_path + size + mtime +
+     parser_version → GEEN read/hash/parse meer (was: élke run alles
+     opnieuw). source_mtime in project_metadata; parserbump → re-parse.
+  2. `auto_process_ols` telde ols://-bestanden via **volledige filestabel
+     in Python per OLS** (450k rijen × 4173 OLS!) → SQL-COUNT.
+- **Opstart:** `dashboard()` laadde ALLE files in Python → 7 snelle
+  COUNT's; `__init__` tekent het venster eerst, `_do_refresh` via
+  QTimer.singleShot(0); HOT_INDEXES (9 indexen: files.file_type/source_path/
+  sha256, pairs.confirmed, kc.status, patterns.status, locations/contents
+  .analysis_state, ols_objects.role); SCHEMA_VERSION 12.
+- **25 add-ons** (volledige dienstenlijst): +burble, pops_non_turbo,
+  rev_limit, dsg, dsg_farts, lambda_off, dtc_off, hardcut, opf_off,
+  cod_off, pops_sport, back_to_stock; NL-tokens ("roetfilter",
+  "begrenzer toerental", "lambdasonde", "p-foutcodes", "hardcut/popcorn",
+  "OPF delete", "COD / ACT", "back 2 stock", "sportsand/aircostand");
+  specificiteitsregel: pops_non_turbo/pops_sport vervangen pops_bang;
+  `available_options` biedt álle 25 aan (kennis bepaalt bouwbaarheid).
+- **Stappenplan** op Dashboard: 5 stappen met ✅/⬜ + aantallen + knoppen
+  (`_update_steps`, states uit roots/locations/paren/patronen).
+- Tests: prijslijst-labels, alle-25-opties, dashboard-COUNT, OLS-skip
+  (herhaal+gewijzigd), indexen-bestaan.
+
 ## V8.7.1-status (HOTFIX: 'reageert niet' — GUI-thread ontzorgt) — actueel
 
 **173 passed / 1 guard-skip groen.**

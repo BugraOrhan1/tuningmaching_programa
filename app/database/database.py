@@ -163,7 +163,19 @@ CREATE UNIQUE INDEX IF NOT EXISTS tune_candidates_identity
  ON tune_candidates(target_file_id, IFNULL(pair_id, 0), sha256, status);
 """
 
-SCHEMA_VERSION = 11
+# V8.8: indexen voor GUI/dashboard-hot queries (grote bibliotheken)
+HOT_INDEXES = '''
+CREATE INDEX IF NOT EXISTS idx_files_file_type ON files(file_type);
+CREATE INDEX IF NOT EXISTS idx_files_source_path ON files(source_path);
+CREATE INDEX IF NOT EXISTS idx_pairs_confirmed ON file_pairs(confirmed);
+CREATE INDEX IF NOT EXISTS idx_kc_status ON knowledge_candidates(status);
+CREATE INDEX IF NOT EXISTS idx_patterns_status ON tuning_patterns(status);
+CREATE INDEX IF NOT EXISTS idx_locations_state ON file_locations(analysis_state);
+CREATE INDEX IF NOT EXISTS idx_contents_state ON content_objects(analysis_state);
+CREATE INDEX IF NOT EXISTS idx_ols_objects_role ON ols_objects(role);
+CREATE INDEX IF NOT EXISTS idx_files_sha256 ON files(sha256);
+'''
+SCHEMA_VERSION = 12
 
 
 class Database:
@@ -176,6 +188,7 @@ class Database:
             db.executescript(V3_SCHEMA)
             db.executescript(V6_SCHEMA)
             db.executescript(LIBRARY_SCHEMA)
+            db.executescript(HOT_INDEXES)
             try:
                 db.executescript(FTS_DDL)
             except sqlite3.OperationalError:
