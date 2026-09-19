@@ -672,3 +672,139 @@ def test_hot_indexes_exist(service):
                      "idx_kc_status", "idx_patterns_status",
                      "idx_locations_state", "idx_files_sha256"):
         assert expected in names
+
+
+def test_files_fast_paths_and_kind(service, pair, tmp_path):
+    """V8.8.1: lege zoekterm = geen LIKE-scan (SELECT zonder WHERE);
+    files_by_kind levert direct de juiste soort (combo-pad)."""
+    assert len(service.repo.files("")) >= 1
+    assert service.repo.files_count("") == len(service.repo.files("", limit=0))
+    kinds = {row["file_type"] for row in service.repo.files_by_kind("original")}
+    assert kinds == {"original"}
+    assert all(row["file_type"] == "tuned"
+               for row in service.repo.files_by_kind("tuned", limit=10))
+    # met zoekterm werkt het LIKE-pad nog steeds
+    assert isinstance(service.repo.files_count("zzznietbestaand"), int)
+
+
+def test_all_locations_fast_path(service, pair, tmp_path):
+    """V8.8.1: all_locations('') zonder LIKE-filter, met zoekterm met filter."""
+    source = tmp_path / "LocFast"
+    source.mkdir()
+    (source / "loc1.bin").write_bytes(b"Y" * 256)
+    service.library.add_root(source)
+    service.library.scan_root(service.library.roots()[0]["id"])
+    assert len(service.library.all_locations("")) >= 1
+    hits = service.library.all_locations("loc1")
+    assert any(row["filename"] == "loc1.bin" for row in hits)
+
+
+def test_storage_summary_cached_60s(service, pair):
+    """V8.8.1: tweede storage_summary binnen 60 s = cache-hit (geen queries)."""
+    first = service.library.storage_summary()
+    calls = {"n": 0}
+    original_rows = service.library.repo.db.rows
+
+    def counting(sql, args=()):
+        calls["n"] += 1
+        return original_rows(sql, args)
+
+    service.library.repo.db.rows = counting
+    try:
+        second = service.library.storage_summary()
+    finally:
+        service.library.repo.db.rows = original_rows
+    assert calls["n"] == 0  # cache-hit
+    assert second == first
+
+
+def test_refresh_does_not_call_assistant_synchronously(service, pair, monkeypatch, tmp_path):
+    """Regressie opstart-hang: het dashboard-advies (assistent rekent o.a.
+    recepten uit) mag NOOIT meer synchroon in refresh() draaien."""
+    monkeypatch.setenv('QT_QPA_PLATFORM', 'offscreen')
+
+    def explode(_question, _context=None):
+        raise AssertionError("assistent synchroon aangeroepen in refresh")
+
+    monkeypatch.setattr(service.assistant, "answer", explode)
+    from PySide6.QtWidgets import QApplication
+    from app.ui.main_window import MainWindow
+    application = QApplication.instance() or QApplication([])
+    window = MainWindow(service)
+    window.refresh()  # moest vroeger het advies sync berekenen
+    application.processEvents()
+    window.close()
+
+
+def test_pairs_page_combos_bounded(service, pair, monkeypatch):
+    """Image-2-fix: Pairs-pagina vult zichzelf automatisch met begrensde
+    geïndexeerde lijsten (original/tuned)."""
+    monkeypatch.setenv('QT_QPA_PLATFORM', 'offscreen')
+    from PySide6.QtWidgets import QApplication
+    from app.ui.main_window import MainWindow
+    application = QApplication.instance() or QApplication([])
+    window = MainWindow(service)
+    window.refresh()
+    assert window.original_combo.count() == 1
+    assert window.tuned_combo.count() == 1
+    assert window.pair_table.rowCount() == 1
+    window.close()
+
+
+def test_process_root_parallel_ols(service, tmp_path):
+    """V8.8.1: meerdere OLS in één root worden allemaal verwerkt (parallel
+    pad) — resultatentelling klopt, geen fouten, run netjes afgerond."""
+    source = tmp_path / "ParSrc"
+    source.mkdir()
+    for number in range(3):
+        project = source / f"par_{number}.ols"
+        project.write_bytes(b"OLS" + bytes([0]) + f"12345{number}".encode()
+                            + bytes([0]) + b"Stage 1 project")
+    extra = source / "bijhaal.bin"
+    extra.write_bytes(b"\x00SW:TEST_SW HW:TEST_HW\x00" + bytes(range(256)) * 8)
+    service.library.add_root(source)
+    root_id = service.library.roots()[0]["id"]
+    result = service.process_root_bulk(root_id)
+    assert result["ols_projects"] == 3
+    assert result["imported"] == 1
+    assert result["errors"] == []
+    # tweede run: skip-cache (OLS) + already-imported (BIN)
+    again = service.process_root_bulk(root_id)
+    assert again["ols_projects"] == 3        # opnieuw verwerkt maar flits-snel
+    assert again["imported"] == 0
+    assert again["skipped_existing"] == 1
+
+
+def test_classify_unique_same_size_still_updates(service, tmp_path):
+    """V8.8.1 (SQL-rewrite): unieke same-size match classificeert nog steeds
+    als 'unieke binary-match'; ambiguïteit blijft naar review gaan."""
+    original = tmp_path / "ORI_x.bin"
+    tuned = tmp_path / "MOD_x.bin"
+    uniek = tmp_path / "000777.bin"
+    original.write_bytes(b"A" * 1000)
+    tuned.write_bytes(b"A" * 500 + b"B" * 500)    # duidelijk anders
+    uniek.write_bytes(b"A" * 999 + b"B")          # vrijwel gelijk aan original
+    service.repo.import_file(original, "original")
+    service.repo.import_file(tuned, "tuned")
+    uniek_id = service.repo.import_file(uniek, "unknown")
+    result = service.repo.auto_classify_evidence()
+    hit = next(item for item in result["updated"] if item["id"] == uniek_id)
+    assert hit["reason"] == "unieke binary-match"
+    assert service.repo.file(uniek_id)["file_type"] == "original"
+
+
+def test_classify_exact_sha_via_sql_join(service, tmp_path):
+    """Exacte SHA-classificatie werkt via de set-based join (ook bij grote
+    tabellen); resultaatvorm onveranderd."""
+    original = tmp_path / "ORI_dup.bin"
+    kopie = tmp_path / "000321.bin"
+    payload = b"C" * 800
+    original.write_bytes(payload)
+    kopie.write_bytes(payload)
+    original_id = service.repo.import_file(original, "original")
+    kopie_id = service.repo.import_file(kopie, "unknown")
+    result = service.repo.auto_classify_evidence()
+    hit = next(item for item in result["updated"] if item["id"] == kopie_id)
+    assert hit["kind"] == "original"
+    assert hit["reason"] == "exacte SHA256-overeenkomst"
+    assert service.repo.file(kopie_id)["sha256"] == service.repo.file(original_id)["sha256"]

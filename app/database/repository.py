@@ -68,6 +68,9 @@ class Repository(RepositoryV3Mixin):
     FILE_PAGE_LIMIT = 400  # GUI laadt pagina's; zoeken verfijnt (10TB-proof)
 
     def files_count(self, query: str = "") -> int:
+        if not query:
+            # V8.8.1 snelle pad: zonder zoekterm geen LIKE-scan over 450k rijen
+            return self.db.rows("SELECT COUNT(*) AS n FROM files")[0]["n"]
         columns = ("filename", "file_type", *FIELDS)
         where = " OR ".join(f"coalesce({c},'') LIKE ? ESCAPE '\\'" for c in columns)
         term = '%' + query.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') + '%'
@@ -76,16 +79,31 @@ class Repository(RepositoryV3Mixin):
         return rows[0]["n"]
 
     def files(self, query: str = "", limit: int | None = None) -> list[dict]:
+        effective = self.FILE_PAGE_LIMIT if limit is None else limit
+        if not query:
+            # V8.8.1 snelle pad: geen LIKE-scan wanneer er niet gezocht wordt
+            sql = "SELECT * FROM files ORDER BY id DESC"
+            args: list = []
+            if effective:
+                sql += " LIMIT ?"
+                args.append(effective)
+            return self.db.rows(sql, tuple(args))
         columns = ("filename", "file_type", *FIELDS)
         where = " OR ".join(f"coalesce({c},'') LIKE ? ESCAPE '\\'" for c in columns)
         term = '%' + query.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') + '%'
-        effective = self.FILE_PAGE_LIMIT if limit is None else limit
         sql = f"SELECT * FROM files WHERE {where} ORDER BY id DESC"
         args = [term] * len(columns)
         if effective:
             sql += " LIMIT ?"
             args.append(effective)
         return self.db.rows(sql, tuple(args))
+
+    def files_by_kind(self, kind: str, limit: int = 500) -> list[dict]:
+        """V8.8.1: combo-lijsten — geïndexeerde kind-query i.p.v. alle files
+        laden en in Python filteren (was 3x de hele tabel per refresh)."""
+        return self.db.rows(
+            "SELECT * FROM files WHERE file_type=? ORDER BY id DESC LIMIT ?",
+            (kind, limit))
 
     def file(self, file_id: int) -> dict:
         rows = self.db.rows("SELECT * FROM files WHERE id=?", (file_id,))
@@ -925,9 +943,22 @@ class Repository(RepositoryV3Mixin):
         score alone does not prove Original versus Tuned when both categories
         contain the same software family.
         """
-        unknown = [row for row in self.files() if row["file_type"] == "unknown"]
-        typed = [row for row in self.files() if row["file_type"] in {"original", "tuned"}]
+        # V8.8.1 schaalbaarheid: geen volledige tabel meer in Python; alle
+        # fasen SQL-gedreven (geïndexeerde kind/sha/size-queries). De
+        # bewijsregels zijn onveranderd: pad-label, exacte SHA, of unieke
+        # same-size binary-match; ambiguïteit gaat naar review.
+        unknown = self.db.rows(
+            "SELECT * FROM files WHERE file_type='unknown' ORDER BY id")
         updated, review, skipped, errors = [], [], [], []
+        # fase 2 (set-based): exacte SHA256 via join — één query voor alles
+        exact_by_id = {row["id"]: row["kind"] for row in self.db.rows(
+            """SELECT u.id AS id, MIN(t.file_type) AS kind,
+                      COUNT(DISTINCT t.file_type) AS types
+               FROM files u JOIN files t ON t.sha256 = u.sha256
+               WHERE u.file_type='unknown'
+                 AND t.file_type IN ('original','tuned')
+               GROUP BY u.id HAVING types = 1""")}
+        remaining = []
         for row in unknown:
             label = infer_path_type(Path(row["source_path"]))
             if label in {"original", "tuned"}:
@@ -940,21 +971,24 @@ class Repository(RepositoryV3Mixin):
                 updated.append({"id": row["id"], "filename": row["filename"], "kind": label,
                                 "confidence": 100.0, "reason": "expliciet label in bestandsnaam of map"})
                 continue
-
-            exact_types = {item["file_type"] for item in typed if item["sha256"] == row["sha256"]}
-            if len(exact_types) == 1:
-                label = exact_types.pop()
+            exact_kind = exact_by_id.get(row["id"])
+            if exact_kind:
                 try:
-                    self.reclassify_files([row["id"]], label)
+                    self.reclassify_files([row["id"]], exact_kind)
                 except (OSError, ValueError) as exc:
                     errors.append({"id": row["id"], "filename": row["filename"],
                                    "reason": f"classificatie onmogelijk: {exc}"})
                     continue
-                updated.append({"id": row["id"], "filename": row["filename"], "kind": label,
+                updated.append({"id": row["id"], "filename": row["filename"], "kind": exact_kind,
                                 "confidence": 100.0, "reason": "exacte SHA256-overeenkomst"})
                 continue
-
-            same_size = [item for item in typed if item["file_size"] == row["file_size"]]
+            remaining.append(row)
+        unknown = remaining
+        for row in unknown:
+            same_size = self.db.rows(
+                """SELECT * FROM files WHERE file_type IN ('original','tuned')
+                   AND file_size=? AND sha256<>? LIMIT 4""",
+                (row["file_size"], row["sha256"]))
             if not same_size:
                 skipped.append({"id": row["id"], "reason": "geen bestand met dezelfde grootte"})
                 continue

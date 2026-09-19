@@ -6,6 +6,7 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 import hashlib
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from app.database.repository import Repository
 from app.analysis.diff_engine import diff_blocks, hex_rows
 from app.analysis.clustering import feature, cluster_changes, compare_strategies
@@ -460,6 +461,10 @@ class Service(ServiceV3Mixin):
                 result["scanned"] = scan.get("discovered", 0)
                 result["status"] = scan.get("status", "done")
             last_id = start_after
+            from app.library import PRESET_ANALYSIS_WORKERS
+            ols_workers = max(1, min(8, int(self.repo.config.get(
+                "ols_workers", PRESET_ANALYSIS_WORKERS.get(
+                    self.repo.config.get("resource_preset", "BALANCED"), 2)))))
             while True:
                 rows = self.repo.db.rows(
                     """SELECT id, path, extension FROM file_locations
@@ -467,26 +472,53 @@ class Service(ServiceV3Mixin):
                     (root_id, last_id))
                 if not rows:
                     break
-                for row in rows:
+                # V8.8.1: BIN's sequentieel (fast-path is goedkoop); OLS's
+                # PARALLEL — grote OLS (100-300 MB) worden gedomineerd door
+                # hashen (GIL-relaserend) dus workers geven bijna lineaire
+                # winst. Was: 1 OLS tegelijk = 2-3 min/file bij grote dumps.
+                ols_rows = [row for row in rows if row["extension"] == ".ols"]
+                bin_rows = [row for row in rows if row["extension"] != ".ols"]
+                since_checkpoint = 0
+                for row in bin_rows:
                     last_id = row["id"]
                     path = Path(row["path"])
                     try:
-                        if row["extension"] == ".ols":
-                            self.auto_process_ols(str(path))
-                            result["ols_projects"] += 1
-                        elif self.repo._already_imported(path, "auto"):
+                        if self.repo._already_imported(path, "auto"):
                             result["skipped_existing"] += 1
                         else:
                             self.repo.import_file(path, "auto")
                             result["imported"] += 1
                     except (OSError, ValueError) as exc:
                         result["errors"].append({"path": str(path), "error": str(exc)})
-                    self.repo.checkpoint_run(run_id, {"last_id": last_id}, result)
+                    since_checkpoint += 1
+                    if since_checkpoint >= 25:
+                        self.repo.checkpoint_run(run_id, {"last_id": last_id}, result)
+                        since_checkpoint = 0
                     if progress:
                         progress(f"Verwerk root: {result['imported']} nieuw · "
                                  f"{result['skipped_existing']} al aanwezig · "
                                  f"{result['ols_projects']} OLS · "
                                  f"{len(result['errors'])} fouten")
+                if ols_rows:
+                    with ThreadPoolExecutor(max_workers=min(
+                            ols_workers, len(ols_rows))) as pool:
+                        futures = {pool.submit(self.auto_process_ols, str(Path(row["path"]))): row
+                                   for row in ols_rows}
+                        for future in as_completed(futures):
+                            row = futures[future]
+                            try:
+                                future.result()
+                                result["ols_projects"] += 1
+                            except (OSError, ValueError, RuntimeError) as exc:
+                                result["errors"].append(
+                                    {"path": row["path"], "error": str(exc)})
+                            if progress:
+                                progress(f"Verwerk root: {result['imported']} nieuw · "
+                                         f"{result['skipped_existing']} al aanwezig · "
+                                         f"{result['ols_projects']} OLS ({ols_workers} parallel) · "
+                                         f"{len(result['errors'])} fouten")
+                last_id = rows[-1]["id"]
+                self.repo.checkpoint_run(run_id, {"last_id": last_id}, result)
             try:
                 # 1) onbekende bestanden automatisch classificeren (alleen uniek bewijs)
                 classify = self.repo.auto_classify_evidence()

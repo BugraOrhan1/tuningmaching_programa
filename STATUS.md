@@ -2,6 +2,32 @@
 
 Datum: 2026-09-10 (bijgewerkt na V3-ronde)
 
+## V8.8.1-status (GUI-vrij + OLS-parallel + classificatie-SQL) — actueel
+
+**186 passed / 1 guard-skip groen.**
+
+- **GUI vrijhouden (vervolg op V8.7.1):** files()/files_count() snelle pad
+  zonder LIKE bij lege zoekterm; files_by_kind (geïndexeerde combo-query,
+  was 3x alle files per refresh); all_locations zonder zoekterm geen
+  LIKE/sort (ORDER BY id); storage_summary 60 s cache (duplicaten-GROUP BY
+  stond in élke refresh); dashboard-advies via eigen AdviceWorker-thread
+  (assistent rekent recepten uit — nooit meer synchroon); refresh zwaarte
+  nader begrensd (map_table 200, patronen 200); pair-combo's via
+  files_by_kind(500); venster tekent eerst, data daarna.
+- **OLS 2-3 min/file → parallel:** process_root_bulk verwerkt OLS's nu met
+  ThreadPoolExecutor (workers = resource_preset, max 8; hashen is
+  GIL-relaserend). BIN's sequentieel, checkpoints per 25 + per batch
+  (contiguous prefix, resume blijft exact). Benchmark: 10 x 30 MB OLS =
+  1,61 s/stuk (MAX); tweede run 0,12 s totaal (skip-cache V8.8).
+- **auto_classify_evidence schaalvast (SQL):** pad-label fase over alleen
+  unknowns; exacte SHA via set-based join (HAVING types=1); same-size via
+  geïndexeerde query (LIMIT 4); beslislogica/bewijsregels onveranderd.
+  Was: 2x alle files in Python + O(u x t) loops + compare per kandidaat.
+- Nieuwe index: files(file_size, file_type).
+- Tests: parallel-OLS-e2e (3 OLS + BIN, 2e run cache), unieke same-size
+  update, exact-SHA-join, GUI-snelpaden, storage-cache, advies-async,
+  combo-begrenzing.
+
 ## V8.8-status (Snelheid @450k files, OLS-cache, 25 add-ons, stappenplan) — actueel
 
 **178 passed / 1 guard-skip groen.**

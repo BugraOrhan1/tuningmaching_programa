@@ -174,6 +174,7 @@ CREATE INDEX IF NOT EXISTS idx_locations_state ON file_locations(analysis_state)
 CREATE INDEX IF NOT EXISTS idx_contents_state ON content_objects(analysis_state);
 CREATE INDEX IF NOT EXISTS idx_ols_objects_role ON ols_objects(role);
 CREATE INDEX IF NOT EXISTS idx_files_sha256 ON files(sha256);
+CREATE INDEX IF NOT EXISTS idx_files_size_kind ON files(file_size, file_type);
 '''
 SCHEMA_VERSION = 12
 

@@ -100,6 +100,13 @@ class LibraryEngine:
         return rows
 
     def storage_summary(self) -> dict:
+        # V8.8.1: 60 s cache — de duplicaten-berekening is zwaar (GROUP BY
+        # over alle locaties) en stond in élke GUI-refresh
+        import time as _time
+        now = _time.monotonic()
+        cached = getattr(self, "_storage_cache", None)
+        if cached and now - cached[0] < 60:
+            return cached[1]
         totals = self.repo.db.rows(
             """SELECT COALESCE(SUM(size),0) AS indexed_bytes, COUNT(*) AS locations,
                       COUNT(DISTINCT content_id) AS unique_contents
@@ -114,11 +121,13 @@ class LibraryEngine:
         pending = self.repo.db.rows(
             "SELECT COUNT(*) AS n FROM file_locations WHERE analysis_state='NEW'")[0]["n"]
         db_size = self.repo.db.path.stat().st_size if self.repo.db.path.exists() else 0
-        return {"indexed_bytes": totals["indexed_bytes"], "locations": totals["locations"],
-                "unique_contents": totals["unique_contents"],
-                "duplicate_bytes": duplicate_bytes["duplicate_bytes"],
-                "failed_files": failed, "pending_analysis": pending,
-                "database_bytes": db_size}
+        summary = {"indexed_bytes": totals["indexed_bytes"], "locations": totals["locations"],
+                   "unique_contents": totals["unique_contents"],
+                   "duplicate_bytes": duplicate_bytes["duplicate_bytes"],
+                   "failed_files": failed, "pending_analysis": pending,
+                   "database_bytes": db_size}
+        self._storage_cache = (now, summary)
+        return summary
 
     # ------------------------------------------------------------------
     # hashing
@@ -490,16 +499,23 @@ class LibraryEngine:
 
     def all_locations(self, query: str = "", limit: int = 500) -> list[dict]:
         """Alle locaties over élke root heen — voor de Files-pagina."""
-        like = f"%{query}%"
+        where = ""
+        args: list = []
+        if query:
+            like = f"%{query}%"
+            where = " WHERE l.filename LIKE ? OR l.path LIKE ? OR c.sha256 LIKE ?"
+            args = [like, like, like]
+        args.append(limit)
+        # V8.8.1: zonder zoekterm geen tekst-sort over alle locaties
+        order = " ORDER BY l.path" if query else " ORDER BY l.id"
         return self.repo.db.rows(
             """SELECT l.id, l.path, l.filename, l.extension, l.size,
                       l.scan_status, l.analysis_state, l.content_id,
                       c.sha256, c.file_type, r.name AS root_name
                FROM file_locations l
                LEFT JOIN content_objects c ON c.id = l.content_id
-               LEFT JOIN library_roots r ON r.id = l.root_id
-               WHERE l.filename LIKE ? OR l.path LIKE ? OR c.sha256 LIKE ?
-               ORDER BY l.path LIMIT ?""", (like, like, like, limit))
+               LEFT JOIN library_roots r ON r.id = l.root_id"""
+            + where + order + " LIMIT ?", tuple(args))
 
     def content_locations(self, content_id: int) -> list[dict]:
         return self.repo.db.rows(

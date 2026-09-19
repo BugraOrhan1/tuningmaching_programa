@@ -31,6 +31,23 @@ class Worker(QThread):
             self.error.emit(str(exc))
 
 
+class AdviceWorker(QThread):
+    """V8.8.1: dashboard-advies in een eigen thread — het assistent-antwoord
+    rekent o.a. recepten bij en mocht NOOIT synchroon op de GUI-thread."""
+    advice_ready = Signal(str)
+
+    def __init__(self, service, parent=None):
+        super().__init__(parent)
+        self.service = service
+
+    def run(self):
+        try:
+            advice = self.service.assistant.answer('wat nu')['answer'].splitlines()[0]
+            self.advice_ready.emit('🤖 Advies: ' + advice)
+        except Exception:
+            pass
+
+
 MANUAL_HTML = """
 <h1>Handleiding — hoe werkt alles in deze app</h1>
 <p><b>Gouden regel:</b> je bronbestanden (BIN/ORI/OLS) worden <b>nooit</b> gewijzigd.
@@ -2232,6 +2249,26 @@ class MainWindow(QMainWindow):
         self.dna_output.setPlainText(json.dumps(dna, ensure_ascii=False, indent=2))
         self.refresh()
 
+    def _request_advice_async(self):
+        if getattr(self, '_advice_worker', None) is not None:
+            return
+        import time as _time
+        now = _time.monotonic()
+        if now - getattr(self, '_advice_at', -1e9) < 60:
+            return
+        self._advice_at = now
+        worker = AdviceWorker(self.service)
+        worker.advice_ready.connect(self._advice_ready)
+        worker.finished.connect(lambda: setattr(self, '_advice_worker', None))
+        self._advice_worker = worker
+        worker.start()
+
+    def _advice_ready(self, text: str):
+        def apply():
+            if hasattr(self, 'smart_advice'):
+                self.smart_advice.setText(text)
+        self.safe(apply)
+
     def _update_steps(self, roots, summary, patterns):
         """Stappenplan-statussen: groen vinkje als de stap kan/bestaat."""
         confirmed = self.repo.db.rows(
@@ -2353,11 +2390,7 @@ class MainWindow(QMainWindow):
                 patterns = self.repo.db.rows(
                     "SELECT COUNT(*) AS n FROM tuning_patterns "
                     "WHERE status <> 'rejected'")[0]['n']
-                try:
-                    advice = self.service.assistant.answer('wat nu')['answer'].splitlines()[0]
-                    self.smart_advice.setText('🤖 Advies: ' + advice)
-                except Exception:
-                    pass
+                self._request_advice_async()
                 self._update_steps(roots, summary, patterns)
                 parts = [f"Library: {len(roots)} root(s), {online} online · "
                          f"{summary['locations']} locaties / "
@@ -2431,7 +2464,7 @@ class MainWindow(QMainWindow):
         # V3-tabellen
         try:
             pattern_rows = []
-            for pattern in self.service.patterns_detail():
+            for pattern in self.service.patterns_detail(limit=200):
                 payload = pattern['payload']
                 pattern_rows.append({'id': pattern['id'], 'pattern_key': pattern['pattern_key'][:34],
                                      'ecu_family': payload.get('ecu_family'),
@@ -2477,16 +2510,17 @@ class MainWindow(QMainWindow):
                 f"{storage['database_bytes'] / 1e6:.1f} MB")
             self.populate(self.map_file_table,
                           [{'id': row['id'], 'filename': row['filename'], 'file_type': row['file_type'],
-                            'file_size': row['file_size']} for row in self.repo.files()],
+                            'file_size': row['file_size']} for row in self.repo.files(limit=200)],
                           ['id', 'filename', 'file_type', 'file_size'])
         except AttributeError:
             pass  # pagina's zijn tijdens tests niet altijd gebouwd
         for combo, kind in [(self.original_combo, 'original'), (self.tuned_combo, 'tuned')]:
             previous = combo.currentData()
             combo.clear()
-            for row in self.repo.files():
-                if row['file_type'] == kind:
-                    combo.addItem(f"{row['id']} · {row['filename']}", row['id'])
+            # V8.8.1: geïndexeerde query met limiet (was: ALLE files laden en
+            # in Python filteren — 450k rijen × 2 per refresh = opstart-hang)
+            for row in self.repo.files_by_kind(kind, limit=500):
+                combo.addItem(f"{row['id']} · {row['filename']}", row['id'])
             index = combo.findData(previous)
             if index >= 0:
                 combo.setCurrentIndex(index)
