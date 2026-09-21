@@ -1,6 +1,48 @@
 # Applicatiestatus
 
-Datum: 2026-09-10 (bijgewerkt na V3-ronde)
+Datum: 2026-09-21 (V9.0 — TuningCore, nieuwe schone kern)
+
+## V9.0-status (TuningCore — helemaal nieuwe kern voor 1,2M OLS / ~8 TB) — actueel
+
+**200 passed / 1 skip (oude suite, onaangetast) + 7 nieuwe engine-tests = 207 items groen.**
+
+Gebruikersopdracht: *"maak een nieuwe branch, helemaal clean beginnen, opnieuw
+bouwen zodat die snel is en niet crasht; zoek op wat je nodig hebt en welke
+codeertaal de beste is; het gaat om 1,2 miljoen ols-files (~8 TB); in die ols
+zit minimaal 1 origineel + 1 stage 1 of zelfs vaak veel meer; doe het slimste"*.
+
+- **Schone kern = nieuw package `engine/tuningcore/`** naast de bestaande app
+  (deze arena-sessie is vast aan één branch; de app blijft onaangetast werken).
+  Stdlib-only, start in milliseconden, geen dependencies.
+- **Taalonderzoek gedaan (web, 2025-bronnen) en vastgelegd in
+  `engine/ARCHITECTURE.md`:** Rust is op papier de snelste (2x Go, 26-60x
+  Python-CPU, 18 MB RSS) maar (a) SHA-256 gaat in élke taal via OpenSSL =
+  C-snelheid, (b) de eindfles is de schijf (8 TB USB ≈ 5,5 uur minimaal), (c)
+  geen cargo/rustc in deze omgeving. Besluit: Python-kern nú met radicaal
+  betere architectuur; concreet Rust-migratiepad (PyO3, fases R1-R3) met
+  triggerniveaus gedocumenteerd.
+- **Snel (gemeten op 2 zwakke sandbox-cores):** scan 314 MB in 0,21 s
+  (RAM-cache; op USB schijf-gebonden); **parse 106 OLS/s → 1,2M ≈ 3,1 uur**
+  (multiprocess, schaalt ~lineair met kernen). Her-scan leest onveranderde
+  bestanden NIET (size+mtime-cache) → 8 TB her-scanen kost seconden.
+- **Crasht niet:** élke per-file fout -> errors-tabel en doorgaan; multiprocess
+  met serial-fallback; bestanden zonder élk bewijs -> foutregel, geen leeg
+  project; bronbestanden nooit gewijzigd.
+- **Altijd zichtbaar:** élke fase print `% · snelheid · ETA · fouten` (één regel
+  per batch — geen "reageert niet").
+- **Altijd hervatbaar:** checkpoint na élke batch van 200; SQLite WAL;
+  parse-resume slaat al-geparse over (getest).
+- **Bewijsregels onveranderd:** rollen alleen uit expliciete namen;
+  binary-grenzen alleen bij expliciete import-header of herhalende
+  identiteitsheader (>=1024 stride, >=99% blokgelijkenis); importpad-records
+  zijn geen versienamen; paren original x tuned zelfde project + gelijke
+  binary-grootte -> state `suggested` (mens bevestigt).
+- **Echt bestand gevalideerd:** GASDROP_100119.ols — nieuwe parser geeft exact
+  dezelfde 4 versies als de bewezen V8-structuurparser.
+- Bestanden: `engine/README.md` (gebruik), `engine/ARCHITECTURE.md` (taalkeuze
+  + ontwerp + Rust-pad), `engine/tuningcore/{db,scan,olsparse,process,labels,sample,cli}.py`,
+  `engine/tests/test_engine.py` (7 tests: labels, parser, GASDROP, e2e+paren,
+  rescan-cache, corrupt-bestand, resume).
 
 ## V8.8.1-status (GUI-vrij + OLS-parallel + classificatie-SQL) — actueel
 
@@ -28,7 +70,7 @@ Datum: 2026-09-10 (bijgewerkt na V3-ronde)
   update, exact-SHA-join, GUI-snelpaden, storage-cache, advies-async,
   combo-begrenzing.
 
-## V8.11-status (Tune Bouwer leert beter + diagnose-knop) — actueel
+## V8.11-status (Tune Bouwer leert beter + diagnose-knop) — vorige release
 
 **200 passed / 1 guard-skip groen.**
 

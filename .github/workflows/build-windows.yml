@@ -60,7 +60,11 @@ jobs:
           (bijv. C:\TuningMatching) en starten met TuningMatching.exe.
           Geen Python of installatie nodig.
 
-          - Nieuw in deze versie: crash-handler (fouten altijd zichtbaar in
+          - Nieuw in deze versie (V9.0): in de repo is de nieuwe schone kern
+            TuningCore gebouwd voor miljoenen OLS-bestanden (map engine/;
+            broncode, zie engine/README.md). Deze exe-app is onveranderd
+            t.o.v. V8.11 — de exe-download is identiek.
+          - Crash-handler (fouten altijd zichtbaar in
             foutvenster + crash.log), gefixte eerste-start-wizard
             (PySide6 6.11-compatibel), professionele BIN/OLS-import
             (één voor één met typekeuze), complete in-app handleiding
