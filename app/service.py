@@ -1,6 +1,12 @@
 """Shared application operations for desktop, CLI and local API."""
 import json
+import os
+import shutil
+import sqlite3
+from datetime import datetime
+from pathlib import Path
 import hashlib
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from app.database.repository import Repository
 from app.analysis.diff_engine import diff_blocks, hex_rows
 from app.analysis.clustering import feature, cluster_changes, compare_strategies
@@ -10,11 +16,71 @@ from app.analysis.similarity import compare
 from app.analysis.recognition import recognize
 from app.analysis.ecu_fingerprint import ecu_family_fingerprint
 from app.analysis.alignment import align_regions
+from app.intelligence import ServiceV3Mixin
+from app.analysis.tuning_region import build_regions
+from app.learning.evaluation import evaluate_confidence
 
 
-class Service:
+class Service(ServiceV3Mixin):
     def __init__(self, config: dict):
         self.repo = Repository(config)
+        from app.library import LibraryEngine
+        from app.knowledge_model import KnowledgeModelEngine
+        from app.tune_builder import TuneBuilder
+        self.library = LibraryEngine(self.repo, config, service=self)
+        self.km = KnowledgeModelEngine(self)
+        self.tune_builder = TuneBuilder(self)
+        from app.assistant import Assistant
+        self.assistant = Assistant(self)
+
+    def auto_pair_after_analysis(self, file_id: int, report: dict,
+                                 min_confirm: float = 95.0,
+                                 min_suggest: float = 90.0) -> dict:
+        """Automatisch paren NA een BIN-analyse (gebruikersverzoek): een
+        unknown dat uniek en sterk matcht met één bekend original wordt
+        'tuned' en gepaard. >= min_confirm: paar bevestigd; min_suggest..min_confirm:
+        paar als SUGGESTIE (unconfirmed, voor review). Identiek aan het original
+        = geen paar (dat is géén tuning). Ambigu of metadata-conflict = niets."""
+        repo = self.repo
+        row = repo.file(file_id)
+        if row['file_type'] != 'unknown':
+            return {'action': None, 'reason': f"bestand is al '{row['file_type']}'"}
+        matches = [m for m in report.get('matches') or [] if m.get('file_id') != file_id]
+        if not matches:
+            return {'action': None, 'reason': 'geen matches in het rapport'}
+        best = matches[0]
+        score = float(best.get('match_score') or 0)
+        if best.get('compatibility_status') == 'incompatible_base':
+            return {'action': None, 'reason': 'incompatibele softwarebasis'}
+        original_row = repo.file(best['file_id'])
+        if original_row['sha256'] == row['sha256']:
+            return {'action': 'identical_original', 'original': original_row['filename'],
+                    'match_score': round(score, 2),
+                    'reason': 'inhoud identiek aan bekend original — geen paar nodig'}
+        if score < min_suggest:
+            return {'action': None, 'reason': f'score {score:.1f}% < {min_suggest:.0f}%'}
+        second = matches[1] if len(matches) > 1 else None
+        if second and score - float(second.get('match_score') or 0) < 2.0:
+            return {'action': None, 'reason': 'match niet uniek: tweede kandidaat vrijwel even sterk'}
+        if (row.get('ecu_family') and original_row.get('ecu_family')
+                and row['ecu_family'] != original_row['ecu_family']):
+            return {'action': None, 'reason': 'ECU-metadata conflict met het original'}
+        confirmed = score >= min_confirm
+        try:
+            repo.reclassify_files([file_id], 'tuned')
+        except (OSError, ValueError) as exc:
+            return {'action': None, 'reason': f'classificatie onmogelijk: {exc}'}
+        pair_id = repo.pair(best['file_id'], file_id, confirmed=confirmed,
+                            confidence=round(score, 2))
+        repo.audit('auto_pair_after_analysis', 'file_pair', pair_id,
+                   after={'match_score': round(score, 2), 'confirmed': confirmed,
+                          'original_file_id': best['file_id'],
+                          'reason': 'sterk uniek bewijs uit BIN-analyse'})
+        return {'action': 'confirmed_pair' if confirmed else 'suggested_pair',
+                'pair_id': pair_id, 'original': original_row['filename'],
+                'match_score': round(score, 2),
+                'reason': ('uniek sterk bewijs — paar bevestigd' if confirmed
+                           else 'goed bewijs — paar als suggestie voor review')}
 
     def analyze(self, path: str, progress=None) -> dict:
         query = read_binary(path, self.repo.config['max_file_mb'])
@@ -40,6 +106,17 @@ class Service:
                     match['known_changes'].append(known)
                 except (OSError, ValueError) as exc:
                     report['errors'].append({'pair_id': pair['id'], 'error': str(exc)})
+        try:
+            # automatisch paren na analyse (gebruikersverzoek): het geanalyseerde
+            # bestand staat dan (idempotent) in de database als unknown
+            resolved = str(Path(path).resolve())
+            rows = self.repo.db.rows(
+                "SELECT id, file_type FROM files WHERE source_path=? ORDER BY id LIMIT 1",
+                (resolved,))
+            file_id = rows[0]['id'] if rows else self.repo.import_file(Path(path), 'unknown')
+            report['auto_pair'] = self.auto_pair_after_analysis(file_id, report)
+        except (OSError, ValueError) as exc:
+            report['auto_pair'] = {'action': None, 'reason': str(exc)}
         return report
 
     def identify(self, path: str) -> dict:
@@ -70,6 +147,9 @@ class Service:
                 cursor = db.execute(f"INSERT INTO diffs (pair_id,{','.join(block)}) VALUES ({','.join('?' for _ in range(len(block)+1))})", (pair_id, *block.values()))
                 db.execute("INSERT INTO diff_features(diff_id,feature_type,feature_data,confidence) VALUES (?,?,?,?)",
                            (cursor.lastrowid, 'relative-region-v1', json.dumps(feature(block, len(a))), 0))
+        metadata = self.repo.file(pair['original_file_id'])
+        regions = build_regions(a, b, blocks, stage=metadata.get('stage'), file_metadata=metadata)
+        self.repo.replace_pair_regions(pair_id, regions)
         return {"pair": pair, "original_sha256": self.repo.file(pair['original_file_id'])['sha256'],
                 "tuned_sha256": self.repo.file(pair['tuned_file_id'])['sha256'],
                 "original_size": len(a), "tuned_size": len(b), "blocks": blocks,
@@ -107,6 +187,8 @@ class Service:
         if not pair['confirmed']:
             raise ValueError('Tuning DNA vereist een bevestigd Original → Tuned-paar')
         report = self.diff(pair_id)
+        stored_regions = self.repo.regions_for_pair(pair_id)
+        metadata = self.repo.file(pair['original_file_id'])
         original = self.repo.data(pair['original_file_id'])
         tuned = self.repo.data(pair['tuned_file_id'])
         regions = []
@@ -121,11 +203,21 @@ class Service:
                 'tuned_context_hash': hashlib.sha256(tuned[context_start:context_end]).hexdigest(),
                 'label_status': 'unknown',
             })
+        identity_links = self.calibration_identity_links(pair['original_file_id'], regions)
+        for region in regions:
+            region['calibration_identity_candidates'] = identity_links.get(region['start_offset'], [])
         payload = {
             'pair_id': pair_id,
             'source': {'original_file_id': pair['original_file_id'], 'tuned_file_id': pair['tuned_file_id'],
-                       'original_sha256': report['original_sha256'], 'tuned_sha256': report['tuned_sha256']},
+                       'original_sha256': report['original_sha256'], 'tuned_sha256': report['tuned_sha256'],
+                       'ecu_family': metadata.get('ecu_family'), 'hardware_number': metadata.get('hardware_number'),
+                       'software_number': metadata.get('software_number'),
+                       'calibration_number': metadata.get('calibration_number'),
+                       'stage': metadata.get('stage'), 'project': metadata.get('project')},
             'regions': regions,
+            'calibration_identity_ids': sorted({item['identity_id'] for values in identity_links.values()
+                                                for item in values}),
+            'region_ids': [row['id'] for row in stored_regions],
             'note': 'Structurele diff-evidence; geen mapnaam of tuningfunctie gegokt.',
         }
         confidence = round(min(99.0, max(20.0, float(pair['confidence']))), 2)
@@ -158,7 +250,7 @@ class Service:
                                (pattern_key, json.dumps(pattern_payload, ensure_ascii=False), 59.0))
         return {**payload, 'confidence': confidence, 'status': 'candidate'}
 
-    def tuning_dna(self, status: str | None = None) -> list[dict]:
+    def tuning_dna(self, status: str | None = None, limit: int = 0) -> list[dict]:
         query = 'SELECT * FROM tuning_dna'
         args = ()
         if status is not None:
@@ -166,7 +258,12 @@ class Service:
                 raise ValueError('Ongeldige Tuning DNA-status')
             query += ' WHERE status=?'
             args = (status,)
+        else:
+            query += " WHERE status <> 'rejected'"
         query += ' ORDER BY confidence DESC, id DESC'
+        if limit:
+            query += ' LIMIT ?'
+            args = args + (limit,)
         rows = self.repo.db.rows(query, args)
         for row in rows:
             row['payload'] = json.loads(row['payload'])
@@ -178,8 +275,954 @@ class Service:
         if status is not None:
             query += ' WHERE status=?'
             args = (status,)
+        else:
+            query += " WHERE status <> 'rejected'"
         query += ' ORDER BY frequency DESC, confidence DESC, id DESC'
         rows = self.repo.db.rows(query, args)
         for row in rows:
             row['payload'] = json.loads(row['payload'])
         return rows
+
+    def evaluate_confidence(self, records: list[dict], threshold: float = 70.0) -> dict:
+        metrics = evaluate_confidence(records, threshold)
+        metrics["evaluation_id"] = self.repo.save_confidence_evaluation(metrics)
+        return metrics
+
+    def auto_process_ols(self, path: str) -> dict:
+        """One-call OLS workflow: import, extract, classify, pair and learn.
+
+        Every step stays evidence-based: binaries come from proven record
+        boundaries, roles from explicit WinOLS version labels and Tuning DNA
+        remains candidate knowledge that never modifies a BIN.
+        """
+        project_id = self.repo.import_project(Path(path))
+        versions = self.repo.ols_versions(project_id)
+        pairs = self.repo.suggest_ols_project_pairs(project_id)
+        dna = []
+        for pair in pairs:
+            if pair.get('confirmed') and pair.get('pair_id'):
+                # V8.10.1: DNA is eenmalig per paar — alleen (her)genereren als
+                # er nog geen is (was: élke verwerk-run volledige diff+regions)
+                existing_dna = self.repo.db.rows(
+                    "SELECT id FROM tuning_dna WHERE pair_id=? AND status<>'rejected'",
+                    (pair['pair_id'],))
+                if existing_dna:
+                    continue
+                try:
+                    report = self.generate_tuning_dna(pair['pair_id'])
+                    dna.append({'pair_id': pair['pair_id'], 'regions': len(report['regions']),
+                                'confidence': report['confidence']})
+                except (ValueError, OSError) as exc:
+                    pairs[pairs.index(pair)]['dna_error'] = str(exc)
+        files_count = self.repo.db.rows(
+            "SELECT COUNT(*) AS n FROM files WHERE source_path LIKE 'ols://%'")[0]['n']
+        return {
+            'project_id': project_id,
+            'versions': [{'version_index': v['version_index'], 'name': v['version_name'], 'role': v['role'],
+                          'role_confidence': v['role_confidence'], 'complete': bool(v['complete']),
+                          'file_id': v['file_id'], 'sha256': v['binary_sha256'],
+                          'relation_type': v['relation_type']} for v in versions],
+            'files_extracted': files_count,
+            'pairs': pairs,
+            'tuning_dna': dna,
+            'note': 'Binaries zijn gextraheerd op bewezen grenzen; rollen komen uit expliciete '
+                    'WinOLS-versielabels. Geen enkele BIN is gewijzigd.',
+        }
+
+    def generate_tune_candidate(self, target_file_id: int, threshold: float = 70.0) -> dict:
+        """Generate a candidate tune for a matched original when evidence allows.
+
+        The target file is never modified. Changed regions of the best
+        confirmed Original → Tuned pair are copied onto a fresh candidate file
+        only where the target byte-matches the known original almost exactly.
+        The output is an unverified candidate: checksums must be corrected and
+        verified before such a file is ever written to an ECU.
+        """
+        if not 50 <= threshold <= 100:
+            raise ValueError('Drempel moet tussen 50 en 100 liggen')
+        target = self.repo.file(target_file_id)
+        query = self.repo.data(target_file_id)
+        report = self.analyze(target['filepath'])
+        matches = [match for match in report['matches']
+                   if match['match_score'] >= threshold and match['compatibility_status'] != 'incompatible_base']
+        if not matches:
+            best = report['matches'][0] if report['matches'] else None
+            return {'status': 'no_match_above_threshold', 'threshold': threshold,
+                    'target_file_id': target_file_id,
+                    'best_score': best['match_score'] if best else None,
+                    'note': 'Geen bekende original met voldoende bewezen overeenkomst; '
+                            'er wordt niets gegenereerd.'}
+        best = matches[0]
+        confirmed = [pair for pair in best['pairs'] if pair['confirmed']]
+        if not confirmed:
+            return {'status': 'no_confirmed_pair', 'threshold': threshold,
+                    'target_file_id': target_file_id, 'match_score': best['match_score'],
+                    'filename': best['filename'],
+                    'note': 'Match gevonden maar het paar is niet bevestigd; bevestig het paar eerst.'}
+        result = bytearray(query)
+        applied, skipped = [], []
+        for pair in confirmed:
+            known = self.diff(pair['id'])
+            original = self.repo.data(pair['original_file_id'])
+            tuned = self.repo.data(pair['tuned_file_id'])
+            if len(tuned) != len(query) or len(original) != len(query):
+                skipped.append({'pair_id': pair['id'], 'reason': 'bestandsgrootte verschilt van target'})
+                continue
+            for block in known['blocks']:
+                start, end = block['start_offset'], block['end_offset']
+                if end > len(result):
+                    skipped.append({'pair_id': pair['id'], 'start_offset': start, 'end_offset': end,
+                                    'reason': 'regio valt buiten target'})
+                    continue
+                regional = compare(query[start:end], original[start:end], {}, {})['match_score']
+                if regional >= 98.0:
+                    result[start:end] = tuned[start:end]
+                    applied.append({**block, 'region_similarity': round(regional, 3),
+                                    'pair_id': pair['id']})
+                else:
+                    skipped.append({'pair_id': pair['id'], 'start_offset': start, 'end_offset': end,
+                                    'reason': f'target wijkt af van bekende original in deze regio '
+                                              f'(similarity {regional:.2f}%)'})
+        if not applied:
+            return {'status': 'no_regions_applied', 'threshold': threshold, 'skipped': skipped,
+                    'match_score': best['match_score'],
+                    'note': 'Geen enkele regio voldeed aan het regionaal-bewijs; niets gegenereerd.'}
+        output = bytes(result)
+        output_hashes = hashlib.sha256(output).hexdigest()
+        candidate_dir = self.repo.root / 'reports' / 'candidates'
+        candidate_dir.mkdir(parents=True, exist_ok=True)
+        output_path = candidate_dir / (output_hashes + '.bin')
+        try:
+            with output_path.open('xb') as stream:
+                stream.write(output)
+        except FileExistsError:
+            pass  # identieke kandidaat bestaat al; sha256 is de bestandsnaam
+        payload = {'target': {'id': target_file_id, 'filename': target['filename'], 'sha256': target['sha256']},
+                   'match': {'file_id': best['file_id'], 'filename': best['filename'],
+                             'match_score': best['match_score']},
+                   'applied_regions': applied, 'skipped_regions': skipped,
+                   'warnings': ['KANDIDAAT: niet getest en niet gecontroleerd.',
+                                'ECU-checksums zijn NIET gecorrigeerd.',
+                                'Controleer de diff in WinOLS vóór enig gebruik.']}
+        candidate_id = self.repo.add_tune_candidate(
+            target_file_id, confirmed[0]['id'], threshold, best['match_score'],
+            len(applied), len(skipped), payload, str(output_path),
+            {'sha256': output_hashes}, len(output))
+        return {'status': 'candidate_generated', 'candidate_id': candidate_id,
+                'output_path': str(output_path), 'sha256': output_hashes, 'size': len(output),
+                'applied_regions': applied, 'skipped_regions': skipped,
+                'match_score': best['match_score'], 'threshold': threshold,
+                'pair_id': confirmed[0]['id'], 'warnings': payload['warnings']}
+
+    def tune_candidates(self) -> list[dict]:
+        return self.repo.tune_candidates()
+
+    # ------------------------------------------------------------------
+    # Job-manager (§51): pauzeren/hervatten/annuleren van achtergrondtaken
+    # ------------------------------------------------------------------
+    def job(self, run_id: int) -> dict | None:
+        return self.repo.run(run_id)
+
+    def job_pause(self, run_id: int) -> dict:
+        with self.repo.db.connect() as db:
+            cursor = db.execute("""UPDATE analysis_runs SET status='paused',
+                updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='running'""",
+                (run_id,))
+            if cursor.rowcount == 0:
+                raise ValueError("Taak is niet actief (alleen running taken kunnen gepauzeerd)")
+        return self.job(run_id)
+
+    def job_resume(self, run_id: int, progress=None) -> dict:
+        row = self.job(run_id)
+        if row is None:
+            raise ValueError("Onbekende taak")
+        if row["status"] not in ("paused", "interrupted"):
+            raise ValueError("Alleen gepauzeerde/onderbroken taken kunnen hervatten")
+        if row["run_type"] == "library_analysis":
+            return self.library.analyze_pending(resume=True, progress=progress)
+        if row["run_type"] == "pattern_rebuild":
+            return self.rebuild_patterns(resume=True, progress=progress)
+        raise ValueError(f"Taaktype {row['run_type']} kent geen hervat-padhérecke")
+
+    def process_root_bulk(self, root_id: int, progress=None, resume: bool = False) -> dict:
+        """Eén klik voor een hele bron: scan de root (incrementeel) en verwerk
+        daarna AUTOMATISCH élke locatie — BIN/ORI naar Files (al-aanwezig wordt
+        overgeslagen zonder lezen), elk .ols-project volledig. Hervatbaar via
+        checkpoints (run-systeem), dus miljoenen bestanden = gewoon doordraaien."""
+        run = self.repo.resume_run("root_bulk") if resume else None
+        if run and run["config"].get("root_id") != root_id:
+            raise ValueError("Er draait nog een onderbroken bulk-verwerking voor een andere root; "
+                             "voltooi of hervat die eerst.")
+        run_id = run["id"] if run else self.repo.start_run(
+            "root_bulk", {"root_id": root_id})
+        start_after = int(run["checkpoint"].get("last_id", 0)) if run else 0
+        last_id = start_after  # V8.10.1: vóór de scan initialiseren — een
+        # crash tijdens de scan/afrondfase mag de checkpoint-handler niet
+        # breken met UnboundLocalError (gevonden door de crash-regressietest)
+        result = dict(run["stats"] if run else {})
+        result.setdefault("scanned", 0)
+        result.setdefault("imported", 0)
+        result.setdefault("skipped_existing", 0)
+        result.setdefault("ols_projects", 0)
+        result.setdefault("errors", [])
+        try:
+            if not run:
+                scan = self.library.scan_root(root_id, progress=progress)
+                result["scanned"] = scan.get("discovered", 0)
+                result["status"] = scan.get("status", "done")
+                # V8.10.1: zichtbare overgang — de stilte na de scan was de
+                # afrondfase + eerste OLS-batch; de gebruiker zag een "hang"
+                locations_total = self.repo.db.rows(
+                    "SELECT COUNT(*) AS n FROM file_locations WHERE root_id=?",
+                    (root_id,))[0]["n"]
+                if progress:
+                    progress(f"Scan afgerond ({result['scanned']} bestanden) — "
+                             f"nu {locations_total} locaties verwerken…")
+            from app.library import PRESET_ANALYSIS_WORKERS
+            ols_workers = max(1, min(8, int(self.repo.config.get(
+                "ols_workers", PRESET_ANALYSIS_WORKERS.get(
+                    self.repo.config.get("resource_preset", "BALANCED"), 2)))))
+            while True:
+                rows = self.repo.db.rows(
+                    """SELECT id, path, extension FROM file_locations
+                       WHERE root_id=? AND id>? ORDER BY id LIMIT 500""",
+                    (root_id, last_id))
+                if not rows:
+                    break
+                # V8.8.1: BIN's sequentieel (fast-path is goedkoop); OLS's
+                # PARALLEL — grote OLS (100-300 MB) worden gedomineerd door
+                # hashen (GIL-relaserend) dus workers geven bijna lineaire
+                # winst. Was: 1 OLS tegelijk = 2-3 min/file bij grote dumps.
+                ols_rows = [row for row in rows if row["extension"] == ".ols"]
+                bin_rows = [row for row in rows if row["extension"] != ".ols"]
+                since_checkpoint = 0
+                for row in bin_rows:
+                    last_id = row["id"]
+                    path = Path(row["path"])
+                    try:
+                        if self.repo._already_imported(path, "auto"):
+                            result["skipped_existing"] += 1
+                        else:
+                            self.repo.import_file(path, "auto")
+                            result["imported"] += 1
+                    except (OSError, ValueError) as exc:
+                        result["errors"].append({"path": str(path), "error": str(exc)})
+                    since_checkpoint += 1
+                    if since_checkpoint >= 25:
+                        self.repo.checkpoint_run(run_id, {"last_id": last_id}, result)
+                        since_checkpoint = 0
+                    if progress:
+                        progress(f"Verwerk root: {result['imported']} nieuw · "
+                                 f"{result['skipped_existing']} al aanwezig · "
+                                 f"{result['ols_projects']} OLS · "
+                                 f"{len(result['errors'])} fouten")
+                if ols_rows:
+                    if progress:
+                        progress(f"OLS-fase: {len(ols_rows)} OLS in deze batch "
+                                 f"({ols_workers} parallel) — melding na elk "
+                                 "klaar bestand; de eerste run na een update "
+                                 "verifieert elke OLS eenmalig (daarna skip-cache)")
+                    with ThreadPoolExecutor(max_workers=min(
+                            ols_workers, len(ols_rows))) as pool:
+                        futures = {pool.submit(self.auto_process_ols, str(Path(row["path"]))): row
+                                   for row in ols_rows}
+                        for future in as_completed(futures):
+                            row = futures[future]
+                            try:
+                                future.result()
+                                result["ols_projects"] += 1
+                            except (OSError, ValueError, RuntimeError) as exc:
+                                result["errors"].append(
+                                    {"path": row["path"], "error": str(exc)})
+                            if progress:
+                                progress(f"Verwerk root: {result['imported']} nieuw · "
+                                         f"{result['skipped_existing']} al aanwezig · "
+                                         f"{result['ols_projects']} OLS ({ols_workers} parallel) · "
+                                         f"{len(result['errors'])} fouten")
+                last_id = rows[-1]["id"]
+                self.repo.checkpoint_run(run_id, {"last_id": last_id}, result)
+            try:
+                # 1) onbekende bestanden automatisch classificeren (alleen uniek bewijs)
+                classify = self.repo.auto_classify_evidence()
+                result["auto_classified"] = len(classify.get("updated") or [])
+                result["classify_review"] = len(classify.get("review") or [])
+                result["classify_errors"] = len(classify.get("errors") or [])
+            except Exception as exc:  # elke auto-stap mag bulk nooit breken
+                result["auto_classified"] = 0
+                result["auto_classify_error"] = str(exc)
+            try:
+                # 2) voorstellen (blijft unconfirmed), dan bewijs-gestuurd bevestigen
+                self.repo.suggest_binary_relationships()
+                confirm = self.repo.auto_confirm_binary_pairs(min_score=90)
+                result["pairs_auto_confirmed"] = confirm["confirmed"]
+                result["pairs_review"] = confirm["review"]
+            except Exception as exc:
+                result["pairs_auto_confirmed"] = 0
+                result["auto_confirm_error"] = str(exc)
+            try:
+                # 3) leren: patronen opbouwen uit alle bevestigde paren (hervatbaar)
+                if result.get("pairs_auto_confirmed") or result.get("imported"):
+                    learned = self.run_pattern_job(resume=True, progress=progress)
+                    result["patterns_built"] = len(learned.get("patterns")
+                                                   or learned.get("items") or []) or \
+                        int(learned.get("built", 0) or 0)
+                    result["patterns_status"] = str(learned.get("status", "done"))
+            except Exception as exc:
+                result["patterns_built"] = 0
+                result["patterns_error"] = str(exc)
+            self.repo.finish_run(run_id, "done", result)
+        except Exception:
+            self.repo.checkpoint_run(run_id, {"last_id": last_id}, result)
+            self.repo.finish_run(run_id, "interrupted", result)
+            raise
+        return result
+
+    def process_all_roots(self, progress=None, resume: bool = True) -> dict:
+        """Volledige automatisering over ALLE geregistreerde roots: scan,
+        importeren, classificeren, paren bevestigen (bewijs-gestuurd) en
+        patronen leren — één aanroep, hervatbaar, per root checkpoints."""
+        totals = {"roots_total": 0, "roots_offline": 0, "scanned": 0, "imported": 0,
+                  "skipped_existing": 0, "ols_projects": 0, "auto_classified": 0,
+                  "pairs_auto_confirmed": 0, "pairs_review": 0, "patterns_built": 0,
+                  "errors": []}
+        roots = self.library.roots()
+        totals["roots_total"] = len(roots)
+        for number, root in enumerate(roots, start=1):
+            if progress:
+                progress(f"Root {number}/{len(roots)}: {root.get('name') or root.get('path')}")
+            try:
+                part = self.process_root_bulk(root["id"], progress, resume=resume)
+                if part.get("status") == "OFFLINE":
+                    totals["roots_offline"] += 1
+                    continue
+                for key in ("scanned", "imported", "skipped_existing", "ols_projects",
+                            "auto_classified", "pairs_auto_confirmed", "pairs_review",
+                            "patterns_built"):
+                    totals[key] += int(part.get(key) or 0)
+                totals["errors"].extend(part.get("errors") or [])
+            except Exception as exc:
+                totals["errors"].append({"root": root.get("path"), "error": str(exc)})
+        return totals
+
+    def disk_benchmark(self, root_id: int, megabytes: int = 256) -> dict:
+        """Meet de échte leessnelheid van de bron-schijf + de CPU-hash-
+        capaciteit (V8.10). Geeft een eerlijk oordeel: bij USB (<300 MB/s)
+        is de SCHIJF de bottleneck, niet de CPU en zeker niet de GPU
+        (één CPU-kern haalt met hardware-SHA al >1000 MB/s)."""
+        import time as _time
+        import hashlib as _hashlib
+        rows = self.repo.db.rows(
+            """SELECT path, size FROM file_locations
+               WHERE root_id=? AND scan_status!='ERROR'
+               ORDER BY size DESC LIMIT 1""", (root_id,))
+        if not rows:
+            raise ValueError("Geen leesbare bestanden in deze root om te meten.")
+        probe_path = Path(rows[0]["path"])
+        want = min(megabytes, 64) * 1024 * 1024
+        try:
+            size = probe_path.stat().st_size
+        except OSError as exc:
+            raise ValueError(f"Kan {probe_path} niet lezen: {exc}") from exc
+        read_bytes = min(want, size)
+        chunk = 4 * 1024 * 1024
+        with probe_path.open("rb") as stream:
+            read_bytes_total = 0
+            started = _time.monotonic()
+            while read_bytes_total < read_bytes:
+                data = stream.read(chunk)
+                if not data:
+                    break
+                read_bytes_total += len(data)
+            elapsed = max(_time.monotonic() - started, 0.001)
+        disk_mbps = read_bytes_total / elapsed / (1024 * 1024)
+        # CPU-hashcapaciteit (SHA-256 gebruikt op bijna elke moderne CPU
+        # hardware-versnelling; dit toont dat CPU/GPU NIET de bottleneck zijn)
+        blob = bytes(32 * 1024 * 1024)
+        started = _time.monotonic()
+        digest = b""
+        loops = 0
+        while _time.monotonic() - started < 0.5:
+            digest = _hashlib.sha256(blob).digest()
+            loops += 1
+        cpu_mbps = (loops * len(blob)) / max(_time.monotonic() - started, 0.001) / (1024 * 1024)
+        total_row = self.repo.db.rows(
+            "SELECT COALESCE(SUM(size),0) AS n FROM file_locations WHERE root_id=?",
+            (root_id,))[0]["n"]
+        eta_hours = (total_row / (disk_mbps * 1024 * 1024) / 3600) if disk_mbps else None
+        if disk_mbps < 150:
+            verdict, klass = ("TRAAG: dit is een trage schijf (USB-HDD of USB2?). "
+                              "Parallelle workers helpen hier nauwelijks — de schijf "
+                              "is de bottleneck. Kopieer actieve projecten naar een "
+                              "snelle (NVMe) schijf voor de grootste winst.", "TRAAG")
+        elif disk_mbps < 300:
+            verdict, klass = ("TYPISCH USB (SSD of harde schijf): ~jouw genoemde "
+                              "200 MB/s. De schijf is de bottleneck — extra CPU/GPU "
+                              "maakt het niet sneller. Zie advies hieronder.", "USB")
+        else:
+            verdict, klass = ("SNEL: interne/SSD-snelheid. Hier werkt de app op "
+                              "volgas; MAX-preset is veilig.", "SNEL")
+        tips = [
+            "Installeer de app + database op je snelste schijf (C:, NVMe). "
+            "Staat de app op dezelfde USB-schijf als je brondata, dan "
+            "concurreren database-schrijfacties met het uitlezen om dezelfde "
+            "200 MB/s.",
+            "Zet een Windows Defender-uitsluiting (uitzondering) voor de "
+            "app-map en je bronmappen: realtime-scanning leest élk bestand "
+            "twee keer en kan de snelheid halveren.",
+            "Sluit de USB-schijf direct aan op de PC (geen hub) op een "
+            "USB 3.0-poort (blauw); oudere kabels/hubs beperken tot USB2 "
+            "(~40 MB/s).",
+            "Herhaalde scans zijn altijd snel: ongewijzigde bestanden "
+            "(zelfde grootte+datum) worden opnieuw overgeslagen zonder lezen.",
+        ]
+        return {"disk_mbps": round(disk_mbps, 1), "cpu_hash_mbps": round(cpu_mbps, 1),
+                "gpu_note": ("GPU toevoegen loont hier niet: hashen met CPU "
+                             f"ondersteuning ({round(cpu_mbps)} MB/s per kern-capaciteit "
+                             "gemeten) ligt ver boven de schijfsnelheid — de GPU zou "
+                             "op de schijf wachten."),
+                "root_bytes": total_row,
+                "eta_first_scan_hours": round(eta_hours, 1) if eta_hours is not None else None,
+                "verdict": verdict, "klasse": klass, "tips": tips,
+                "note": "Eerste meting includeert opstart; refresh geeft een "
+                        "stabieler getal. Gemeten op het grootste bestand in de root."}
+
+    def disk_advice(self) -> dict:
+        """Staat de app/database op dezelfde schijf als een library-root?
+        Dan concurreren ze om dezelfde schijf-I/O (USB!)."""
+        data_drive = Path(self.repo.root).resolve().drive.upper() or "POSIX"
+        conflicts = []
+        for root in self.library.roots():
+            root_drive = Path(root["path"]).resolve().drive.upper() or "POSIX"
+            if root_drive == data_drive:
+                conflicts.append(root["path"])
+        return {"data_dir": str(self.repo.root), "data_drive": data_drive,
+                "conflicting_roots": conflicts,
+                "warning": (f"De app/database staat op schijf {data_drive} — "
+                            "dezelfde schijf als je brondata. Verplaats de app-map "
+                            "naar je snelste interne schijf (meestal C:) voor een "
+                            "duidelijke snelheidswinst.") if conflicts else ""}
+
+    def review_queues(self, limit: int = 200) -> dict:
+        """Alles wat menselijke aandacht nodig heeft, op één plek. Totalen
+        komen uit snelle COUNT-query's; lijsten zijn begrensd op `limit`
+        (GUI-thread blijft responsief, ook bij 100k+ bestanden)."""
+        with self.repo.db.connect() as db:
+            unknowns_total = db.execute(
+                "SELECT COUNT(*) FROM files WHERE file_type='unknown'").fetchone()[0]
+            pairs_total = db.execute(
+                "SELECT COUNT(*) FROM file_pairs WHERE confirmed=0").fetchone()[0]
+            candidates_total = db.execute(
+                "SELECT COUNT(*) FROM knowledge_candidates WHERE status='candidate'"
+            ).fetchone()[0]
+        lim_sql, lim_args = (" LIMIT ?", (limit,)) if limit else ("", ())
+        unknowns = self.repo.db.rows(
+            "SELECT * FROM files WHERE file_type='unknown' ORDER BY id DESC" + lim_sql,
+            lim_args)
+        pairs = self.repo.db.rows(
+            "SELECT * FROM file_pairs WHERE confirmed=0 ORDER BY id DESC" + lim_sql,
+            lim_args)
+        candidates = self.repo.db.rows(
+            "SELECT id, candidate_type, subject_key AS subject, confidence, status "
+            "FROM knowledge_candidates WHERE status='candidate' ORDER BY id DESC" + lim_sql,
+            lim_args)
+        return {"unknowns": unknowns, "unknowns_total": unknowns_total,
+                "unconfirmed_pairs": pairs, "pairs_total": pairs_total,
+                "candidates": candidates, "candidates_total": candidates_total,
+                "total": unknowns_total + pairs_total + candidates_total}
+
+    def last_backup_info(self) -> dict | None:
+        backups = self.repo.root / "backups"
+        if not backups.exists():
+            return None
+        folders = sorted((item for item in backups.iterdir()
+                          if item.is_dir() and item.name.startswith("backup_")),
+                         reverse=True)
+        if not folders:
+            return None
+        newest = folders[0]
+        db_file = newest / "tuning.db"
+        return {"path": str(newest),
+                "age_hours": round(max((datetime.now() - datetime.fromtimestamp(
+                    newest.stat().st_mtime)).total_seconds() / 3600, 0), 1),
+                "complete": db_file.exists()}
+
+    def auto_backup_if_stale(self, max_age_hours: float = 24.0) -> dict | None:
+        """Stille automatische backup bij het opstarten als de laatste ouder
+        is dan max_age_hours (of er nog geen is). Faalt nooit de opstart."""
+        try:
+            info = self.last_backup_info()
+            if info and info["age_hours"] < max_age_hours and info["complete"]:
+                return None
+            return self.backup()
+        except Exception:
+            return None
+
+    def job_cancel(self, run_id: int) -> dict:
+        row = self.job(run_id)
+        if row is None:
+            raise ValueError("Onbekende taak")
+        if row["status"] not in ("running", "paused"):
+            raise ValueError("Alleen running/paused taken kunnen geannuleerd")
+        # gepauzeerde taken zijn meteen definitief geannuleerd; een draaiende taak
+        # leest 'cancel_requested' tussen batches en sluit zichzelf netjes af
+        final = row["status"] == "paused"
+        with self.repo.db.connect() as db:
+            db.execute("""UPDATE analysis_runs SET status=?,
+                updated_at=CURRENT_TIMESTAMP WHERE id=?""",
+                       ("cancelled" if final else "cancel_requested", run_id))
+        return self.job(run_id)
+
+    # ------------------------------------------------------------------
+    # Backup/restore/health (§64): database + kennis + audit; NOOIT de bronbibliotheek
+    # ------------------------------------------------------------------
+    def backup(self, target_dir: str | None = None) -> dict:
+        base = Path(target_dir) if target_dir else self.repo.root / "backups"
+        base.mkdir(parents=True, exist_ok=True)
+        folder = base / f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        folder.mkdir()
+        db_target = folder / "tuning.db"
+        source = sqlite3.connect(str(self.repo.db.path))
+        destination = sqlite3.connect(str(db_target))
+        with destination:
+            source.backup(destination)
+        source.close()
+        destination.close()
+        for name in ("config.json",):
+            candidate = self.repo.root / name
+            if candidate.exists():
+                shutil.copy2(candidate, folder / name)
+        db_digest = hashlib.sha256(db_target.read_bytes()).hexdigest()
+        counts = {table: self.repo.db.rows(f"SELECT COUNT(*) AS n FROM {table}")[0]["n"]
+                  for table in ("files", "file_pairs", "tuning_patterns",
+                                "calibration_identities", "audit_log")}
+        manifest = {"created_at": datetime.now().isoformat(), "schema_user_version": 10,
+                    "database_sha256": db_digest, "row_counts": counts}
+        (folder / "manifest.json").write_text(json.dumps(manifest, indent=2))
+        return {"backup_path": str(folder), "manifest": manifest}
+
+    def restore(self, backup_path: str) -> dict:
+        folder = Path(backup_path)
+        if not (folder / "manifest.json").exists() or not (folder / "tuning.db").exists():
+            raise ValueError("Ongeldige backup: manifest.json of tuning.db ontbreekt")
+        manifest = json.loads((folder / "manifest.json").read_text())
+        digest = hashlib.sha256((folder / "tuning.db").read_bytes()).hexdigest()
+        if digest != manifest.get("database_sha256"):
+            raise ValueError("Backup geverifieerd tegen manifest: hash komt NIET overeen")
+        safety = self.backup()
+        temporary = self.repo.db.path.with_suffix(".restore.tmp")
+        shutil.copy2(folder / "tuning.db", temporary)
+        os.replace(temporary, self.repo.db.path)
+        sanity = self.repo.db.rows("SELECT COUNT(*) AS n FROM files")[0]["n"]
+        return {"restored_from": str(folder), "safety_backup": safety["backup_path"],
+                "manifest": manifest, "files_after_restore": sanity}
+
+    def health_check(self) -> dict:
+        with self.repo.db.connect() as db:
+            integrity = db.execute("PRAGMA integrity_check").fetchone()[0]
+            foreign_key_issues = len(db.execute("PRAGMA foreign_key_check").fetchall())
+        counts = {table: self.repo.db.rows(f"SELECT COUNT(*) AS n FROM {table}")[0]["n"]
+                  for table in ("files", "file_pairs", "tuning_regions", "tuning_patterns",
+                                "calibration_identities", "library_roots",
+                                "file_locations", "content_objects", "audit_log")}
+        orphans = {
+            "locations_without_root": self.repo.db.rows(
+                "SELECT COUNT(*) AS n FROM file_locations WHERE root_id NOT IN (SELECT id FROM library_roots)")[0]["n"],
+            "locations_without_content": self.repo.db.rows(
+                "SELECT COUNT(*) AS n FROM file_locations WHERE content_id IS NULL")[0]["n"],
+            "regions_without_pair": self.repo.db.rows(
+                "SELECT COUNT(*) AS n FROM tuning_regions WHERE pair_id NOT IN (SELECT id FROM file_pairs)")[0]["n"],
+        }
+        offline_roots = self.repo.db.rows(
+            "SELECT COUNT(*) AS n FROM library_roots WHERE status='OFFLINE'")[0]["n"]
+        warnings = [name for name, value in orphans.items() if value] + (
+            ["offline_roots"] if offline_roots else [])
+        return {"status": "OK" if not warnings and integrity == "ok" and not foreign_key_issues
+                else "WARNINGS", "integrity": integrity,
+                "foreign_key_issues": foreign_key_issues, "row_counts": counts,
+                "orphans": orphans, "offline_roots": offline_roots,
+                "database_bytes": self.repo.db.path.stat().st_size}
+
+    # ------------------------------------------------------------------
+    # New BIN over de library (§40): multi-stage retrieval
+    # ------------------------------------------------------------------
+    def new_bin_library_report(self, path: str, threshold: float = 70.0) -> dict:
+        """Multi-stage New BIN: goedkope filters eerst, dure vergelijking alleen
+        op de shortlist. Stage 1 (exacte SHA256) hergebruikt bestaande kennis
+        zonder heranalyse (§4/§10)."""
+        query = read_binary(path, self.repo.config["max_file_mb"])
+        digest = hashlib.sha256(query).hexdigest()
+        stages = [{"stage": 1, "name": "exact_sha256", "hits": 0}]
+        exact = self.repo.db.rows(
+            "SELECT id, sha256, size, file_type, analysis_state FROM content_objects WHERE sha256=?",
+            (digest,))
+        stages[0]["hits"] = len(exact)
+        if exact:
+            link = self.library.analysis_link(exact[0]["id"])
+            locations = self.library.content_locations(exact[0]["id"])
+            return {"stages": stages, "library_hit": exact[0], "locations": locations,
+                    "analysis_link": link, "filename": Path(path).name,
+                    "note": "Content exact bekend: bestaande kennis hergebruikt, "
+                            "geen dubbele deep analysis."}
+        size_hits = self.repo.db.rows(
+            "SELECT COUNT(DISTINCT c.id) AS n FROM content_objects c WHERE c.size=?",
+            (len(query),))
+        stages.append({"stage": 2, "name": "size_filter", "hits": size_hits[0]["n"]})
+        file_id = self.repo.import_file(Path(path), kind="unknown")
+        report = self.new_bin_report(file_id, threshold)
+        report["stages"] = stages + [
+            {"stage": 3, "name": "fingerprint_prefilter",
+             "hits": report.get("related_originals") and len(report["related_originals"]) or 0},
+            {"stage": 4, "name": "full_comparison_shortlist",
+             "hits": len(report.get("related_originals", []))},
+            {"stage": 5, "name": "knowledge_integration", "hits": 1}]
+        report["library_file_id"] = file_id
+        return report
+
+    # ------------------------------------------------------------------
+    # Audit (§63)
+    # ------------------------------------------------------------------
+    def audit(self, action: str, subject_type: str, subject_id, before=None,
+              after=None, reason: str = "", actor: str = "technician") -> None:
+        self.repo.audit(action, subject_type, subject_id, actor=actor,
+                        before=before, after=after, reason=reason)
+
+    def audit_log(self, limit: int = 200, subject_type: str | None = None) -> list[dict]:
+        return self.repo.audit_log(limit=limit, subject_type=subject_type)
+
+    # ------------------------------------------------------------------
+    # V6: kennismodel (ECU Image Identity, families, lineage, negatieven)
+    # ------------------------------------------------------------------
+    def build_knowledge_model(self) -> dict:
+        images = self.km.build_ecu_image_identities()
+        families = self.km.build_project_families()
+        lineage = self.km.build_software_lineage()
+        return {"images": images, "families": families, "lineage": lineage}
+
+    def register_negative_match(self, subject_type: str, a, b, reason: str = "",
+                                reviewer: str | None = None) -> dict:
+        """Technicus: A ≠ B. Permanent negatief bewijs (§8); toekomstige
+        rebuilds mogen dit voorstel niet opnieuw doen."""
+        return self.km.register_negative(subject_type, a, b, reason=reason,
+                                         reviewer=reviewer)
+
+    def negatives(self, subject_type: str | None = None) -> list[dict]:
+        return self.km.negatives(subject_type)
+
+    def evaluate_golden(self, save: bool = True) -> dict:
+        return self.km.evaluate_golden(save=save)
+
+    def snapshot_knowledge(self) -> dict:
+        return self.km.snapshot_knowledge()
+
+    def diff_knowledge_snapshots(self, before: dict, after: dict) -> dict:
+        return self.km.diff_knowledge_snapshots(before, after)
+
+    # ------------------------------------------------------------------
+    # V6: "Why this match?" (§15) — alle componenten + bewijsaantallen
+    # ------------------------------------------------------------------
+    def explain_new_bin(self, file_id: int, threshold: float = 70.0) -> dict:
+        """Per scorecomponent: waarde, gewicht, bijdrage, bewijsaantallen en
+        negatieve aftrekken. Geen zwarte doos: dit is het volledige WHY-rapport."""
+        report = self.new_bin_report(file_id, threshold)
+        components = report["score_components"]
+        weights = report.get("score_weights", {})
+        identification = report.get("identification", {})
+        evidence_counts = {
+            "binary_similarity": len(report.get("related_originals", [])),
+            "structural_similarity": len(report.get("related_originals", [])),
+            "ecu_confidence": len(identification.get("ecu", [])),
+            "hardware_confidence": len(identification.get("hardware", [])),
+            "software_confidence": len(identification.get("software", [])),
+            "calibration_confidence": len(identification.get("calibration", [])),
+            "calibration_identity_confidence": len(report.get("calibration_identity_matches", [])),
+            "tuning_pattern_confidence": len(report.get("tuning_dna_matches", [])),
+            "cross_software_confidence": 0,
+            "evidence_strength": report.get("related_projects", 0),
+            "contradiction_penalty": report.get("evidence_summary", {}).get("contradictions", 0),
+            "context_alignment": len(report.get("tuning_dna_matches", [])),
+        }
+        explanation = []
+        for name, value in components.items():
+            weight = weights.get(name, 0.0)
+            explanation.append({
+                "component": name, "value": round(value, 2), "weight": round(weight, 3),
+                "contribution": round(value * weight, 2),
+                "evidence_count": evidence_counts.get(name, 0),
+                "role": "negative" if "contradiction" in name or "penalty" in name
+                        else ("unused" if weight == 0 else "positive"),
+            })
+        explanation.sort(key=lambda item: -abs(item["contribution"]))
+        return {
+            "file_id": file_id, "filename": report["filename"],
+            "overall_confidence": report["overall_confidence"],
+            "confidence_type": report["confidence_type"],
+            "explanation": explanation,
+            "why": "Bijdrage = componentwaarde × gewicht; alleen componenten met "
+                   "gewicht tellen mee in het gewogen gemiddelde. Bewijsaantallen "
+                   "zijn zichtbaar per component; UNKNOWN blijft UNKNOWN.",
+            "provenance": self.km.provenance(),
+            "note": "ANALYSIS ONLY FOR TECHNICIAN REVIEW.",
+        }
+
+    # ------------------------------------------------------------------
+    # V6: Comparison Workspace (§16)
+    # ------------------------------------------------------------------
+    def compare_workspace(self, left_file_id: int, right_file_id: int) -> dict:
+        """Twee files/projecten naast elkaar: metadata, ECU-image-identiteit,
+        overeenkomstige regio's (identiteiten + structuursignaturen) en de
+        Original→Tuned-ketting van beide kanten. ANALYSIS ONLY."""
+        def side(file_id):
+            row = self.repo.file(file_id)
+            links = self.calibration_identity_links(file_id, [])
+            regions = self.repo.map_regions_for_file(file_id)
+            pairs = [pair for pair in self.repo.pairs()
+                     if pair["confirmed"] and (pair["original_file_id"] == file_id
+                                               or pair["tuned_file_id"] == file_id)]
+            chain = []
+            for pair in pairs[:5]:
+                try:
+                    diff_report = self.diff(pair["id"])
+                    chain.append({"pair_id": pair["id"],
+                                  "role": "original" if pair["original_file_id"] == file_id
+                                          else "tuned",
+                                  "regions": len(diff_report["blocks"])})
+                except (OSError, ValueError):
+                    continue
+            images = self.repo.db.rows(
+                """SELECT i.id, i.status, i.image_size, i.confidence
+                   FROM ecu_image_identities i JOIN ecu_image_members m
+                   ON m.image_id=i.id WHERE m.member_type='file' AND m.member_id=?""",
+                (file_id,))
+            return {"file_id": file_id, "filename": row["filename"],
+                    "size": row["file_size"], "ecu": row["ecu_family"],
+                    "hardware": row["hardware_number"],
+                    "software": row["software_number"],
+                    "calibration": row["calibration_number"],
+                    "stage": row["stage"],
+                    "identity_links": links, "map_regions": len(regions),
+                    "confirmed_pairs": chain,
+                    "ecu_image_identities": images}
+
+        left, right = side(left_file_id), side(right_file_id)
+        # correspondenties: gedeelde structuursignaturen + gedeelde image-identiteit
+        def signatures(file_id):
+            return {region.get("structural_signature") or region.get("signature")
+                    or str(region.get("region_hash") or region.get("id"))
+                    for region in self.repo.map_regions_for_file(file_id)}
+        left_sig = signatures(left_file_id)
+        right_sig = signatures(right_file_id)
+        correspondences = sorted(left_sig & right_sig)
+        shared_image = bool(set(row["id"] for row in left["ecu_image_identities"])
+                            & set(row["id"] for row in right["ecu_image_identities"]))
+        negative = self.km.is_negative("file_match",
+                                       ("file", str(left_file_id)),
+                                       ("file", str(right_file_id)))
+        return {
+            "left": left, "right": right,
+            "corresponding_structural_signatures": correspondences,
+            "same_ecu_image_identity": shared_image,
+            "negative_relation": negative,
+            "note": ("Technicus heeft deze match negatief gemarkeerd" if negative
+                     else "Correspondenties zijn kandidaten: identificatie blijft "
+                          "review-only."),
+            "provenance": self.km.provenance(),
+        }
+
+    # ------------------------------------------------------------------
+    # V6: bulk-operaties (§17) met veilige taakgrenzen
+    # ------------------------------------------------------------------
+    def bulk_process_projects(self, project_ids: list[int], progress=None) -> dict:
+        """Meerdere OLS-projecten automatisch verwerken in één hervatbare taak;
+        fouten stoppen de bulk niet; elke stap checkpoint."""
+        if not project_ids:
+            raise ValueError("Geen projecten opgegeven")
+        run_id = self.repo.start_run("bulk_ols_process", {"count": len(project_ids)})
+        stats = {"processed": 0, "errors": 0}
+        errors = []
+        for index, project_id in enumerate(project_ids):
+            try:
+                project = self.repo.project(project_id)
+                self.auto_process_ols(project["filepath"])
+                stats["processed"] += 1
+            except Exception as exc:
+                stats["errors"] += 1
+                errors.append({"project_id": project_id, "error": str(exc)})
+            self.repo.checkpoint_run(run_id, {"index": index}, stats)
+            if progress:
+                progress(f"Bulk {index + 1}/{len(project_ids)}")
+        self.repo.finish_run(run_id, "done", stats)
+        return {"run_id": run_id, "status": "done", **stats,
+                "error_details": errors[:20]}
+
+    # ------------------------------------------------------------------
+    # V6: review-impact meten (§11): before/after op de golden benchmark
+    # ------------------------------------------------------------------
+    def measure_review_impact(self, apply_review, note: str = "") -> dict:
+        """Voer een review-actie uit met before/after-kennissnapshot én
+        golden-benchmark. resultaat: verbeterde of verslechterde metrics."""
+        before_snapshot = self.snapshot_knowledge()
+        before_golden = self.evaluate_golden(save=True)
+        apply_review()
+        after_snapshot = self.snapshot_knowledge()
+        after_golden = self.evaluate_golden(save=True)
+        return {
+            "knowledge_diff": self.diff_knowledge_snapshots(before_snapshot,
+                                                            after_snapshot),
+            "golden_before": before_golden["totals"],
+            "golden_after": after_golden["totals"],
+            "note": note or "review-impact gemeten op golden dataset",
+            "provenance": self.km.provenance(),
+        }
+
+    # ------------------------------------------------------------------
+    # V6: readouts — klant/voertuig-domeinlaag (§12), NOOIT in matching
+    # ------------------------------------------------------------------
+    def add_readout(self, customer: str, vehicle: str, stage: str = "",
+                    technician: str | None = None, readout_date: str | None = None,
+                    file_id: int | None = None, project_id: int | None = None,
+                    note: str = "") -> dict:
+        with self.repo.db.connect() as db:
+            cursor = db.execute(
+                """INSERT INTO readouts(customer,vehicle,stage,technician,
+                   readout_date,file_id,project_id,note) VALUES (?,?,?,?,?,?,?,?)""",
+                (customer, vehicle, stage, technician, readout_date, file_id,
+                 project_id, note))
+            readout_id = cursor.lastrowid
+        self.repo.audit("add_readout", "readout", readout_id, actor=technician or "system",
+                        after={"customer": customer, "vehicle": vehicle})
+        return self.repo.db.rows("SELECT * FROM readouts WHERE id=?", (readout_id,))[0]
+
+    def readouts(self, query: str = "") -> list[dict]:
+        like = f"%{query}%"
+        return self.repo.db.rows(
+            """SELECT * FROM readouts WHERE customer LIKE ? OR vehicle LIKE ?
+               OR stage LIKE ? ORDER BY id DESC LIMIT 200""", (like, like, like))
+
+    # ------------------------------------------------------------------
+    # V7: Tune Bouwer — origineel erin, kandidaat terug (stage + add-ons)
+    # ------------------------------------------------------------------
+    def tune_builder_diagnostics(self) -> dict:
+        """Waarom kan de Tune Bouwer (nog) niet bouwen? V8.11: zegt het met
+        echte cijfers uit deze installatie + concrete volgende stap."""
+        def one(sql: str, args: tuple = ()) -> int:
+            return self.repo.db.rows(sql, args)[0]["n"]
+        confirmed = one("SELECT COUNT(*) AS n FROM file_pairs WHERE confirmed=1")
+        unconfirmed = one("SELECT COUNT(*) AS n FROM file_pairs WHERE confirmed=0")
+        ols_projects = one("SELECT COUNT(*) AS n FROM winols_projects")
+        ols_roles = {"original": 0, "tuned": 0, "unknown": 0}
+        for row in self.repo.db.rows(
+                "SELECT role, COUNT(*) AS n FROM ols_version_binaries GROUP BY role"):
+            if row["role"] in ols_roles:
+                ols_roles[row["role"]] = row["n"]
+        ols_unknown_objects = one(
+            "SELECT COUNT(*) AS n FROM ols_objects WHERE role='unknown'")
+        recipes = self.tune_builder.recipes()
+        stages = sorted({r["stage"] for r in recipes if r["stage"]})
+        addons = sorted({a for r in recipes for a in r["addons"]})
+        pairs_with_stage = one(
+            """SELECT COUNT(*) AS n FROM file_pairs fp
+               JOIN files f ON f.id=fp.tuned_file_id
+               WHERE fp.confirmed=1 AND (f.stage LIKE '%stage%'
+                  OR f.filename LIKE '%stage%'
+                  OR f.source_path LIKE 'ols://%')""")
+        unknowns = one("SELECT COUNT(*) AS n FROM files WHERE file_type='unknown'")
+        steps = []
+        if confirmed == 0 and unconfirmed == 0:
+            steps.append("Er zijn nog géén paren: importeer/verwerk OLS-projecten "
+                         "(stap 2 op het Dashboard) of maak handmatig een paar op "
+                         "de Original/Tuned Pairs-pagina.")
+        if unconfirmed:
+            steps.append(f"{unconfirmed} paren wachten op jou: Review-center → "
+                         "'Onbevestigde paren' → bevestigen. Alléén bevestigde "
+                         "paren leert de bouwer (bewijsregel).")
+        if confirmed and pairs_with_stage == 0:
+            steps.append("Bevestigde paren hebben nog geen stage-label: geef het "
+                         "tuned-bestand een naam of metadata mét 'Stage 1'/'Stage "
+                         "2' (Files-pagina), of hernoem de OLS-versie in WinOLS — "
+                         "expliciete tekst is het bewijs.")
+        if ols_roles["unknown"] and not recipes:
+            steps.append(f"{ols_roles['unknown']} OLS-versies hebben een onbekende "
+                         "rol (unknown): geef versies expliciete namen met 'orig'/"
+                         "'original' en 'tuned'/'stage 1' in WinOLS, of markeer ze "
+                         "handmatig op de WinOLS-pagina — dan ontstaan automatisch "
+                         "bevestigde paren.")
+        if recipes:
+            steps.append(f"Klaar om te bouwen: {len(recipes)} recepten "
+                         f"(stages: {', '.join(stages) or '—'}; add-ons: "
+                         f"{', '.join(addons) or '—'}).")
+        return {"confirmed_pairs": confirmed, "unconfirmed_pairs": unconfirmed,
+                "pairs_with_stage_label": pairs_with_stage,
+                "ols_projects": ols_projects, "ols_version_roles": ols_roles,
+                "ols_unknown_objects": ols_unknown_objects,
+                "unknown_files": unknowns, "recipes": len(recipes),
+                "stages": stages, "addons": addons, "next_steps": steps}
+
+    def tune_recipes(self) -> dict:
+        """Welke stage/add-on-recepten zijn bouwbaar volgens bevestigde kennis?"""
+        return self.tune_builder.available_options()
+
+    def build_tune(self, original_path: str | None = None,
+                   original_file_id: int | None = None, stage: str | None = None,
+                   addons: list[str] | None = None, intensity: int | None = None,
+                   threshold: float = 85.0, dry_run: bool = True,
+                   allow_transfer: bool = False) -> dict:
+        """Kandidaat bouwen. Standaard dry_run: toont wat er zou gebeuren.
+        Bij dry_run=False wordt een NIEUW bestand in exports/candidates
+        geschreven; bronbestanden blijven altijd ongewijzigd.
+        allow_transfer: bij geen eigen paar-kennis automatisch de
+        overdrachtsmodus proberen (consistente familiedelta's, extra
+        waarschuwingen, verplichte review)."""
+        result = self.tune_builder.build(
+            original_path=original_path, original_file_id=original_file_id,
+            stage=stage, addons=addons, intensity=intensity,
+            threshold=threshold, dry_run=dry_run)
+        failed = result.get("status") in ("UNKNOWN_NO_RECIPE",
+                                          "no_match_above_threshold",
+                                          "no_regions_applied")
+        if allow_transfer and failed:
+            transfer = self.tune_builder.build_transfer(
+                original_path=original_path, original_file_id=original_file_id,
+                stage=stage, addons=addons, threshold=threshold, dry_run=dry_run)
+            transfer["fallback_from"] = result.get("status")
+            if transfer.get("status") == "candidate_generated":
+                transfer["note"] = ("Kennis-overdracht gebruikt (geen eigen "
+                                    "tuned-bestand van deze auto nodig); " +
+                                    transfer.get("note", ""))
+            return transfer
+        return result
+
+    # ------------------------------------------------------------------
+    # Rapportexport (§62): JSON/CSV/MD/HTML voor elk kennisrapport
+    # ------------------------------------------------------------------
+    def export_report(self, kind: str, subject_id: int | None, fmt: str,
+                      path: str | None = None) -> dict:
+        from app.reporting import export_report
+        builders = {
+            "new_bin": lambda: self.new_bin_report(int(subject_id)),
+            "ols": lambda: self.repo.project_structure_report(int(subject_id)),
+            "calibration_object": lambda: {"report": "calibration_object",
+                "objects": self.repo.calibration_objects_for_file(int(subject_id))[:200]},
+            "calibration_identity": lambda: {"report": "calibration_identity",
+                "identity": next((i for i in self.repo.calibration_identities()
+                                  if i["id"] == int(subject_id)), None)},
+            "tuning_dna": lambda: {"report": "tuning_dna",
+                "records": [d for d in self.tuning_dna()
+                            if subject_id is None or d["id"] == int(subject_id)][:200]},
+            "pattern": lambda: {"report": "tuning_pattern",
+                "patterns": [p for p in self.patterns_detail()
+                             if subject_id is None or p["id"] == int(subject_id)][:200]},
+            "evidence": lambda: {"report": "evidence",
+                "records": self.repo.evidence_for("file", str(subject_id))[:200]},
+            "library": lambda: {"report": "library_health", **self.library.storage_summary(),
+                                "roots": self.library.roots()},
+            "knowledge_build": lambda: {"report": "knowledge_build",
+                "build": self.repo.active_knowledge_build(),
+                "evaluations": self.repo.confidence_evaluations()[:50]},
+        }
+        if kind not in builders:
+            raise ValueError(f"Onbekend rapportsoort: {kind} "
+                             f"(kies uit {', '.join(sorted(builders))})")
+        report = builders[kind]()
+        report.setdefault("report", kind.replace("_", " ").title())
+        written = export_report(report, fmt, path)
+        return {"path": written, "format": fmt, "kind": kind}

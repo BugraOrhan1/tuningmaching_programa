@@ -12,6 +12,67 @@ class ImportRequest(BaseModel):
     kind: str = 'auto'
 
 
+class LibraryRootRequest(BaseModel):
+    path: str
+    name: str | None = None
+
+class AnalyzePendingRequest(BaseModel):
+    root_id: int | None = None
+    limit: int | None = None
+    resume: bool = True
+
+
+class WatchRequest(BaseModel):
+    enabled: bool
+    policy: dict = {}
+
+
+class NewBinPathRequest(BaseModel):
+    path: str
+    threshold: float = 70.0
+
+
+class RestoreRequest(BaseModel):
+    path: str
+
+class NegativeRequest(BaseModel):
+    subject_type: str
+    a: list[str]
+    b: list[str]
+    reason: str = ''
+    reviewer: str = ''
+
+
+class ReadoutRequest(BaseModel):
+    customer: str = ''
+    vehicle: str = ''
+    stage: str = ''
+    technician: str = ''
+    readout_date: str = ''
+    file_id: int | None = None
+    project_id: int | None = None
+    note: str = ''
+
+
+class TuneBuildRequest(BaseModel):
+    original_path: str = ''
+    original_file_id: int | None = None
+    stage: str | None = None
+    addons: list[str] = []
+    intensity: int | None = None
+    threshold: float = 85.0
+    dry_run: bool = True
+
+
+
+
+class V3ReviewRequest(BaseModel):
+    action: str
+    reviewer: str | None = None
+    note: str = ''
+    payload: dict = Field(default_factory=dict)
+
+
 class PairRequest(BaseModel):
     original_id: int
     tuned_id: int
@@ -42,6 +103,11 @@ class AlignmentRequest(BaseModel):
 
 class ReviewRequest(BaseModel):
     note: str = ''
+
+
+class ConfidenceEvaluationRequest(BaseModel):
+    records: list[dict] = Field(min_length=1, max_length=100000)
+    threshold: float = Field(default=70.0, ge=0.0, le=100.0)
 
 
 def create_api(service: Service, token: str) -> FastAPI:
@@ -116,6 +182,24 @@ def create_api(service: Service, token: str) -> FastAPI:
     @api.get('/winols-projects/{project_id}/records')
     def project_records(project_id: int):
         return service.repo.project_records(project_id)
+
+    @api.get('/winols-projects/{project_id}/versions')
+    def project_versions(project_id: int):
+        return service.repo.ols_versions(project_id)
+
+    @api.post('/winols-projects/{project_id}/auto-process')
+    def auto_process(project_id: int):
+        project = service.repo.project(project_id)
+        return service.auto_process_ols(project['filepath'])
+
+    @api.post('/files/{file_id}/generate-candidate')
+    def generate_candidate(file_id: int, body: dict[str, float] | None = None):
+        threshold = float((body or {}).get('threshold', 70.0))
+        return service.generate_tune_candidate(file_id, threshold)
+
+    @api.get('/tune-candidates')
+    def tune_candidates():
+        return service.tune_candidates()
 
     @api.get('/winols-projects/{project_id}/structure-report')
     def project_structure_report(project_id: int):
@@ -218,5 +302,303 @@ def create_api(service: Service, token: str) -> FastAPI:
     @api.post('/export/pairs/{pair_id}')
     def export(pair_id: int):
         return export_report(service.diff(pair_id), Path(service.repo.root / 'reports'))
+
+    # ---------------- V3 Tuning Intelligence ----------------
+    @api.get('/pairs/{pair_id}/regions')
+    def pair_regions(pair_id: int):
+        return service.regions(pair_id)
+
+    @api.get('/regions/{region_id}')
+    def region_detail(region_id: int):
+        return service.region_detail(region_id)
+
+    @api.post('/patterns/rebuild')
+    def patterns_rebuild(resume: bool = True):
+        return service.run_pattern_job(resume=resume)
+
+    @api.get('/patterns')
+    def patterns(status: str | None = None):
+        return service.patterns_detail(status)
+
+    @api.get('/patterns/{pattern_id}')
+    def pattern_detail(pattern_id: int):
+        pattern = service.repo.pattern(pattern_id)
+        if not pattern:
+            raise HTTPException(404, 'Onbekend patroon-ID')
+        return pattern
+
+    @api.post('/patterns/{pattern_id}/align')
+    def pattern_align(pattern_id: int):
+        return service.align_pattern_across_software(pattern_id)
+
+    @api.post('/patterns/{pattern_id}/review')
+    def pattern_review(pattern_id: int, body: V3ReviewRequest):
+        return service.review_pattern(pattern_id, body.action, body.reviewer, body.note, body.payload)
+
+    @api.post('/regions/{region_id}/review')
+    def region_review(region_id: int, body: V3ReviewRequest):
+        return service.review_region(region_id, body.action, body.reviewer, body.note)
+
+    @api.post('/files/{file_id}/map-structures')
+    def map_structures(file_id: int):
+        return service.detect_map_structures(file_id)
+
+    @api.get('/files/{file_id}/map-structures')
+    def map_structures_get(file_id: int):
+        return service.repo.map_regions_for_file(file_id)
+
+    @api.post('/files/{file_id}/calibration-objects')
+    def calibration_objects(file_id: int):
+        return service.build_calibration_objects(file_id)
+
+    @api.get('/files/{file_id}/calibration-objects')
+    def calibration_objects_get(file_id: int):
+        return service.repo.calibration_objects_for_file(file_id)
+
+    @api.post('/calibration-identities/rebuild')
+    def calibration_identities_rebuild():
+        return service.build_calibration_identities()
+
+    @api.get('/calibration-identities')
+    def calibration_identities():
+        return service.repo.calibration_identities()
+
+    @api.get('/calibration-identities/{identity_id}')
+    def calibration_identity(identity_id: int):
+        identity = service.repo.calibration_identity(identity_id)
+        if not identity:
+            raise HTTPException(404, 'Onbekende Calibration Identity')
+        return identity
+
+    @api.post('/calibration-identities/{identity_id}/review')
+    def calibration_identity_review(identity_id: int, body: V3ReviewRequest):
+        return service.review_calibration_identity(identity_id, body.action, body.reviewer, body.note)
+
+    @api.post('/calibration-identities/{identity_id}/align')
+    def calibration_identity_align(identity_id: int):
+        return service.align_calibration_identity(identity_id)
+
+    @api.get('/files/{file_id}/new-bin-report')
+    def new_bin_report(file_id: int, threshold: float = 70.0):
+        return service.new_bin_report(file_id, threshold)
+
+    @api.get('/search')
+    def search(q: str = ''):
+        return service.search(q)
+
+    @api.get('/winols-projects/{project_id}/graph')
+    def ols_graph(project_id: int):
+        return service.ols_graph(project_id)
+
+    @api.get('/jobs')
+    def jobs():
+        return service.jobs()
+
+    @api.get('/knowledge-builds')
+    def knowledge_builds():
+        return service.repo.knowledge_builds()
+
+    @api.get('/knowledge-builds/active')
+    def active_knowledge_build():
+        return service.repo.active_knowledge_build()
+
+    @api.post('/confidence/evaluate')
+    def confidence_evaluate(body: ConfidenceEvaluationRequest):
+        return service.evaluate_confidence(body.records, body.threshold)
+
+    @api.get('/confidence/evaluations')
+    def confidence_evaluations():
+        return service.repo.confidence_evaluations()
+
+    # ---------------- V5 Local Library ----------------
+    @api.get('/libraries')
+    def libraries():
+        return {'roots': service.library.roots(), 'storage': service.library.storage_summary()}
+
+    @api.post('/libraries')
+    def add_library(body: LibraryRootRequest):
+        return service.library.add_root(body.path, body.name)
+
+    @api.post('/libraries/{root_id}/scan')
+    def scan_library(root_id: int, resume: bool = False):
+        return service.library.scan_root(root_id, resume=resume)
+
+    @api.get('/libraries/{root_id}/locations')
+    def library_locations(root_id: int, q: str = '', limit: int = 200):
+        return service.library.locations(root_id, q, limit)
+
+    @api.get('/libraries/{root_id}/scans')
+    def library_scans(root_id: int):
+        return service.library.scans(root_id)
+
+    @api.get('/contents/{content_id}/locations')
+    def content_locations(content_id: int):
+        return service.library.content_locations(content_id)
+
+    @api.get('/contents/{content_id}/analysis')
+    def content_analysis(content_id: int):
+        return {"content": service.library.content(content_id),
+                "analysis_link": service.library.analysis_link(content_id),
+                "locations": service.library.content_locations(content_id)}
+
+    @api.post('/contents/{content_id}/analyze')
+    def analyze_content(content_id: int):
+        return service.library.analyze_content(content_id)
+
+    @api.post('/library/analyze-pending')
+    def analyze_pending(body: AnalyzePendingRequest):
+        return service.library.analyze_pending(root_id=body.root_id, limit=body.limit,
+                                               resume=body.resume)
+
+    @api.get('/library/search')
+    def library_search(q: str = '', limit: int = 50):
+        return service.library.search(q, limit)
+
+    @api.post('/libraries/{root_id}/watch')
+    def set_watch(root_id: int, body: WatchRequest):
+        return service.library.set_watch(root_id, body.enabled, body.policy)
+
+    @api.post('/library/process-watch')
+    def process_watch():
+        return service.library.process_watch()
+
+    @api.post('/library/new-bin')
+    def new_bin_library(body: NewBinPathRequest):
+        return service.new_bin_library_report(body.path, body.threshold)
+
+    @api.post('/jobs/{run_id}/pause')
+    def job_pause(run_id: int):
+        return service.job_pause(run_id)
+
+    @api.post('/jobs/{run_id}/resume')
+    def job_resume(run_id: int):
+        return service.job_resume(run_id)
+
+    @api.post('/jobs/{run_id}/cancel')
+    def job_cancel(run_id: int):
+        return service.job_cancel(run_id)
+
+    @api.get('/jobs/{run_id}')
+    def job_detail(run_id: int):
+        row = service.job(run_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail='Onbekende taak')
+        return row
+
+    @api.get('/audit')
+    def audit(limit: int = 200, subject_type: str = ''):
+        return {'entries': service.audit_log(limit, subject_type or None)}
+
+    @api.post('/backup')
+    def backup(target_dir: str = ''):
+        return service.backup(target_dir or None)
+
+    @api.post('/restore')
+    def restore(body: RestoreRequest):
+        return service.restore(body.path)
+
+    @api.get('/health')
+    def health():
+        return service.health_check()
+
+    @api.get('/reports/{kind}/{subject_id}')
+    def export_report(kind: str, subject_id: int, format: str = 'json',
+                      path: str = ''):
+        return service.export_report(kind, subject_id, format, path or None)
+
+    @api.get('/reports/library')
+    def export_library_report(format: str = 'json', path: str = ''):
+        return service.export_report('library', None, format, path or None)
+
+    # ---------------- V6 kennismodel ----------------
+    @api.post('/knowledge-model/rebuild')
+    def rebuild_knowledge_model():
+        return service.build_knowledge_model()
+
+    @api.get('/ecu-images')
+    def ecu_images():
+        return {'identities': service.repo.db.rows(
+            """SELECT i.*, (SELECT COUNT(*) FROM ecu_image_members m
+               WHERE m.image_id=i.id) AS members FROM ecu_image_identities i
+               ORDER BY i.id""")}
+
+    @api.get('/ecu-images/{image_id}')
+    def ecu_image_detail(image_id: int):
+        identity = service.repo.db.rows(
+            "SELECT * FROM ecu_image_identities WHERE id=?", (image_id,))
+        if not identity:
+            raise HTTPException(status_code=404, detail='Onbekende image-identiteit')
+        members = service.repo.db.rows(
+            "SELECT * FROM ecu_image_members WHERE image_id=? ORDER BY id", (image_id,))
+        return {'identity': identity[0], 'members': members}
+
+    @api.get('/project-families')
+    def project_families():
+        return {'families': service.repo.db.rows(
+            """SELECT f.*, (SELECT COUNT(*) FROM project_family_members m
+               WHERE m.family_id=f.id) AS members FROM project_families f
+               ORDER BY f.id""")}
+
+    @api.get('/lineage')
+    def lineage():
+        return {'relations': service.repo.db.rows(
+            "SELECT * FROM software_lineage ORDER BY id")}
+
+    @api.get('/negatives')
+    def negatives(subject_type: str = ''):
+        return {'relations': service.negatives(subject_type or None)}
+
+    @api.post('/negatives')
+    def register_negative(body: NegativeRequest):
+        return service.register_negative_match(
+            body.subject_type, tuple(body.a), tuple(body.b), reason=body.reason,
+            reviewer=body.reviewer)
+
+    @api.get('/compare')
+    def compare(left_file_id: int, right_file_id: int):
+        return service.compare_workspace(left_file_id, right_file_id)
+
+    @api.get('/files/{file_id}/explain')
+    def explain(file_id: int, threshold: float = 70.0):
+        return service.explain_new_bin(file_id, threshold)
+
+    @api.post('/golden/run')
+    def golden_run():
+        return service.evaluate_golden(save=True)
+
+    @api.get('/golden/runs')
+    def golden_runs():
+        return {'runs': service.km.golden_history()}
+
+    @api.get('/knowledge/snapshot')
+    def knowledge_snapshot():
+        return service.snapshot_knowledge()
+
+    @api.post('/projects/{project_id}/reparse')
+    def reparse_project(project_id: int):
+        return service.repo.reparse_project(project_id)
+
+    @api.get('/readouts')
+    def readouts(q: str = ''):
+        return {'readouts': service.readouts(q)}
+
+    # ---------------- V7 Tune Bouwer ----------------
+    @api.get('/tune-recipes')
+    def tune_recipes():
+        return service.tune_recipes()
+
+    @api.post('/tune-build')
+    def tune_build(body: TuneBuildRequest):
+        return service.build_tune(original_path=body.original_path or None,
+                                  original_file_id=body.original_file_id,
+                                  stage=body.stage, addons=body.addons,
+                                  intensity=body.intensity,
+                                  threshold=body.threshold, dry_run=body.dry_run)
+
+    @api.post('/readouts')
+    def add_readout(body: ReadoutRequest):
+        return service.add_readout(body.customer, body.vehicle, body.stage,
+                                   body.technician, body.readout_date,
+                                   body.file_id, body.project_id, body.note)
 
     return api

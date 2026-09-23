@@ -1,3 +1,4 @@
+from PySide6.QtCore import Qt
 from fastapi.testclient import TestClient
 from app.api import create_api
 
@@ -63,15 +64,65 @@ def test_v2_api_identification_and_knowledge_review(service, tmp_path):
     assert client.get('/ecu-families').json()[0]['family_name'] == 'MED17.1.21'
 
 
+def test_first_run_wizard_persists_profile_without_crash(service, monkeypatch):
+    """Regressie (gebruikers-crash): de first-run-wizard riep _persist_profile
+    aan die nooit bestond → AttributeError bij afronden (na LOW/BALANCED/HIGH-
+    keuze). Nu: profiel wordt bewaard en toegepast, géén crash."""
+    monkeypatch.setenv('QT_QPA_PLATFORM', 'offscreen')
+    from PySide6.QtWidgets import QApplication, QWizard
+    from app.ui.main_window import MainWindow
+    application = QApplication.instance() or QApplication([])
+    # wizard sluit direct met accept; profiel-combo staat op HIGH
+    monkeypatch.setattr(QWizard, 'exec', lambda self: self.accept() or 1)
+    original = MainWindow._wizard_profile
+
+    def profile_page(window_self, wizard):
+        page = original(window_self, wizard)
+        window_self._wizard_profile_combo.setCurrentIndex(2)  # HIGH kiezen
+        return page
+
+    monkeypatch.setattr(MainWindow, '_wizard_profile', profile_page)
+    window = MainWindow(service)
+    application.processEvents()
+    window.maybe_first_run()  # moest vroeger crashen: AttributeError
+    store = window.repo.config['data_dir']
+    import json as _json
+    from pathlib import Path as _Path
+    state = _json.loads((_Path(store) / 'ui.json').read_text(encoding='utf-8'))
+    assert state.get('resource_preset') == 'HIGH'
+    assert window.service.library.config.get('resource_preset') == 'HIGH'
+    window.close()
+
+
 def test_gui_smoke(service, pair, monkeypatch, tmp_path):
     monkeypatch.setenv('QT_QPA_PLATFORM', 'offscreen')
     from PySide6.QtWidgets import QApplication
     from app.ui.main_window import MainWindow
     application = QApplication.instance() or QApplication([])
     window = MainWindow(service)
+    window.apply_ui_mode('expert')  # volledige nav voor deze test
     window.show()
     application.processEvents()
-    assert window.nav.count() == 16
+    assert window.page_count == 29  # + Assistent + Review-center + Tune-kandidaten
+    assert window.nav.count() == 35  # 29 pagina's + 6 groepskoppen
+    assert window.navigate('Review-center') is True
+    assert window.navigate('Assistent') is True
+    assert window.navigate('Uitleg & Handleiding') is True
+    # gebruikersvriendelijkheid: direct navigeren en paginazoeker werken
+    assert window.navigate('Library (V5)') is True
+    assert window.navigate('BIN Analyseren (V3)') is True
+    assert window.navigate("Diff & Regio's") is True
+    assert window.navigate('OLS Explorer & Review') is True
+    assert window.navigate('Families (ECU / Software / Calibratie)') is True
+    assert window.navigate('Analyze BIN') is False  # samengevoegd in BIN Analyseren
+    assert window.navigate('Bestaat Niet') is False
+    window.filter_nav('OLS')
+    visible = [window.nav.item(row).text() for row in range(window.nav.count())
+               if not window.nav.item(row).isHidden()
+               and window.nav.item(row).data(Qt.ItemDataRole.UserRole) == 'page']
+    window.filter_nav('')
+    assert {'WinOLS', 'OLS Explorer & Review'} <= set(visible)
+
     assert window.file_table.rowCount() == 2
     project = tmp_path / 'gui-project.ols'
     project.write_bytes(b'OLS\x00GUI test project\x00')
@@ -85,6 +136,54 @@ def test_gui_smoke(service, pair, monkeypatch, tmp_path):
     window.show_hex()
     assert 'ORI' in window.hex_view.toPlainText()
     window.close()
+
+
+def test_files_page_shows_library_locations(service, pair, monkeypatch, tmp_path):
+    """Library (V5)-locaties zijn ook op de Files-pagina zichtbaar en
+    selecteerbaar voor import naar Files."""
+    monkeypatch.setenv('QT_QPA_PLATFORM', 'offscreen')
+    from PySide6.QtWidgets import QApplication
+    from app.ui.main_window import MainWindow
+    application = QApplication.instance() or QApplication([])
+    source = tmp_path / 'LibGUI'
+    source.mkdir()
+    (source / 'lib_test.bin').write_bytes(b'X' * 512)
+    (source / 'lib_test.ols').write_bytes(b'OLS\x00gui')
+    root = service.library.add_root(str(source), 'GuiRoot')
+    service.library.scan_root(root['id'])
+    window = MainWindow(service)
+    window.refresh()
+    assert window.location_table.rowCount() == 2
+    window.location_table.selectRow(0)
+    selected = window._selected_locations()
+    assert len(selected) == 1 and selected[0]['path'].endswith('.bin')
+    assert '2 locatie(s)' in window.location_hint.text()
+    window.close()
+
+
+def test_first_run_wizard_pages(service, monkeypatch):
+    """Regressie voor de Windows-exe-crash: PySide6 6.11+ heeft geen
+    QWizard.registerField meer. De eerste-start-wizard moet op élke
+    PySide6-versie zonder AttributeError bouwen en uitleesbaar zijn."""
+    monkeypatch.setenv('QT_QPA_PLATFORM', 'offscreen')
+    from PySide6.QtWidgets import QApplication, QWizard
+    from app.ui.main_window import MainWindow
+    application = QApplication.instance() or QApplication([])
+    window = MainWindow(service)
+    wizard = QWizard()
+    wizard.addPage(window._wizard_welcome())
+    wizard.addPage(window._wizard_roots(wizard))
+    wizard.addPage(window._wizard_profile(wizard))  # crashte vroeger hier
+    combo = window._wizard_profile_combo
+    checkbox = window._wizard_start_checkbox
+    combo.setCurrentIndex(2)
+    assert combo.currentText() == 'HIGH'
+    assert checkbox.isChecked() is True
+    # roots-pagina verzamelt paden zonder registerField
+    window._wizard_root_list.addItem(r'D:\Tuning')
+    assert wizard.page(1).validatePage() is True
+    assert window._wizard_root_paths == [r'D:\Tuning']
+
 
 
 def test_gui_background_analysis(service, pair, monkeypatch):
@@ -107,4 +206,64 @@ def test_gui_background_analysis(service, pair, monkeypatch):
     assert window.match_table.rowCount() == 1
     assert window.report['matches'][0]['match_score'] == 100
     timer.stop()
+    window.close()
+
+
+def test_ui_simple_mode_by_default_and_expert_toggle(service, monkeypatch, tmp_path):
+    """Nieuw: Eenvoudig/Expert. Standaard Eenvoudig (10 dagelijkse pagina's +
+    alleen gevulde sectiekoppen); Expert toont alles; keuze blijft bewaard."""
+    monkeypatch.setenv('QT_QPA_PLATFORM', 'offscreen')
+    from PySide6.QtWidgets import QApplication
+    from app.ui.main_window import MainWindow
+    application = QApplication.instance() or QApplication([])
+    window = MainWindow(service)
+    assert window._ui_mode == 'eenvoudig'
+    visible = [window.nav.item(row).text() for row in range(window.nav.count())
+               if not window.nav.item(row).isHidden()
+               and window.nav.item(row).data(Qt.ItemDataRole.UserRole) == 'page']
+    assert set(visible) == MainWindow.SIMPLE_PAGES
+    # sectiekoppen zonder zichtbare pagina's verdwijnen mee
+    sections = [window.nav.item(row).text() for row in range(window.nav.count())
+                if not window.nav.item(row).isHidden()
+                and window.nav.item(row).data(Qt.ItemDataRole.UserRole) == 'section']
+    assert 'FAMILIES & LEARNING' not in sections
+    assert 'BIBLIOTHEEK' in sections
+    # wisselen naar expert: alles zichtbaar
+    window.apply_ui_mode('expert')
+    visible = [window.nav.item(row).text() for row in range(window.nav.count())
+               if not window.nav.item(row).isHidden()
+               and window.nav.item(row).data(Qt.ItemDataRole.UserRole) == 'page']
+    assert len(visible) == window.page_count == 29
+    window.apply_ui_mode('eenvoudig')
+    window.close()
+    # keuze is bewaard: een volgend venster start weer in Eenvoudig
+    window2 = MainWindow(service)
+    assert window2._ui_mode == 'eenvoudig'
+    window2.close()
+
+
+def test_assistant_answers_use_real_state(service, monkeypatch):
+    """De lokale assistent antwoordt met échte cijfers uit deze installatie."""
+    monkeypatch.setenv('QT_QPA_PLATFORM', 'offscreen')
+    answer = service.assistant.answer('Wat moet ik nu doen?')
+    assert 'library-roots' in answer['answer'] or 'Root volledig' in answer['answer']
+    match_answer = service.assistant.answer('Waarom matcht mijn BIN niet?', {'last_report': None})
+    assert 'drempel' in match_answer['answer']
+    review = service.assistant.answer('Wat ligt er ter review?')
+    assert '0 unknown-bestanden' in review['answer']
+    onbekend = service.assistant.answer('blabla allemaal rare woorden')
+    assert 'probeer' in onbekend['answer'].casefold()
+
+
+def test_assistant_page_answers_in_gui(service, pair, monkeypatch):
+    """Assistent-pagina in de GUI beantwoordt vragen en logt het gesprek."""
+    monkeypatch.setenv('QT_QPA_PLATFORM', 'offscreen')
+    from PySide6.QtWidgets import QApplication
+    from app.ui.main_window import MainWindow
+    application = QApplication.instance() or QApplication([])
+    window = MainWindow(service)
+    window.navigate('Assistent')
+    window.ask_assistant('Wat moet ik nu doen?')
+    log = window.assistant_log.toPlainText()
+    assert 'Jij: Wat moet ik nu doen?' in log and 'Assistent:' in log
     window.close()

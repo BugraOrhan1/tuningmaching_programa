@@ -1,3 +1,4 @@
+from pathlib import Path
 import json
 import pytest
 from app.utils.reset import reset_data_dir
@@ -159,7 +160,7 @@ def test_bulk_reclassification_preserves_source_and_enables_pairing(service, tmp
     original_id, tuned_id = service.repo.import_file(original), service.repo.import_file(tuned)
     assert service.repo.reclassify_files([original_id], 'original') == 1
     assert service.repo.reclassify_files([tuned_id], 'tuned') == 1
-    assert service.repo.file(original_id)['filepath'].endswith('originals\\' + service.repo.file(original_id)['sha256'] + '.bin')
+    assert service.repo.file(original_id)['filepath'].endswith(str(Path('originals') / (service.repo.file(original_id)['sha256'] + '.bin')))
     assert original.read_bytes() == b'original data'
     pair_id = service.repo.pair(original_id, tuned_id, True)
     with pytest.raises(ValueError, match='gekoppeld'):
