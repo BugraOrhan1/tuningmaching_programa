@@ -1,6 +1,37 @@
 # Applicatiestatus
 
-Datum: 2026-09-21 (V9.0 — TuningCore, nieuwe schone kern)
+Datum: 2026-09-23 (V9.0.1 — volledige logging in TuningCore)
+
+## V9.0.1-status (Logging & diagnose: alles staat in het log) — actueel
+
+**200 passed / 1 skip (oude suite, onaangetast) + 9 engine-tests = 209 items groen.**
+
+Gebruikersvraag: *"voeg log toe van alles dan weten we waarom die crash en
+waar die vast loopt en check alles ff opnieuw"*.
+
+- **`engine/tuningcore/logsetup.py`:** logbestand altijd náást de database
+  (`core.db.log`), roteert bij 5 MB × 3 — vult nooit de schijf. Logging mag
+  zelf NÓÓIT een crash veroorzaken (try/except om handler-setup).
+- **Elke fase logt start + klaar** met cijfers/duur; **elke batch logt
+  "t/m=<bestand>"** → de laatste logregel zegt altijd waar hij bezig was
+  ("waar loopt hij vast" = laatste regel lezen).
+- **Elke parse-resultaat per bestand** in het log (versies, rollen,
+  compleet, identity, stride).
+- **Fouten mét volledige traceback** in log én errors-tabel (2000 tekens);
+  `status` toont nu checkpoints + laatste 5 fouten.
+- **CLI crash-guard:** een crash geeft exitcode 1, korte melding + verwijzing
+  naar het log — nooit een kale traceback (vraag ㉗: first-run crasht nooit).
+  KeyboardInterrupt (Ctrl+C) is netjes: checkpoints veilig, rc=130.
+- **Nieuw commando `log --tail N`:** laatste logregels lezen voor diagnose.
+- **Scan-checkpoint-foutje gefixt** (stond root_id i.p.v. pad in).
+- **Opnieuw gemeten (bench 300×512KB):** parse ~88 bestanden/s mét logging
+  vs ~106 zonder op deze 2-core sandbox (parent logt terwijl workers parsen
+  → op multi-core machines ~gratis); 1,2M OLS ≈ 3,1-3,8 uur. 2 extra tests
+  (logging bevat alle fases + waarom-fout + traceback in errors; CLI log +
+  crash-guard).
+- GASDROP-valide blijft; oude suite 200/1 onaangetast.
+
+## V9.0-status (TuningCore — helemaal nieuwe kern voor 1,2M OLS / ~8 TB) — vorige release
 
 ## V9.0-status (TuningCore — helemaal nieuwe kern voor 1,2M OLS / ~8 TB) — actueel
 

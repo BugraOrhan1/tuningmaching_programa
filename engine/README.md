@@ -59,8 +59,37 @@ milliseconden, ook op een kale machine.
 
 - Scan: 300 bestanden / 314 MB in 0,21 s (RAM-cache; op USB wordt dit
   schijf-gebonden, ~200–500 MB/s → 8 TB ≈ 4,5–11 uur lezen, éénmalig).
-- Parse: **106 OLS/s** met multiprocess-pool → **1,2M OLS ≈ 3,1 uur**.
+- Parse: **~88-106 OLS/s** met multiprocess-pool → **1,2M OLS ≈ 3,1-3,8 uur**
+  (106 zonder logging, ~88 mét volledige logging — op deze 2-core sandbox;
+  op een echte multi-core machine logt de hoofdfase terwijl de workers
+  parsen, dus daar is de logging vrijwel gratis).
 - Op de doelmachine (meer cores) schaalt parse ~lineair mee (per-bestand werk).
+
+## Logging & diagnose (altijd alles terug te lezen)
+
+Naast de database staat altijd een logbestand: **`core.db.log`**
+(roteert bij 5 MB, houdt er max 3 bewaard — vult nooit je schijf).
+
+Wat erin staat:
+
+- start/klaar van élke fase met cijfers en duur;
+- élke batch met snelheid en **"t/m=" welk bestand** — de laatste logregel
+  zegt dus altijd waar hij was. Even geen nieuwe regels? Dan is de laatste
+  regel precies waar hij bezig is ("waar loopt hij vast" = laatste regel);
+- élke parse-resultaat per bestand (versies, rollen, compleet, identity);
+- élke fout met reden én **volledige Python-traceback** (ook in de
+  errors-tabel, zichtbaar met `status`);
+- Ctrl+C is veilig: checkpoints staan in de database, gewoon opnieuw starten.
+
+Diagnose-commando's:
+
+```bat
+python -m tuningcore --db core.db log --tail 50     rem laatste 50 regels
+python -m tuningcore --db core.db status            rem + checkpoints + laatste fouten
+```
+
+Bij een vraag of melding: stuur de uitvoer van `log --tail 50` mee, dan zien
+we precies waar het gebeurde en waarom.
 
 ## Architectuur & taalkeuze
 

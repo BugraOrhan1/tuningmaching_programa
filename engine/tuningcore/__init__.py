@@ -8,4 +8,4 @@ Ontwerpregels (lessen uit de vorige generatie):
 5. Stdlib-only: start in milliseconden, geen dependency-hel.
 6. Bewijsregels onveranderd: rollen/stages alléén uit expliciete labels.
 """
-__version__ = "0.1.0"
+__version__ = "0.2.0"

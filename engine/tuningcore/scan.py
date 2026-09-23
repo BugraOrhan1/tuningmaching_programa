@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from .db import bump_meta, connect, log_error
+from . import logsetup
 
 _BATCH = 200
 _HASH_WORKERS = {"LOW": 2, "BALANCED": max(4, (os.cpu_count() or 4) // 2),
@@ -72,6 +73,10 @@ def scan(db, root_path: str, preset: str = "MAX", progress=None) -> dict:
     workers = _HASH_WORKERS.get(preset.upper(), _HASH_WORKERS["BALANCED"])
     stats = {"discovered": len(found), "new": 0, "unchanged": 0, "modified": 0,
              "errors": 0, "bytes_hashed": 0}
+    log = logsetup.get()
+    log.info("SCAN start root=%s gevonden=%d totaal_MB=%.1f preset=%s workers=%d",
+             root_path, len(found), total_bytes / (1024 * 1024), preset.upper(),
+             workers)
 
     previous = {row["path"]: row for row in db.execute(
         "SELECT path, size, mtime, sha256 FROM files WHERE root_id=?", (root_id,))}
@@ -81,6 +86,7 @@ def scan(db, root_path: str, preset: str = "MAX", progress=None) -> dict:
     def flush():
         if not batch:
             return
+        t_batch = time.monotonic()
         with db:
             db.executemany(
                 """INSERT INTO files(root_id, path, name, ext, size, mtime, sha256, state)
@@ -89,8 +95,13 @@ def scan(db, root_path: str, preset: str = "MAX", progress=None) -> dict:
                      mtime=excluded.mtime, sha256=excluded.sha256,
                      state='SCANNED', scanned_at=CURRENT_TIMESTAMP""",
                 batch)
-        bump_meta(db, f"scan_checkpoint_{root_id}", batch[-1][0])
+        bump_meta(db, f"scan_checkpoint_{root_id}", batch[-1][1])
         db.commit()
+        log.info("SCAN batch: +nieuw=%d onveranderd=%d gewijzigd=%d fouten=%d "
+                 "%.1f MB gehasht in %.2fs t/m=%s",
+                 stats["new"], stats["unchanged"], stats["modified"],
+                 stats["errors"], stats["bytes_hashed"] / (1024 * 1024),
+                 time.monotonic() - t_batch, batch[-1][1])
         batch.clear()
 
     def handle(item):
@@ -101,6 +112,7 @@ def scan(db, root_path: str, preset: str = "MAX", progress=None) -> dict:
         try:
             return path, size, _hash_file(path), "new"
         except OSError as exc:
+            logsetup.get().error("SCAN leesfout %s: %s", path, exc)
             return path, 0, None, f"error: {exc}"
 
     for index in range(0, len(found), max(workers * 25, 50)):
@@ -135,4 +147,5 @@ def scan(db, root_path: str, preset: str = "MAX", progress=None) -> dict:
     flush()
     db.commit()
     stats["seconds"] = round(time.monotonic() - started, 2)
+    log.info("SCAN klaar root=%s %s", root_path, stats)
     return stats

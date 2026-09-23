@@ -72,6 +72,10 @@ def get_meta(db: sqlite3.Connection, key: str, default: str | None = None):
 
 
 def log_error(db: sqlite3.Connection, path: str, phase: str, message: str) -> None:
-    """Fout NOOIT gooien in bulk-paden: loggen en doorgaan (nooit crashen)."""
+    """Fout NOOIT gooien in bulk-paden: errors-tabel + log (nooit crashen)."""
+    text = str(message)[:2000]
     db.execute("INSERT INTO errors(path, phase, message) VALUES (?,?,?)",
-               (str(path), phase, str(message)[:500]))
+               (str(path), phase, text))
+    from . import logsetup
+    first = text.splitlines()[0] if text else "(leeg)"
+    logsetup.get().error("[%s] fout bij %s: %s", phase, path, first)

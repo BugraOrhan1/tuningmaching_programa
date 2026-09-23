@@ -122,3 +122,56 @@ def test_parse_resume_skips_already_parsed(tmp_path):
     assert first["parsed"] == 4
     second = parse_pending(db, workers=2)
     assert second["pending"] == 0 and second["parsed"] == 0
+
+
+def test_logging_captures_scan_parse_errors_and_where_it_stopped(tmp_path):
+    """Elke fase, batch en fout staat in <db>.log — incl. volledige traceback."""
+    import tuningcore.logsetup as logsetup
+    logsetup.reset()
+    dbp = tmp_path / "core.db"
+    logsetup.setup(dbp)
+    root = tmp_path / "bron"
+    root.mkdir()
+    (root / "good.ols").write_bytes(build_ols("1/1/EDC17/L0/BOSCH",
+                                              [("origineel", bytes(4096)),
+                                               ("stage 1", bytes(4095) + b"\x11")]))
+    (root / "rot.ols").write_bytes(b" GEEN OLS ")
+    db = connect(dbp)
+    scan(db, str(root), progress=lambda m: None)
+    parse_pending(db, workers=1, progress=lambda m: None)
+    joined = "\n".join(logsetup.tail(dbp, 200))
+    assert "SCAN start" in joined
+    assert "SCAN batch:" in joined
+    assert "SCAN klaar" in joined
+    assert "PARSE start" in joined
+    assert "PARSE batch:" in joined
+    assert "PARSE klaar" in joined
+    assert "rot.ols" in joined                      # waar het misging
+    assert "Geen geldige OLS-structuur" in joined   # waarom
+    row = db.execute("SELECT message FROM errors WHERE phase='ols_parse'").fetchone()
+    assert row and "Traceback" in row["message"]    # volledige traceback in errors
+    logsetup.reset()
+
+
+def test_cli_log_command_shows_lines_and_crash_guard_never_raw(tmp_path,
+                                                                capsys,
+                                                                monkeypatch):
+    import tuningcore.logsetup as logsetup
+    from tuningcore import cli
+    logsetup.reset()
+    dbp = tmp_path / "c.db"
+    logsetup.setup(dbp)
+    logsetup.get().info("diagnose-testregel-XYZ")
+    assert cli.main(["--db", str(dbp), "log", "--tail", "5"]) == 0
+    assert "diagnose-testregel-XYZ" in capsys.readouterr().out
+    # crash-guard: een handler-crash geeft exitcode 1 + logverwijzing, geen kale crash
+    def boom(_args):
+        raise RuntimeError("test-explosie")
+    monkeypatch.setitem(cli.HANDLERS, "status", boom)
+    rc = cli.main(["--db", str(dbp), "status"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "FOUT: RuntimeError: test-explosie" in err
+    assert "log --tail 50" in err
+    assert "test-explosie" in "\n".join(logsetup.tail(dbp, 20))
+    logsetup.reset()

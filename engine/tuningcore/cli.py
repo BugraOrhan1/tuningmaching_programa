@@ -1,9 +1,14 @@
-"""TuningCore CLI: tc — init/scan/parse/status/pairs/bench.
+"""TuningCore CLI: tc — scan/parse/status/pairs/bench/log.
 
 Gebruik (vanaf de repo-root; --db vóór het subcommando):
     PYTHONPATH=engine python -m tuningcore --db core.db scan D:\\Database\\1
     PYTHONPATH=engine python -m tuningcore --db core.db parse
     PYTHONPATH=engine python -m tuningcore --db core.db status
+    PYTHONPATH=engine python -m tuningcore --db core.db log --tail 50
+
+Alles wordt gelogd in `<databank>.log` (roteert bij 5 MB, max 3 oudere).
+Crasht of lijkt vast te zitten?  `log --tail 50` zegt altijd waar hij was
+en bij fouten staat de volledige traceback in het log.
 """
 from __future__ import annotations
 
@@ -13,6 +18,7 @@ import tempfile
 import time
 from pathlib import Path
 
+from . import logsetup
 from .db import connect
 from .process import parse_pending
 from .scan import scan
@@ -20,6 +26,7 @@ from .scan import scan
 
 def _progress(message: str) -> None:
     print(message, file=sys.stderr, flush=True)
+    logsetup.get().info("%s", message)
 
 
 def cmd_scan(args) -> int:
@@ -58,6 +65,19 @@ def cmd_status(args) -> int:
         "fouten:           %d" % one("SELECT COUNT(*) FROM errors"),
     ]
     print("\n".join(lines))
+    checkpoints = db.execute(
+        "SELECT key, value FROM meta WHERE key LIKE 'scan_checkpoint_%' "
+        "OR key='parse_checkpoint'").fetchall()
+    for row in checkpoints:
+        print(f"checkpoint {row['key']}: {row['value']}")
+    last_errors = db.execute(
+        "SELECT at, phase, path, message FROM errors ORDER BY id DESC LIMIT 5"
+    ).fetchall()
+    if last_errors:
+        print("— laatste fouten:")
+        for row in last_errors:
+            first = (row["message"] or "").splitlines()[0][:120]
+            print(f"  {row['at']} [{row['phase']}] {Path(row['path']).name}: {first}")
     return 0
 
 
@@ -76,6 +96,16 @@ def cmd_pairs(args) -> int:
         print(f"#{row['id']} {Path(row['project']).name} · "
               f"{row['original']} → {row['tuned']} ({stage}, {row['confidence']:.0f}%)")
     print(f"— {len(rows)} paren met state={args.state}")
+    return 0
+
+
+def cmd_log(args) -> int:
+    """Laatste regels van het logbestand — diagnose bij crash/vastgelopen."""
+    lines = logsetup.tail(args.db, args.tail)
+    if not lines:
+        print("(geen log gevonden bij deze database)")
+        return 0
+    print("\n".join(lines))
     return 0
 
 
@@ -106,7 +136,11 @@ def cmd_bench(args) -> int:
     return 0
 
 
-def main(argv: list[str] | None = None) -> int:
+HANDLERS = {"scan": cmd_scan, "parse": cmd_parse, "status": cmd_status,
+            "pairs": cmd_pairs, "bench": cmd_bench, "log": cmd_log}
+
+
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="tuningcore",
                                      description="TuningCore — snelle OLS-kern")
     parser.add_argument("--db", default="tuningcore.db", help="database-bestand")
@@ -120,19 +154,49 @@ def main(argv: list[str] | None = None) -> int:
     parse_p.add_argument("--workers", type=int, default=None)
     parse_p.add_argument("--limit", type=int, default=None)
 
-    sub.add_parser("status", help="tellingen tonen")
+    sub.add_parser("status", help="tellingen + checkpoints + laatste fouten")
     pairs_p = sub.add_parser("pairs", help="gevonden paren tonen")
     pairs_p.add_argument("--state", default="suggested")
+
+    log_p = sub.add_parser("log", help="laatste logregels tonen (diagnose)")
+    log_p.add_argument("--tail", type=int, default=50)
 
     bench_p = sub.add_parser("bench", help="synthetische benchmark")
     bench_p.add_argument("--count", type=int, default=200)
     bench_p.add_argument("--size-kb", type=int, default=512)
     bench_p.add_argument("--workers", type=int, default=None)
+    return parser
 
-    args = parser.parse_args(argv)
-    handlers = {"scan": cmd_scan, "parse": cmd_parse, "status": cmd_status,
-                "pairs": cmd_pairs, "bench": cmd_bench}
-    return handlers[args.command](args)
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    logsetup.setup(args.db)
+    logsetup.get().info("CLI commando=%s opties=%s", args.command,
+                        {k: v for k, v in vars(args).items()
+                         if k not in ("command", "db")})
+    try:
+        return HANDLERS[args.command](args)
+    except KeyboardInterrupt:
+        logsetup.get().warning("CLI afgebroken door gebruiker (Ctrl+C) — "
+                               "checkpoints staan veilig in de database")
+        print("Afgebroken. Voortgang is veilig — gewoon opnieuw starten.",
+              file=sys.stderr)
+        return 130
+    except Exception as exc:  # crash-guard: traceback in log, nooit kale crash
+        tb_text = logsetup.log_exception(args.command, exc)
+        db_for_errors = None
+        try:
+            db_for_errors = connect(args.db)
+            from .db import log_error
+            log_error(db_for_errors, args.command, "cli", f"{exc}\n{tb_text}")
+            db_for_errors.commit()
+        except Exception:
+            pass
+        print(f"FOUT: {type(exc).__name__}: {exc}", file=sys.stderr)
+        print(f"Volledige traceback staat in het log:  "
+              f"python -m tuningcore --db {args.db} log --tail 50",
+              file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
