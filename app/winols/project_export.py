@@ -34,3 +34,50 @@ def export_report(report: dict, folder: Path) -> dict:
     with manifest_path.open('x', encoding='utf-8') as stream:
         json.dump(manifest, stream, indent=2)
     return {"json": str(output), "csv": str(csv_path), "html": str(html_path), "manifest": str(manifest_path)}
+
+
+def export_comparison(report: dict, folder: Path) -> dict:
+    """Export read-only A/B evidence and a manifest of report/source hashes."""
+    sources = []
+    for side_name in ("left", "right"):
+        side = report.get(side_name) or {}
+        if not side.get("sha256_verified") or not side.get("sha256"):
+            raise ValueError(f"{side_name} source hash was not verified")
+        sources.append({
+            "side": side_name,
+            "file_id": side["file_id"],
+            "filename": side["filename"],
+            "size_bytes": side["size"],
+            "stored_file_type": side["stored_file_type"],
+            "sha256": side["sha256"],
+            "sha256_verified": True,
+        })
+
+    folder.mkdir(parents=True, exist_ok=True)
+    stem = "comparison_" + uuid4().hex
+    output = folder / (stem + ".json")
+    payload = dict(report)
+    payload["report_type"] = "read_only_ab_comparison"
+    payload["export_safety"] = (
+        "Analysis only. No ECU binary was written or modified. This report does not "
+        "validate calibration safety, checksums, or flash readiness.")
+    with output.open("x", encoding="utf-8") as stream:
+        json.dump(payload, stream, ensure_ascii=False, indent=2)
+
+    manifest = {
+        "format": "tuning-file-ai-ab-manifest-v1",
+        "report": {
+            "filename": output.name,
+            "sha256": hashlib.sha256(output.read_bytes()).hexdigest(),
+            "size_bytes": output.stat().st_size,
+        },
+        "sources": sources,
+        "scope": "Read-only A/B evidence comparison; no ECU binary output.",
+        "limitations": (
+            "Hashes identify the source bytes and report contents. They do not prove "
+            "that a calibration is safe, checksum-correct, or flash-ready."),
+    }
+    manifest_path = folder / (stem + ".sha256.json")
+    with manifest_path.open("x", encoding="utf-8") as stream:
+        json.dump(manifest, stream, ensure_ascii=False, indent=2)
+    return {"json": str(output), "manifest": str(manifest_path)}

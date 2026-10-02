@@ -15,6 +15,8 @@ from .db import bump_meta, connect, get_meta, log_error
 from . import logsetup
 from .olsparse import parse_ols_file
 
+_PENDING_PAGE_SIZE = 256
+
 
 def _parse_worker(args: tuple) -> dict:
     """Worker (module-niveau = picklable op Windows): parse één OLS.
@@ -40,18 +42,17 @@ def parse_pending(db, workers: int = None, limit: int = None, progress=None) -> 
 
     started = time.monotonic()
     workers = workers or min(8, max(2, (os.cpu_count() or 2)))
-    rows = db.execute(
-        """SELECT f.id AS file_id, f.path, f.size, f.mtime, f.sha256
+    pending = db.execute(
+        """SELECT COUNT(*)
            FROM files f LEFT JOIN ols_projects p ON p.path = f.path
            WHERE f.ext='.ols' AND f.sha256 IS NOT NULL
-             AND (p.id IS NULL OR p.source_mtime != f.mtime)
-           ORDER BY f.id""").fetchall()
+             AND (p.id IS NULL OR p.source_mtime != f.mtime)""").fetchone()[0]
     if limit:
-        rows = rows[:limit]
-    stats = {"pending": len(rows), "parsed": 0, "versions": 0, "pairs": 0, "errors": 0}
+        pending = min(pending, limit) if limit > 0 else max(0, pending + limit)
+    stats = {"pending": pending, "parsed": 0, "versions": 0, "pairs": 0, "errors": 0}
     log = logsetup.get()
     log.info("PARSE start: %d bestanden te doen, workers=%d, limit=%s",
-             len(rows), workers, limit)
+             pending, workers, limit)
 
     batch: list[dict] = []
 
@@ -151,21 +152,32 @@ def parse_pending(db, workers: int = None, limit: int = None, progress=None) -> 
 
     context = get_context("spawn" if os.name == "nt" else "fork")
     chunk_size = max(workers * 2, 4)
-
-    def run_chunk(chunk_rows: list[tuple]) -> list[dict]:
-        """Parallel met fallback naar serial (nooit crashen op pool-problemen)."""
+    pool = None
+    if stats["pending"]:
         try:
-            with context.Pool(processes=workers) as pool:
-                return pool.map(_parse_worker, chunk_rows)
-        except Exception as exc:  # semaphore/permisssie/veiligheid: serial blijft werken
-            logsetup.get().warning(
+            pool = context.Pool(processes=workers)
+        except Exception as exc:
+            log.warning(
                 "PARSE pool niet beschikbaar (%s: %s) — verder in SERIALE modus",
                 type(exc).__name__, exc)
-            return [_parse_worker(item) for item in chunk_rows]
 
-    for index in range(0, len(rows), chunk_size):
-        chunk = [tuple(row) for row in rows[index:index + chunk_size]]
-        results = run_chunk(chunk)
+    def run_chunk(chunk_rows: list[tuple]) -> list[dict]:
+        """Reuse one bounded pool per job; fall back to serial on pool errors."""
+        nonlocal pool
+        if pool is not None:
+            try:
+                return pool.map(_parse_worker, chunk_rows)
+            except Exception as exc:
+                broken_pool, pool = pool, None
+                broken_pool.terminate()
+                broken_pool.join()
+                log.warning(
+                    "PARSE pool niet beschikbaar (%s: %s) — verder in SERIALE modus",
+                    type(exc).__name__, exc)
+        return [_parse_worker(item) for item in chunk_rows]
+
+    def process_chunk(chunk_rows: list[tuple]) -> None:
+        results = run_chunk(chunk_rows)
         flush(results)
         if progress:
             elapsed = max(time.monotonic() - started, 0.001)
@@ -177,6 +189,43 @@ def parse_pending(db, workers: int = None, limit: int = None, progress=None) -> 
                      f"{rate:.1f} bestanden/s · {stats['versions']} versies · "
                      f"{stats['pairs']} paren · ETA {eta_min:.0f} min · "
                      f"fouten {stats['errors']}")
+
+    last_file_id = None
+    fetched = 0
+    pending_chunk: list[tuple] = []
+    completed = False
+    try:
+        while fetched < stats["pending"]:
+            page_limit = min(_PENDING_PAGE_SIZE, stats["pending"] - fetched)
+            page_query = """SELECT f.id AS file_id, f.path, f.size, f.mtime, f.sha256
+                            FROM files f LEFT JOIN ols_projects p ON p.path = f.path
+                            WHERE f.ext='.ols' AND f.sha256 IS NOT NULL
+                              AND (p.id IS NULL OR p.source_mtime != f.mtime)"""
+            parameters = ()
+            if last_file_id is not None:
+                page_query += " AND f.id > ?"
+                parameters = (last_file_id,)
+            page_query += " ORDER BY f.id LIMIT ?"
+            page = db.execute(page_query, (*parameters, page_limit)).fetchall()
+            if not page:
+                break
+            fetched += len(page)
+            last_file_id = page[-1]["file_id"]
+            for row in page:
+                pending_chunk.append(tuple(row))
+                if len(pending_chunk) == chunk_size:
+                    process_chunk(pending_chunk)
+                    pending_chunk = []
+        if pending_chunk:
+            process_chunk(pending_chunk)
+        completed = True
+    finally:
+        if pool is not None:
+            if completed:
+                pool.close()
+            else:
+                pool.terminate()
+            pool.join()
     flush([])
     db.commit()
     stats["seconds"] = round(time.monotonic() - started, 2)

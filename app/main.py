@@ -58,6 +58,67 @@ def _install_crash_hook() -> None:
     sys.excepthook = hook
 
 
+def _run_gui(config: dict) -> int:
+    """Initialize the database without blocking Qt's startup event loop."""
+    from PySide6.QtCore import QObject, QThread, Qt, Signal, Slot
+    from PySide6.QtWidgets import QApplication, QLabel, QMainWindow, QMessageBox
+    from app.service import Service
+
+    application = QApplication.instance() or QApplication(sys.argv[:1])
+    application.setQuitOnLastWindowClosed(False)
+    startup = QMainWindow()
+    startup.setWindowTitle('Tuning File AI Assistant')
+    label = QLabel('Lokale database initialiseren…')
+    label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    startup.setCentralWidget(label)
+    startup.resize(440, 120)
+
+    class StartupWorker(QThread):
+        ready = Signal(object)
+        failed = Signal(str)
+
+        def run(self):
+            try:
+                self.ready.emit(Service(config))
+            except Exception as exc:
+                logging.exception('GUI startup initialization failed')
+                self.failed.emit(str(exc))
+
+    class StartupController(QObject):
+        def __init__(self):
+            super().__init__()
+            self.window = None
+
+        @Slot(object)
+        def open_window(self, service):
+            try:
+                from app.ui.main_window import MainWindow
+                self.window = MainWindow(service, first_run=True)
+            except Exception as exc:
+                logging.exception('GUI window construction failed')
+                QMessageBox.critical(startup, 'Opstarten mislukt', str(exc))
+                application.quit()
+                return
+            self.window.show()
+            startup.close()
+            application.setQuitOnLastWindowClosed(True)
+
+        @Slot(str)
+        def show_error(self, message):
+            QMessageBox.critical(startup, 'Database initialiseren mislukt', message)
+            application.quit()
+
+    controller = StartupController()
+    worker = StartupWorker()
+    worker.ready.connect(controller.open_window)
+    worker.failed.connect(controller.show_error)
+    startup.show()
+    worker.start()
+    exit_code = application.exec()
+    worker.wait()
+    return exit_code
+
+
 def main() -> None:
     _install_crash_hook()
     parser = argparse.ArgumentParser(description='Tuning File AI Assistant')
@@ -219,20 +280,11 @@ def main() -> None:
             return
         from logging.handlers import RotatingFileHandler
         logging.basicConfig(level=logging.INFO, handlers=[RotatingFileHandler(root / 'app.log', maxBytes=2_000_000, backupCount=3, encoding='utf-8')], format='%(asctime)s %(levelname)s %(name)s %(message)s')
+        if args.command in (None, 'gui'):
+            raise SystemExit(_run_gui(config))
         from app.service import Service
         service = Service(config)
-        if args.command in (None, 'gui'):
-            logger = logging.getLogger(__name__)
-            logger.info('GUI: Qt laden…')
-            from PySide6.QtWidgets import QApplication
-            from app.ui.main_window import MainWindow
-            application = QApplication(sys.argv[:1])
-            logger.info('GUI: hoofdpagina opbouwen…')
-            window = MainWindow(service, first_run=True)
-            window.show()
-            logger.info('GUI: venster zichtbaar — eventloop start')
-            sys.exit(application.exec())
-        elif args.command == 'api':
+        if args.command == 'api':
             import uvicorn
             from app.api import create_api
             token = os.environ.get('TUNING_API_TOKEN') or secrets.token_urlsafe(32)

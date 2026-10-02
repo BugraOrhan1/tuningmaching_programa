@@ -13,6 +13,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tuningcore import olsparse                      # noqa: E402
+from tuningcore import process as process_module     # noqa: E402
 from tuningcore.db import connect                    # noqa: E402
 from tuningcore.labels import role_from_name, stage_from_name  # noqa: E402
 from tuningcore.process import parse_pending         # noqa: E402
@@ -77,6 +78,112 @@ def test_scan_hash_parse_pairs_end_to_end(tmp_path):
     status = db.execute(
         "SELECT COUNT(*) FROM pairs WHERE state='suggested'").fetchone()[0]
     assert status == 3
+
+
+def test_parse_pending_pages_are_bounded_and_limit_is_respected(tmp_path, monkeypatch):
+    class TrackingCursor:
+        def __init__(self, cursor, batch_sizes):
+            self.cursor = cursor
+            self.batch_sizes = batch_sizes
+
+        def fetchall(self):
+            rows = self.cursor.fetchall()
+            self.batch_sizes.append(len(rows))
+            return rows
+
+    class TrackingDB:
+        def __init__(self, connection):
+            self.connection = connection
+            self.batch_sizes = []
+
+        def execute(self, query, parameters=()):
+            cursor = self.connection.execute(query, parameters)
+            if "SELECT f.id AS file_id" in query:
+                return TrackingCursor(cursor, self.batch_sizes)
+            return cursor
+
+        def __getattr__(self, name):
+            return getattr(self.connection, name)
+
+        def __enter__(self):
+            self.connection.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self.connection.__exit__(*args)
+
+    page_size = 2
+    monkeypatch.setattr(process_module, "_PENDING_PAGE_SIZE", page_size)
+    root = tmp_path / "bron"
+    root.mkdir()
+    for index in range(6):
+        (root / f"proj_{index}.ols").write_bytes(
+            build_ols(f"1/1/EDC17/P{index}/BOSCH",
+                      [("origineel", bytes(2048)),
+                       ("stage 1", bytes(2047) + b"\x11")]))
+    db = connect(tmp_path / "core.db")
+    scan(db, str(root))
+    tracked_db = TrackingDB(db)
+
+    limited = parse_pending(tracked_db, workers=1, limit=3)
+    assert limited["pending"] == 3 and limited["parsed"] == 3
+    assert tracked_db.batch_sizes == [2, 1]
+
+    unlimited = parse_pending(tracked_db, workers=1, limit=0)
+    assert unlimited["pending"] == 3 and unlimited["parsed"] == 3
+    assert tracked_db.batch_sizes == [2, 1, 2, 1]
+    assert all(size <= page_size for size in tracked_db.batch_sizes)
+
+
+def test_parse_pending_reuses_one_worker_pool_across_chunks(tmp_path, monkeypatch):
+    import multiprocessing
+
+    class FakePool:
+        def __init__(self):
+            self.map_calls = 0
+            self.closed = False
+            self.joined = False
+
+        def map(self, worker, rows):
+            self.map_calls += 1
+            return [worker(row) for row in rows]
+
+        def close(self):
+            self.closed = True
+
+        def join(self):
+            self.joined = True
+
+        def terminate(self):
+            raise AssertionError("healthy pool should not be terminated")
+
+    pools = []
+
+    class FakeContext:
+        def Pool(self, processes):
+            assert processes == 1
+            pool = FakePool()
+            pools.append(pool)
+            return pool
+
+    monkeypatch.setattr(multiprocessing, "get_context", lambda _method: FakeContext())
+    monkeypatch.setattr(process_module, "_PENDING_PAGE_SIZE", 2)
+    root = tmp_path / "bron"
+    root.mkdir()
+    for index in range(9):
+        (root / f"proj_{index}.ols").write_bytes(
+            build_ols(f"1/1/EDC17/R{index}/BOSCH",
+                      [("origineel", bytes(2048)),
+                       ("stage 1", bytes(2047) + b"\x11")]))
+    db = connect(tmp_path / "core.db")
+    scan(db, str(root))
+
+    result = parse_pending(db, workers=1)
+
+    assert result["parsed"] == 9
+    assert len(pools) == 1
+    assert pools[0].map_calls == 3
+    assert pools[0].closed and pools[0].joined
 
 
 def test_rescan_is_cached(tmp_path):

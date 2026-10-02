@@ -63,6 +63,47 @@ def test_learning_clusters_export(service, pair, tmp_path):
     assert '0x64' in Path(first['csv']).read_text(encoding='utf-8-sig')
 
 
+def test_comparison_export_has_verified_source_hashes_and_manifest(
+        service, tmp_path, monkeypatch):
+    import hashlib
+
+    left = tmp_path / 'left.bin'
+    right = tmp_path / 'right.bin'
+    left.write_bytes(b'LEFT' * 128)
+    right.write_bytes(b'RIGHT' * 128)
+    left_id = service.repo.import_file(left, 'original')
+    right_id = service.repo.import_file(right, 'tuned')
+    pair_id = service.repo.pair(left_id, right_id, confirmed=True)
+    monkeypatch.setattr(
+        service.repo, 'pairs',
+        lambda *args, **kwargs: pytest.fail('comparison must not load every pair'))
+    original_bytes = (left.read_bytes(), right.read_bytes())
+    output_dir = tmp_path / 'comparison-reports'
+
+    result = service.export_comparison_workspace(left_id, right_id, output_dir)
+    report = json.loads(Path(result['json']).read_text(encoding='utf-8'))
+    manifest = json.loads(Path(result['manifest']).read_text(encoding='utf-8'))
+    expected_hashes = [hashlib.sha256(data).hexdigest() for data in original_bytes]
+
+    assert report['report_type'] == 'read_only_ab_comparison'
+    assert report['left']['sha256_verified'] and report['right']['sha256_verified']
+    assert [report['left']['sha256'], report['right']['sha256']] == expected_hashes
+    assert report['left']['confirmed_pairs'][0]['pair_id'] == pair_id
+    assert [source['sha256'] for source in manifest['sources']] == expected_hashes
+    assert manifest['report']['sha256'] == hashlib.sha256(
+        Path(result['json']).read_bytes()).hexdigest()
+    assert left.read_bytes() == original_bytes[0]
+    assert right.read_bytes() == original_bytes[1]
+    assert not list(output_dir.glob('*.bin'))
+
+    managed_copy = Path(service.repo.file(right_id)['filepath'])
+    managed_copy.write_bytes(b'tampered')
+    failed_output = tmp_path / 'must-not-export'
+    with pytest.raises(ValueError, match='Integriteitsfout'):
+        service.export_comparison_workspace(left_id, right_id, failed_output)
+    assert not failed_output.exists()
+
+
 def test_invalid_inputs(service, tmp_path):
     (tmp_path/'empty.bin').write_bytes(b'')
     (tmp_path/'bad.hex').write_text(':00')

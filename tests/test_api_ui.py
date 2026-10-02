@@ -3,6 +3,33 @@ from fastapi.testclient import TestClient
 from app.api import create_api
 
 
+def _wait_for_gui_refresh(window, application, timeout_ms=5000):
+    from PySide6.QtCore import QEventLoop, QTimer
+
+    if (window.worker is None and window.refresh_worker is None
+            and getattr(window, '_advice_worker', None) is None
+            and not window._refresh_pending):
+        window.refresh()
+    loop = QEventLoop()
+    poll = QTimer()
+    poll.setInterval(10)
+    poll.timeout.connect(lambda: loop.quit()
+                         if window.worker is None and window.refresh_worker is None
+                         and getattr(window, '_advice_worker', None) is None
+                         and not window._refresh_pending else None)
+    timeout = QTimer()
+    timeout.setSingleShot(True)
+    timed_out = []
+    timeout.timeout.connect(lambda: (timed_out.append(True), loop.quit()))
+    poll.start()
+    timeout.start(timeout_ms)
+    loop.exec()
+    poll.stop()
+    timeout.stop()
+    application.processEvents()
+    assert not timed_out, 'GUI refresh did not finish before the test timeout'
+
+
 def test_api_auth_and_workflow(service, pair):
     client = TestClient(create_api(service, 'a' * 32))
     assert client.get('/files').status_code == 401
@@ -34,6 +61,55 @@ def test_api_reclassify(service, tmp_path):
     client.headers['X-API-Key'] = 'a' * 32
     assert client.post('/files/reclassify', json={'file_ids': [file_id], 'kind': 'original'}).json() == {'updated': 1}
     assert service.repo.file(file_id)['file_type'] == 'original'
+
+
+def test_api_exports_comparison_evidence(service, tmp_path):
+    from pathlib import Path
+
+    left, right = tmp_path / 'api_left.bin', tmp_path / 'api_right.bin'
+    left.write_bytes(b'A' * 256)
+    right.write_bytes(b'B' * 256)
+    left_id = service.repo.import_file(left, 'unknown')
+    right_id = service.repo.import_file(right, 'unknown')
+    client = TestClient(create_api(service, 'a' * 32))
+    client.headers['X-API-Key'] = 'a' * 32
+
+    response = client.post(f'/export/compare/{left_id}/{right_id}')
+
+    assert response.status_code == 200
+    result = response.json()
+    assert Path(result['json']).is_file()
+    assert Path(result['manifest']).is_file()
+
+
+def test_gui_compare_can_export_evidence(service, monkeypatch, tmp_path):
+    monkeypatch.setenv('QT_QPA_PLATFORM', 'offscreen')
+    from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
+    from app.ui.main_window import MainWindow
+
+    left, right = tmp_path / 'gui_left.bin', tmp_path / 'gui_right.bin'
+    left.write_bytes(b'L' * 256)
+    right.write_bytes(b'R' * 256)
+    left_id = service.repo.import_file(left, 'unknown')
+    right_id = service.repo.import_file(right, 'unknown')
+    output_dir = tmp_path / 'gui-comparison'
+    monkeypatch.setattr(QFileDialog, 'getExistingDirectory',
+                        lambda *args, **kwargs: str(output_dir))
+    monkeypatch.setattr(QMessageBox, 'information', lambda *args, **kwargs: None)
+    application = QApplication.instance() or QApplication([])
+    window = MainWindow(service)
+    window.compare_left.addItem('A', left_id)
+    window.compare_right.addItem('B', right_id)
+
+    window.run_compare()
+    _wait_for_gui_refresh(window, application)
+    assert window.compare_export_button.isEnabled()
+    window.export_compare_evidence()
+    _wait_for_gui_refresh(window, application)
+
+    assert len(list(output_dir.glob('comparison_*.json'))) == 2
+    assert not list(output_dir.glob('*.bin'))
+    window.close()
 
 
 def test_api_auto_classify(service, tmp_path):
@@ -85,6 +161,7 @@ def test_first_run_wizard_persists_profile_without_crash(service, monkeypatch):
     window = MainWindow(service)
     application.processEvents()
     window.maybe_first_run()  # moest vroeger crashen: AttributeError
+    _wait_for_gui_refresh(window, application)
     store = window.repo.config['data_dir']
     import json as _json
     from pathlib import Path as _Path
@@ -103,6 +180,7 @@ def test_gui_smoke(service, pair, monkeypatch, tmp_path):
     window.apply_ui_mode('expert')  # volledige nav voor deze test
     window.show()
     application.processEvents()
+    _wait_for_gui_refresh(window, application)
     assert window.page_count == 29  # + Assistent + Review-center + Tune-kandidaten
     assert window.nav.count() == 35  # 29 pagina's + 6 groepskoppen
     assert window.navigate('Review-center') is True
@@ -128,6 +206,7 @@ def test_gui_smoke(service, pair, monkeypatch, tmp_path):
     project.write_bytes(b'OLS\x00GUI test project\x00')
     service.repo.import_project(project)
     window.refresh()
+    _wait_for_gui_refresh(window, application)
     assert window.project_table.rowCount() == 1
     window.show_report(service.analyze(str(pair[1])))
     assert window.match_table.rowCount() == 1
@@ -153,6 +232,7 @@ def test_files_page_shows_library_locations(service, pair, monkeypatch, tmp_path
     service.library.scan_root(root['id'])
     window = MainWindow(service)
     window.refresh()
+    _wait_for_gui_refresh(window, application)
     assert window.location_table.rowCount() == 2
     window.location_table.selectRow(0)
     selected = window._selected_locations()
@@ -202,10 +282,166 @@ def test_gui_background_analysis(service, pair, monkeypatch):
     timer.start(10000)
     loop.exec()
     application.processEvents()
+    _wait_for_gui_refresh(window, application)
     assert window.worker is None
     assert window.match_table.rowCount() == 1
     assert window.report['matches'][0]['match_score'] == 100
     timer.stop()
+    window.close()
+
+
+def test_gui_refresh_keeps_event_loop_responsive(service, monkeypatch):
+    """A slow library query must not stop timers on the GUI thread."""
+    import threading
+    monkeypatch.setenv('QT_QPA_PLATFORM', 'offscreen')
+    from PySide6.QtCore import QEventLoop, QTimer
+    from PySide6.QtWidgets import QApplication
+    from app.ui.main_window import MainWindow
+
+    application = QApplication.instance() or QApplication([])
+    entered = threading.Event()
+    released = threading.Event()
+    heartbeat = threading.Event()
+    original = service.library.all_locations
+
+    def gated_lookup(*args, **kwargs):
+        entered.set()
+        if not released.wait(2):
+            raise TimeoutError('test refresh gate was not released')
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(service.library, 'all_locations', gated_lookup)
+    window = MainWindow(service)
+    timer = QTimer()
+    timer.setInterval(10)
+    timer.timeout.connect(lambda: heartbeat.set()
+                          if entered.is_set() and not released.is_set() else None)
+    timer.start()
+    release_timer = threading.Timer(0.15, released.set)
+    release_timer.start()
+    loop = QEventLoop()
+    timeout = QTimer()
+    timeout.setSingleShot(True)
+    timeout.timeout.connect(loop.quit)
+    timeout.start(600)
+
+    try:
+        loop.exec()
+        assert entered.is_set(), 'the initial refresh did not reach the gated query'
+        assert heartbeat.is_set(), 'the Qt event loop stalled until the query was released'
+    finally:
+        released.set()
+        release_timer.join(timeout=1)
+        timer.stop()
+        timeout.stop()
+        _wait_for_gui_refresh(window, application)
+        window.close()
+
+
+def test_gui_startup_initializes_service_off_gui_thread(monkeypatch):
+    import threading
+    monkeypatch.setenv('QT_QPA_PLATFORM', 'offscreen')
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import QApplication
+    import app.main as main_module
+    import app.service as service_module
+    import app.ui.main_window as window_module
+
+    main_thread = threading.get_ident()
+    service_threads = []
+    window_threads = []
+    app_was_ready = []
+
+    class ServiceProbe:
+        def __init__(self, _config):
+            service_threads.append(threading.get_ident())
+            app_was_ready.append(QApplication.instance() is not None)
+
+    class WindowProbe:
+        def __init__(self, _service, first_run=False):
+            window_threads.append(threading.get_ident())
+
+        def show(self):
+            QTimer.singleShot(0, QApplication.instance().quit)
+
+    monkeypatch.setattr(service_module, 'Service', ServiceProbe)
+    monkeypatch.setattr(window_module, 'MainWindow', WindowProbe)
+    assert main_module._run_gui({}) == 0
+    assert service_threads and service_threads[0] != main_thread
+    assert app_was_ready == [True]
+    assert window_threads == [main_thread]
+
+
+def test_gui_refresh_snapshot_uses_bounded_queries(service, monkeypatch):
+    monkeypatch.setenv('QT_QPA_PLATFORM', 'offscreen')
+    from PySide6.QtWidgets import QApplication
+    from app.ui.main_window import MainWindow
+
+    application = QApplication.instance() or QApplication([])
+    window = MainWindow(service)
+    expected_limits = {
+        'projects': 300,
+        'pairs': 400,
+        'calibration_identities': 400,
+        'ecu_families': 400,
+        'software_families': 400,
+    }
+    for name, limit in expected_limits.items():
+        original = getattr(service.repo, name)
+
+        def bounded(*args, _original=original, _limit=limit,
+                    _name=name, **kwargs):
+            assert kwargs.get('limit') == _limit, f'{_name} must be bounded'
+            if _name == 'calibration_identities':
+                assert kwargs.get('include_members') is False
+            return _original(*args, **kwargs)
+
+        monkeypatch.setattr(service.repo, name, bounded)
+
+    original_locations = service.library.all_locations
+
+    def bounded_locations(*args, **kwargs):
+        assert kwargs.get('limit') == 500
+        return original_locations(*args, **kwargs)
+
+    monkeypatch.setattr(service.library, 'all_locations', bounded_locations)
+    snapshot = window._load_refresh_snapshot('')
+    assert len(snapshot['projects']) <= 300
+    assert len(snapshot['pairs']) <= 400
+    assert len(snapshot['identities']) <= 400
+    assert len(snapshot['locations']) <= 500
+    pattern_id = service.repo.upsert_pattern('refresh-summary', {'ecu_family': 'test'}, 1, 60)
+    snapshot = window._load_refresh_snapshot('')
+    pattern = next(row for row in snapshot['patterns'] if row['id'] == pattern_id)
+    assert 'members' not in pattern and 'alignments' not in pattern
+    _wait_for_gui_refresh(window, application)
+    window.close()
+
+
+def test_gui_refresh_populates_knowledge_model_tables(service, monkeypatch):
+    monkeypatch.setenv('QT_QPA_PLATFORM', 'offscreen')
+    from PySide6.QtWidgets import QApplication
+    from app.ui.main_window import MainWindow
+
+    application = QApplication.instance() or QApplication([])
+    with service.repo.db.connect() as db:
+        db.execute(
+            "INSERT INTO ecu_image_identities(image_size, ecu_family, hardware, software, "
+            "calibration, status, confidence) VALUES (1024, 'ECU-X', 'HW-X', 'SW-X', "
+            "'CAL-X', 'CANDIDATE', 65.0)")
+        db.execute(
+            "INSERT INTO software_lineage(ecu_family, from_family, to_family, relation, "
+            "confidence, status) VALUES ('ECU-X', 'SW-A', 'SW-B', 'SOFTWARE_UPDATE', "
+            "60.0, 'CANDIDATE')")
+
+    window = MainWindow(service)
+    window.refresh()
+    _wait_for_gui_refresh(window, application)
+
+    assert window.image_table.rowCount() == 1
+    assert window.lineage_table.rowCount() == 1
+    assert window.image_table.item(0, 2).text() == 'ECU-X'
+    assert window.lineage_table.item(0, 3).text() == 'SW-B'
     window.close()
 
 
