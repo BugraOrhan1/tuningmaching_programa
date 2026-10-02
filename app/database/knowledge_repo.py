@@ -199,7 +199,8 @@ class RepositoryV3Mixin:
                 "moved_regions": len(members), "confidence": split_confidence,
                 "status": "rebuilt"}
 
-    def patterns_v3(self, status: str | None = None, limit: int = 0) -> list[dict]:
+    def patterns_v3(self, status: str | None = None, limit: int = 0,
+                    include_details: bool = True) -> list[dict]:
         query = "SELECT * FROM tuning_patterns"
         args: tuple = ()
         if status:
@@ -214,13 +215,14 @@ class RepositoryV3Mixin:
         rows = self.db.rows(query, args)
         for row in rows:
             row["payload"] = json.loads(row["payload"])
-            row["members"] = self.db.rows(
-                """SELECT m.*, r.start_offset, r.end_offset, r.length, r.region_class,
-                          r.stage, r.software_number, r.ecu_family, r.structural_signature
-                   FROM tuning_pattern_members m JOIN tuning_regions r ON r.id=m.region_id
-                   WHERE m.pattern_id=? AND r.status <> 'rejected'""", (row["id"],))
-            row["alignments"] = self.db.rows(
-                "SELECT * FROM software_alignments WHERE pattern_id=?", (row["id"],))
+            if include_details:
+                row["members"] = self.db.rows(
+                    """SELECT m.*, r.start_offset, r.end_offset, r.length, r.region_class,
+                              r.stage, r.software_number, r.ecu_family, r.structural_signature
+                       FROM tuning_pattern_members m JOIN tuning_regions r ON r.id=m.region_id
+                       WHERE m.pattern_id=? AND r.status <> 'rejected'""", (row["id"],))
+                row["alignments"] = self.db.rows(
+                    "SELECT * FROM software_alignments WHERE pattern_id=?", (row["id"],))
         return rows
 
     def pattern(self, pattern_id: int) -> dict | None:
@@ -311,14 +313,21 @@ class RepositoryV3Mixin:
                 row[field] = json.loads(row[field]) if row[field] else None
         return rows
 
-    def calibration_identities(self) -> list[dict]:
-        rows = self.db.rows("SELECT * FROM calibration_identities ORDER BY confidence DESC, id")
+    def calibration_identities(self, limit: int = 0,
+                               include_members: bool = True) -> list[dict]:
+        sql = "SELECT * FROM calibration_identities ORDER BY confidence DESC, id"
+        args: tuple = ()
+        if limit:
+            sql += " LIMIT ?"
+            args = (limit,)
+        rows = self.db.rows(sql, args)
         for row in rows:
             for field in ("software_variants", "supporting_evidence", "contradicting_evidence"):
                 row[field] = json.loads(row[field]) if row[field] else []
-            row["members"] = self.db.rows(
-                "SELECT * FROM calibration_identity_members WHERE identity_id=? ORDER BY id",
-                (row["id"],))
+            if include_members:
+                row["members"] = self.db.rows(
+                    "SELECT * FROM calibration_identity_members WHERE identity_id=? ORDER BY id",
+                    (row["id"],))
         return rows
 
     def calibration_identity(self, identity_id: int) -> dict | None:

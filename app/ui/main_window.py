@@ -99,7 +99,7 @@ voor .ols-projecten.<br>
 <b>Modus: Eenvoudig / Expert</b> — linksboven in de navigatie. Eenvoudig
 toont alleen de 10 dagelijkse pagina's (en verbergt lege sectiekoppen); Expert
 toont alles (26). Je keuze blijft bewaard bij het herstarten.<br>
-<b>Library (V5)</b> — registreer hele bronmappen/schijven (D:\Tuning, E:\WinOLS…).
+<b>Library (V5)</b> — registreer hele bronmappen/schijven (D:\\Tuning, E:\\WinOLS…).
 Bovenaan staat de <b>Snelheid</b>-keuze: LOW = rustig · BALANCED = normaal ·
 HIGH = snel · MAX = vol gas (SSD/NVMe + veel vrije RAM). Geldt direct voor
 nieuwe scans, analyses én OLS-verwerking (bij HIGH/MAX worden meerdere
@@ -172,7 +172,8 @@ Inconsistente of eenmalige wijzigingen worden nooit overgedragen.<br>
 verschil met hex-venster (oranje = gewijzigd) én de wijzigingsregio's met
 klasse (calibratie/checksum/code), entropie en bewijs.<br>
 <b>Vergelijk A|B (V6)</b> — twee bestanden naast elkaar: zelfde ECU-image?
-Corresponderende structuren? Original→Tuned-ketting van beide kanten.<br>
+Corresponderende structuren? Original→Tuned-ketting van beide kanten. Exporteer
+de bevindingen als read-only JSON met SHA-256-manifest (geen BIN-output).<br>
 <b>Tune-kandidaten</b> — overzicht van alle gebouwde kandidaten (normaal én
 kennis-overdracht) met recept, score en output-pad; allemaal NOT VERIFIED.
 <b>Zoeken</b> — doorzoek alles op ECU, SW/HW, namen.</p>
@@ -245,6 +246,9 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.service, self.repo = service, service.repo
         self.worker = None
+        self.refresh_worker = None
+        self._refresh_pending = False
+        self._refresh_timer = None
         self.worker_job_name = None
         self.report = None
         self.diff_report = None
@@ -1470,7 +1474,7 @@ class MainWindow(QMainWindow):
         self._identity_rows = []
 
     def refresh_alignment_table(self):
-        identities = self.repo.calibration_identities()
+        identities = self.repo.calibration_identities(limit=400, include_members=False)
         self._identity_rows = identities
         self.populate(self.alignment_table,
                       [{'id': row['id'], 'ecu_family': row['ecu_family'], 'status': row['status'],
@@ -2053,24 +2057,10 @@ class MainWindow(QMainWindow):
 
     def rebuild_knowledge_model(self):
         self.run_job(lambda progress: self.service.build_knowledge_model(),
-                     callback=lambda _result: self.safe(self.refresh_knowledge_model))
+                     callback=lambda _result: None)
 
     def refresh_knowledge_model(self):
-        images = self.repo.db.rows(
-            """SELECT i.id, i.image_size, i.ecu_family, i.hardware_number, i.software_number,
-                      i.calibration_number, i.status, i.confidence,
-                      (SELECT COUNT(*) FROM ecu_image_members m WHERE m.image_id=i.id)
-                      AS members
-               FROM ecu_image_identities i ORDER BY i.id""")
-        self.populate(self.image_table, images,
-                      ['id', 'image_size', 'ecu_family', 'hardware_number',
-                       'software_number', 'calibration_number', 'status',
-                       'confidence', 'members'])
-        self.populate(self.lineage_table, self.repo.db.rows(
-            "SELECT id, ecu_family, from_family, to_family, relation, confidence, "
-            "status FROM software_lineage ORDER BY id"),
-            ['id', 'ecu_family', 'from_family', 'to_family', 'relation',
-             'confidence', 'status'])
+        self.refresh()
 
     def build_compare_workspace(self):
         layout = self.page('Vergelijk A|B (V6)', 'Comparison workspace: twee bestanden '
@@ -2090,6 +2080,10 @@ class MainWindow(QMainWindow):
         self.compare_output = QLabel('Kies twee bestanden en druk op Vergelijken.')
         self.compare_output.setWordWrap(True)
         layout.addWidget(self.compare_output)
+        self.compare_export_button = QPushButton('A/B-bewijs exporteren (JSON + SHA-256-manifest)')
+        self.compare_export_button.setEnabled(False)
+        self.compare_export_button.clicked.connect(self.export_compare_evidence)
+        layout.addWidget(self.compare_export_button)
         self.compare_chain_table = self.table(layout, ['Zijde', 'Pair', 'Rol',
                                                        'Diff-regio’s'])
 
@@ -2102,6 +2096,8 @@ class MainWindow(QMainWindow):
 
         def done(result):
             def apply():
+                self._last_compare_ids = (int(left), int(right))
+                self.compare_export_button.setEnabled(True)
                 negative = " — NEGATIEF GEMARKEERD" if result['negative_relation'] else ""
                 shared = "ja" if result['same_ecu_image_identity'] else "onbekend/nee"
                 self.compare_output.setText(
@@ -2127,6 +2123,28 @@ class MainWindow(QMainWindow):
 
         self.run_job(lambda progress: self.service.compare_workspace(left, right),
                      callback=done)
+
+    def export_compare_evidence(self):
+        file_ids = getattr(self, '_last_compare_ids', None)
+        if not file_ids:
+            QMessageBox.information(self, 'A/B-bewijs', 'Vergelijk eerst twee bestanden.')
+            return
+        folder = QFileDialog.getExistingDirectory(
+            self, 'Map voor A/B-bewijs', str(self.repo.root / 'reports'))
+        if not folder:
+            return
+        left_id, right_id = file_ids
+
+        def done(result):
+            QMessageBox.information(
+                self, 'A/B-bewijs geëxporteerd',
+                f"Rapport: {result['json']}\nSHA-256-manifest: {result['manifest']}\n\n"
+                'Alleen analyse; er is geen ECU-binair bestand geschreven of gewijzigd.')
+
+        self.run_job(
+            lambda _progress: self.service.export_comparison_workspace(
+                left_id, right_id, folder),
+            callback=done, job_name='A/B-bewijs exporteren')
 
     def build_tune_builder(self):
         layout = self.page('Tune Bouwer (V7)', 'Origineel erin → getunede KANDIDAAT '
@@ -2356,12 +2374,8 @@ class MainWindow(QMainWindow):
                 self.smart_advice.setText(text)
         self.safe(apply)
 
-    def _update_steps(self, roots, summary, patterns):
+    def _update_steps(self, roots, summary, patterns, confirmed, unconfirmed):
         """Stappenplan-statussen: groen vinkje als de stap kan/bestaat."""
-        confirmed = self.repo.db.rows(
-            "SELECT COUNT(*) AS n FROM file_pairs WHERE confirmed=1")[0]['n']
-        unconfirmed = self.repo.db.rows(
-            "SELECT COUNT(*) AS n FROM file_pairs WHERE confirmed=0")[0]['n']
         states = {
             1: len(roots) > 0,
             2: summary['locations'] > 0,
@@ -2378,7 +2392,12 @@ class MainWindow(QMainWindow):
             label.setText(f"{mark} <b>Stap {number}.</b> {title} <i>({counts[number]})</i>")
 
     def refresh(self):
-        """Directe (synchrone) verversing — gebruikt door knoppen en tests."""
+        """Request a coalesced background refresh."""
+        if self.worker is not None or self.refresh_worker is not None:
+            self._refresh_pending = True
+            if self.worker is not None:
+                self._refresh_soon()
+            return
         self._do_refresh()
 
     def _refresh_soon(self):
@@ -2398,232 +2417,394 @@ class MainWindow(QMainWindow):
         if self.worker is not None:
             self._refresh_timer.start(300)  # opnieuw als de taak klaar is
             return
+        if self.refresh_worker is not None:
+            return  # refresh completion schedules the coalesced follow-up
         self._refresh_pending = False
         self._do_refresh()
 
     def _do_refresh(self):
-        try:
-            if hasattr(self, 'location_table'):
-                rows = self.service.library.all_locations(
-                    self.search.text() if hasattr(self, 'search') else '')
-                self._location_rows = {row['id']: row for row in rows}
-                self.populate(self.location_table,
-                              [dict(row, sha8=(row.get('sha256') or '')[:8],
-                                    status=row.get('analysis_state')
-                                    or row.get('scan_status') or '')
-                               for row in rows],
-                              ['id', 'filename', 'root_name', 'extension',
-                               'size', 'sha8', 'status'])
-                self.location_hint.setText(
-                    f"{len(rows)} locatie(s) zichtbaar (max 500). Status NEW = "
-                    "nog niet geanalyseerd in de Library.")
-        except Exception:
-            pass
-        try:
-            if hasattr(self, 'disk_advice_label'):
-                advice = self.service.disk_advice()
-                self.disk_advice_label.setText(
-                    ('⚠ ' + advice['warning'] if advice['warning']
-                     else f"✓ App/database ({advice['data_drive']}) staat niet op "
-                          "een bron-schijf — goed voor de snelheid."))
-        except Exception:
-            pass
-        try:
-            if hasattr(self, 'backup_info'):
-                info = self.service.last_backup_info()
-                if info:
-                    self.backup_info.setText(
-                        f"Laatste backup: {info['path']} ({info['age_hours']} uur geleden"
-                        f"{'' if info['complete'] else ' — INCOMPLEET'})")
-                else:
-                    self.backup_info.setText('Laatste backup: nog geen — maak er één!')
-        except Exception:
-            pass
-        try:
-            if hasattr(self, 'review_summary'):
-                queues = self.service.review_queues(limit=200)
-                self.review_summary.setText(
-                    f"Te reviewen: {queues['total']} · unknowns {queues['unknowns_total']} · "
-                    f"onbevestigde paren {queues['pairs_total']} · "
-                    f"kenniskandidaten {queues['candidates_total']}")
-                self.populate(self.review_unknown_table, queues['unknowns'],
-                              ['id', 'filename', 'file_size', 'ecu_family', 'software_number'])
-                self.populate(self.review_pair_table,
-                              [dict(row, name=row.get('pair_name') or '')
-                               for row in queues['unconfirmed_pairs']],
-                              ['id', 'name', 'confidence'])
-                self.populate(self.review_candidate_table, queues['candidates'],
-                              ['id', 'candidate_type', 'subject', 'confidence'])
-        except Exception:
-            pass
-        try:
-            if hasattr(self, 'candidate_overview'):
-                self.populate(self.candidate_overview,
-                              [dict(row, recipe_label=(row.get('payload') or {}).get(
-                                        'recipe', {}).get('selected') or '—',
-                                    date=row.get('created_at') or '')
-                               for row in self.repo.tune_candidates(limit=200)],
-                              ['id', 'date', 'target_file_id', 'recipe_label',
-                               'match_score', 'applied_regions', 'skipped_regions',
-                               'output_path'])
-        except Exception:
-            pass
-        try:
-            if hasattr(self, 'health_output') and not self.health_output.text().startswith(('Backup', 'Nog')):
-                pass
-        except Exception:
-            pass
-        try:
-            if hasattr(self, 'dashboard_status'):
-                roots = self.service.library.roots()
-                online = sum(1 for root in roots if root['status'] == 'ONLINE')
-                summary = self.service.library.storage_summary()
-                running = [job for job in self.service.jobs()
-                           if job['status'] in ('running', 'paused')]
-                identities = len(self.repo.calibration_identities())
-                images = self.repo.db.rows(
-                    'SELECT COUNT(*) AS n FROM ecu_image_identities')[0]['n']
-                patterns = self.repo.db.rows(
-                    "SELECT COUNT(*) AS n FROM tuning_patterns "
-                    "WHERE status <> 'rejected'")[0]['n']
-                self._request_advice_async()
-                self._update_steps(roots, summary, patterns)
-                parts = [f"Library: {len(roots)} root(s), {online} online · "
-                         f"{summary['locations']} locaties / "
-                         f"{summary['unique_contents']} unieke contents",
-                         f"Kennis: {patterns} patronen · {identities} identiteiten · "
-                         f"{images} ECU-images",
-                         ("Taken bezig: " + ", ".join(
-                             f"{job['run_type']} ({job['status']})"
-                             for job in running[:3])) if running else "Geen taken bezig"]
-                self.dashboard_status.setText('\n'.join(parts))
-        except Exception:
-            pass
-        try:
-            if hasattr(self, 'compare_left'):
-                current_left = self.compare_left.currentData()
-                current_right = self.compare_right.currentData()
-                self.compare_left.clear()
-                self.compare_right.clear()
-                for row in self.repo.files():
-                    label = f"{row['id']}: {row['filename'][:48]}"
-                    self.compare_left.addItem(label, row['id'])
-                    self.compare_right.addItem(label, row['id'])
-                if current_left is not None:
-                    index = self.compare_left.findData(current_left)
-                    if index >= 0:
-                        self.compare_left.setCurrentIndex(index)
-                if current_right is not None:
-                    index = self.compare_right.findData(current_right)
-                    if index >= 0:
-                        self.compare_right.setCurrentIndex(index)
-            if hasattr(self, 'image_table'):
-                self.refresh_knowledge_model()
-        except Exception:
-            pass
-        self.stats.setText('\n\n'.join(f'{key}:  {value}' for key, value in self.repo.dashboard().items()))
-        files = self.repo.files(self.search.text())
-        self.populate(self.file_table, files, ['id', 'filename', 'file_type', 'file_size', 'ecu_family', 'software_number', 'hardware_number', 'stage', 'customer', 'project'])
-        total = self.repo.files_count(self.search.text())
-        if total > len(files):
-            self.file_hint.setText(f"{len(files)} van {total} bestanden getoond (snelheid) — "
-                                   "verfijn met het zoekveld hierboven om de rest te zien.")
-        elif files:
-            self.file_hint.setText('Bestanden in Files: eigen BIN/ORI-imports én automatisch geëxtraheerde '
-                                   'OLS-versie-binaries (bron: ols://…). Voor extracten tonen Project/Stage uit welk project en '
-                                   'welke versie ze komen; ECU is herkend voor zover de bytes dat toe laten.')
+        if self.worker is not None:
+            self._refresh_pending = True
+            return
+        if self.refresh_worker is not None:
+            return
+        query = self.search.text() if hasattr(self, 'search') else ''
+        self.refresh_worker = Worker(
+            lambda _progress: self._load_refresh_snapshot(query), self)
+        self.refresh_worker.result.connect(self._apply_refresh_snapshot)
+        self.refresh_worker.error.connect(self._refresh_error)
+        self.refresh_worker.finished.connect(self._refresh_finished)
+        self.statusBar().showMessage('Gegevens bijwerken…')
+        self.refresh_worker.start()
+
+    def _load_refresh_snapshot(self, query: str) -> dict:
+        """Read a bounded UI snapshot without touching Qt widgets."""
+        errors = []
+
+        def load(name, default, operation):
+            try:
+                return operation()
+            except Exception as exc:
+                logging.exception('Refresh snapshot section failed: %s', name)
+                errors.append(f'{name}: {exc}')
+                return default
+
+        roots = load('library roots', [], self.service.library.roots)
+        pairs = load('pairs', [], lambda: self.repo.pairs(limit=400))
+        projects = load('WinOLS projects', [], lambda: self.repo.projects(limit=300))
+        ols_objects = load('unknown OLS objects', [],
+                           lambda: self.repo.ols_unknown_objects(limit=300))
+        object_project_ids = sorted({row['project_id'] for row in ols_objects})
+        if object_project_ids:
+            marks = ','.join('?' for _ in object_project_ids)
+            object_projects = load(
+                'OLS object project names', {},
+                lambda: {row['id']: row['filename'] for row in self.repo.db.rows(
+                    f'SELECT id, filename FROM winols_projects WHERE id IN ({marks})',
+                    tuple(object_project_ids))})
         else:
-            self.file_hint.setText('Files is leeg: importeer een map met BIN/ORI of verwerk een WinOLS-project — '
-                                   'bewezen versie-binaries uit de OLS verschijnen dan hier automatisch.')
-        self.populate(self.pair_table, self.repo.pairs(limit=400), ['id', 'pair_name', 'confidence', 'confirmed'])
-        dna_rows = self.service.tuning_dna(limit=400)
-        self.populate(self.dna_table, dna_rows, ['id', 'pair_id', 'original_file_id', 'tuned_file_id', 'confidence', 'status', 'updated_at'])
-        self.populate(self.project_table, self.repo.projects(limit=300), ['id', 'filename', 'suggested_type', 'suggestion_reason', 'file_size', 'sha256', 'created_at'])
-        binary_status = self.repo.db.rows("SELECT status, COUNT(*) AS count FROM ols_binaries GROUP BY status")
-        self.ols_status.setText('OLS binary-status: ' + (', '.join(f"{row['status']}={row['count']}" for row in binary_status) if binary_status else 'nog geen OLS geïmporteerd'))
-        objects = self.repo.ols_unknown_objects(limit=300)
-        projects = {row['id']: row['filename'] for row in self.repo.projects()}
-        object_rows = [{**row, 'project': projects.get(row['project_id'], ''),
-                'evidence': json.dumps(json.loads(row['evidence']), ensure_ascii=False)} for row in objects]
-        self.populate(self.ols_object_table, object_rows,
-                  ['id', 'project', 'internal_id', 'object_type', 'size', 'role', 'confidence', 'evidence'])
-        self.populate(self.ecu_family_table, self.repo.ecu_families(), ['id', 'family_name', 'ecu_type', 'verified', 'file_count', 'original_count', 'tuned_count'])
-        # (ecu_families is doorgaans klein; zware tabellen hierboven begrensd)
-        self.populate(self.software_family_table, self.repo.software_families(), ['id', 'family_name', 'software_pattern', 'file_size', 'verified', 'file_count'])
-        calibration = self.repo.db.rows("SELECT c.id, c.name, s.family_name AS software_family, c.verified FROM calibration_families c JOIN software_families s ON s.id=c.software_family_id ORDER BY c.name")
-        self.populate(self.calibration_family_table, calibration, ['id', 'name', 'software_family', 'verified'])
-        signatures = self.repo.db.rows("SELECT s.id, e.family_name AS ecu_family, s.offset, s.length, s.confidence, s.status FROM ecu_signatures s JOIN ecu_families e ON e.id=s.ecu_family_id ORDER BY s.id DESC LIMIT 400")
-        self.populate(self.signature_table, signatures, ['id', 'ecu_family', 'offset', 'length', 'confidence', 'status'])
-        candidates = self.repo.candidates(limit=300)
-        candidate_rows = [{**row, 'payload': json.dumps(row['payload'], ensure_ascii=False)} for row in candidates]
-        self.populate(self.candidate_table, candidate_rows, ['id', 'candidate_type', 'subject_key', 'confidence', 'payload'])
-        # V3-tabellen
+            object_projects = {}
+
+        pair_counts = load(
+            'pair counts', {},
+            lambda: {int(row['confirmed']): row['n'] for row in self.repo.db.rows(
+                'SELECT confirmed, COUNT(*) AS n FROM file_pairs GROUP BY confirmed')})
+        patterns = load(
+            'patterns', [],
+            lambda: self.repo.patterns_v3(limit=200, include_details=False))
+        identities = load(
+            'calibration identities', [],
+            lambda: self.repo.calibration_identities(limit=400, include_members=False))
+        images = load(
+            'ECU image identities', [],
+            lambda: self.repo.db.rows(
+                """SELECT i.id, i.image_size, i.ecu_family, i.hardware,
+                          i.software, i.calibration, i.status, i.confidence,
+                          (SELECT COUNT(*) FROM ecu_image_members m WHERE m.image_id=i.id)
+                          AS members
+                   FROM ecu_image_identities i ORDER BY i.id LIMIT 400"""))
+        storage = load('library storage summary', {
+            'locations': 0, 'unique_contents': 0, 'indexed_bytes': 0,
+            'duplicate_bytes': 0, 'database_bytes': 0},
+            self.service.library.storage_summary)
+        object_rows = []
+        for row in ols_objects:
+            try:
+                evidence = json.loads(row.get('evidence') or '[]')
+            except (TypeError, json.JSONDecodeError):
+                evidence = row.get('evidence') or ''
+            object_rows.append({
+                **row, 'project': object_projects.get(row['project_id'], ''),
+                'evidence': json.dumps(evidence, ensure_ascii=False)})
+
+        return {
+            'query': query,
+            'errors': errors,
+            'locations': load('library locations', [],
+                              lambda: self.service.library.all_locations(query, limit=500)),
+            'disk_advice': load('disk advice', {}, self.service.disk_advice),
+            'backup_info': load('backup information', None, self.service.last_backup_info),
+            'review_queues': load('review queues', {
+                'unknowns': [], 'unknowns_total': 0, 'unconfirmed_pairs': [],
+                'pairs_total': 0, 'candidates': [], 'candidates_total': 0, 'total': 0},
+                lambda: self.service.review_queues(limit=200)),
+            'candidate_overview': load('tune candidates', [],
+                                       lambda: self.repo.tune_candidates(limit=200)),
+            'roots': roots,
+            'storage': storage,
+            'running_jobs': load(
+                'running jobs', [],
+                lambda: [job for job in self.service.jobs()
+                         if job['status'] in ('running', 'paused')]),
+            'identity_count': load(
+                'identity count', 0,
+                lambda: self.repo.db.rows(
+                    'SELECT COUNT(*) AS n FROM calibration_identities')[0]['n']),
+            'image_count': load(
+                'ECU image count', 0,
+                lambda: self.repo.db.rows(
+                    'SELECT COUNT(*) AS n FROM ecu_image_identities')[0]['n']),
+            'pattern_count': load(
+                'pattern count', 0,
+                lambda: self.repo.db.rows(
+                    "SELECT COUNT(*) AS n FROM tuning_patterns WHERE status <> 'rejected'")[0]['n']),
+            'pair_counts': pair_counts,
+            'dashboard': load('dashboard counts', {}, self.repo.dashboard),
+            'files': load('Files page', [], lambda: self.repo.files(query)),
+            'files_total': load('file count', 0, lambda: self.repo.files_count(query)),
+            'pairs': pairs,
+            'dna_rows': load('Tuning DNA', [], lambda: self.service.tuning_dna(limit=400)),
+            'projects': projects,
+            'binary_status': load(
+                'OLS binary status', [],
+                lambda: self.repo.db.rows(
+                    'SELECT status, COUNT(*) AS count FROM ols_binaries GROUP BY status')),
+            'ols_objects': object_rows,
+            'ecu_families': load('ECU families', [],
+                                 lambda: self.repo.ecu_families(limit=400)),
+            'software_families': load('software families', [],
+                                      lambda: self.repo.software_families(limit=400)),
+            'calibration_families': load(
+                'calibration families', [],
+                lambda: self.repo.db.rows(
+                    """SELECT c.id, c.name, s.family_name AS software_family, c.verified
+                       FROM calibration_families c
+                       JOIN software_families s ON s.id=c.software_family_id
+                       ORDER BY c.name LIMIT 400""")),
+            'signatures': load(
+                'ECU signatures', [],
+                lambda: self.repo.db.rows(
+                    """SELECT s.id, e.family_name AS ecu_family, s.offset, s.length,
+                              s.confidence, s.status
+                       FROM ecu_signatures s JOIN ecu_families e ON e.id=s.ecu_family_id
+                       ORDER BY s.id DESC LIMIT 400""")),
+            'candidates': load('knowledge candidates', [],
+                               lambda: self.repo.candidates(limit=300)),
+            'patterns': patterns,
+            'identities': identities,
+            'explorer_projects': projects,
+            'library_roots': roots,
+            'images': images,
+            'lineage': load(
+                'software lineage', [],
+                lambda: self.repo.db.rows(
+                    """SELECT id, ecu_family, from_family, to_family, relation, confidence,
+                              status FROM software_lineage ORDER BY id LIMIT 400""")),
+            'compare_files': load('comparison file list', [],
+                                  lambda: self.repo.files(limit=400)),
+            'map_files': load('map file list', [], lambda: self.repo.files(limit=200)),
+            'original_files': load('original file list', [],
+                                   lambda: self.repo.files_by_kind('original', limit=500)),
+            'tuned_files': load('tuned file list', [],
+                                lambda: self.repo.files_by_kind('tuned', limit=500)),
+        }
+
+    def _refresh_error(self, message: str):
+        self.statusBar().showMessage(f'Verversen mislukt: {message}', 10000)
+
+    def _refresh_finished(self):
+        worker = self.refresh_worker
+        self.refresh_worker = None
+        if worker is not None:
+            worker.deleteLater()
+        if self._refresh_pending:
+            self._refresh_soon()
+
+    def _apply_refresh_snapshot(self, snapshot: dict):
         try:
+            locations = snapshot['locations']
+            self._location_rows = {row['id']: row for row in locations}
+            self.populate(self.location_table,
+                          [dict(row, sha8=(row.get('sha256') or '')[:8],
+                                status=row.get('analysis_state') or row.get('scan_status') or '')
+                           for row in locations],
+                          ['id', 'filename', 'root_name', 'extension', 'size', 'sha8', 'status'])
+            self.location_hint.setText(
+                f"{len(locations)} locatie(s) zichtbaar (max 500). Status NEW = "
+                "nog niet geanalyseerd in de Library.")
+
+            advice = snapshot['disk_advice']
+            self.disk_advice_label.setText(
+                ('⚠ ' + advice['warning'] if advice.get('warning')
+                 else f"✓ App/database ({advice.get('data_drive', 'onbekend')}) staat niet op "
+                      "een bron-schijf — goed voor de snelheid."))
+            info = snapshot['backup_info']
+            if info:
+                self.backup_info.setText(
+                    f"Laatste backup: {info['path']} ({info['age_hours']} uur geleden"
+                    f"{'' if info['complete'] else ' — INCOMPLEET'})")
+            else:
+                self.backup_info.setText('Laatste backup: nog geen — maak er één!')
+
+            queues = snapshot['review_queues']
+            self.review_summary.setText(
+                f"Te reviewen: {queues['total']} · unknowns {queues['unknowns_total']} · "
+                f"onbevestigde paren {queues['pairs_total']} · "
+                f"kenniskandidaten {queues['candidates_total']}")
+            self.populate(self.review_unknown_table, queues['unknowns'],
+                          ['id', 'filename', 'file_size', 'ecu_family', 'software_number'])
+            self.populate(self.review_pair_table,
+                          [dict(row, name=row.get('pair_name') or '')
+                           for row in queues['unconfirmed_pairs']],
+                          ['id', 'name', 'confidence'])
+            self.populate(self.review_candidate_table, queues['candidates'],
+                          ['id', 'candidate_type', 'subject', 'confidence'])
+            self.populate(self.candidate_overview,
+                          [dict(row, recipe_label=(row.get('payload') or {}).get(
+                                    'recipe', {}).get('selected') or '—',
+                                date=row.get('created_at') or '')
+                           for row in snapshot['candidate_overview']],
+                          ['id', 'date', 'target_file_id', 'recipe_label', 'match_score',
+                           'applied_regions', 'skipped_regions', 'output_path'])
+
+            roots, storage = snapshot['roots'], snapshot['storage']
+            running = snapshot['running_jobs']
+            patterns = snapshot['pattern_count']
+            self._request_advice_async()
+            self._update_steps(roots, storage, patterns,
+                               snapshot['pair_counts'].get(1, 0),
+                               snapshot['pair_counts'].get(0, 0))
+            self.dashboard_status.setText('\n'.join([
+                f"Library: {len(roots)} root(s), "
+                f"{sum(1 for root in roots if root['status'] == 'ONLINE')} online · "
+                f"{storage['locations']} locaties / {storage['unique_contents']} unieke contents",
+                f"Kennis: {patterns} patronen · {snapshot['identity_count']} identiteiten · "
+                f"{snapshot['image_count']} ECU-images",
+                ("Taken bezig: " + ", ".join(
+                    f"{job['run_type']} ({job['status']})" for job in running[:3]))
+                if running else 'Geen taken bezig']))
+
+            current_left = self.compare_left.currentData()
+            current_right = self.compare_right.currentData()
+            self.compare_left.clear()
+            self.compare_right.clear()
+            for row in snapshot['compare_files']:
+                label = f"{row['id']}: {row['filename'][:48]}"
+                self.compare_left.addItem(label, row['id'])
+                self.compare_right.addItem(label, row['id'])
+            for combo, previous in ((self.compare_left, current_left),
+                                     (self.compare_right, current_right)):
+                if previous is not None:
+                    index = combo.findData(previous)
+                    if index >= 0:
+                        combo.setCurrentIndex(index)
+
+            self.stats.setText('\n\n'.join(
+                f'{key}:  {value}' for key, value in snapshot['dashboard'].items()))
+            files = snapshot['files']
+            self.populate(self.file_table, files,
+                          ['id', 'filename', 'file_type', 'file_size', 'ecu_family',
+                           'software_number', 'hardware_number', 'stage', 'customer', 'project'])
+            if snapshot['files_total'] > len(files):
+                self.file_hint.setText(
+                    f"{len(files)} van {snapshot['files_total']} bestanden getoond (snelheid) — "
+                    "verfijn met het zoekveld hierboven om de rest te zien.")
+            elif files:
+                self.file_hint.setText(
+                    'Bestanden in Files: eigen BIN/ORI-imports én automatisch geëxtraheerde '
+                    'OLS-versie-binaries (bron: ols://…). Voor extracten tonen Project/Stage uit welk project en '
+                    'welke versie ze komen; ECU is herkend voor zover de bytes dat toe laten.')
+            else:
+                self.file_hint.setText(
+                    'Files is leeg: importeer een map met BIN/ORI of verwerk een WinOLS-project — '
+                    'bewezen versie-binaries uit de OLS verschijnen dan hier automatisch.')
+            self.populate(self.pair_table, snapshot['pairs'],
+                          ['id', 'pair_name', 'confidence', 'confirmed'])
+            self.populate(self.dna_table, snapshot['dna_rows'],
+                          ['id', 'pair_id', 'original_file_id', 'tuned_file_id',
+                           'confidence', 'status', 'updated_at'])
+            self.populate(self.project_table, snapshot['projects'],
+                          ['id', 'filename', 'suggested_type', 'suggestion_reason',
+                           'file_size', 'sha256', 'created_at'])
+            binary_status = snapshot['binary_status']
+            self.ols_status.setText(
+                'OLS binary-status: ' + (', '.join(
+                    f"{row['status']}={row['count']}" for row in binary_status)
+                    if binary_status else 'nog geen OLS geïmporteerd'))
+            self.populate(self.ols_object_table, snapshot['ols_objects'],
+                          ['id', 'project', 'internal_id', 'object_type', 'size',
+                           'role', 'confidence', 'evidence'])
+            self.populate(self.ecu_family_table, snapshot['ecu_families'],
+                          ['id', 'family_name', 'ecu_type', 'verified', 'file_count',
+                           'original_count', 'tuned_count'])
+            self.populate(self.software_family_table, snapshot['software_families'],
+                          ['id', 'family_name', 'software_pattern', 'file_size',
+                           'verified', 'file_count'])
+            self.populate(self.calibration_family_table, snapshot['calibration_families'],
+                          ['id', 'name', 'software_family', 'verified'])
+            self.populate(self.signature_table, snapshot['signatures'],
+                          ['id', 'ecu_family', 'offset', 'length', 'confidence', 'status'])
+            self.populate(self.candidate_table,
+                          [{**row, 'payload': json.dumps(row['payload'], ensure_ascii=False)}
+                           for row in snapshot['candidates']],
+                          ['id', 'candidate_type', 'subject_key', 'confidence', 'payload'])
+            self.populate(self.image_table, snapshot['images'],
+                          ['id', 'image_size', 'ecu_family', 'hardware', 'software',
+                           'calibration', 'status', 'confidence', 'members'])
+            self.populate(self.lineage_table, snapshot['lineage'],
+                          ['id', 'ecu_family', 'from_family', 'to_family', 'relation',
+                           'confidence', 'status'])
+
             pattern_rows = []
-            for pattern in self.service.patterns_detail(limit=200):
+            for pattern in snapshot['patterns']:
                 payload = pattern['payload']
-                pattern_rows.append({'id': pattern['id'], 'pattern_key': pattern['pattern_key'][:34],
-                                     'ecu_family': payload.get('ecu_family'),
-                                     'confirmed_projects': payload.get('confirmed_projects'),
-                                     'observed_regions': payload.get('observed_regions'),
-                                     'structural_similarity': payload.get('structural_similarity'),
-                                     'stages': json.dumps(payload.get('stages', {}), ensure_ascii=False),
-                                     'confidence': pattern['confidence'], 'status': pattern['status']})
+                pattern_rows.append({
+                    'id': pattern['id'], 'pattern_key': pattern['pattern_key'][:34],
+                    'ecu_family': payload.get('ecu_family'),
+                    'confirmed_projects': payload.get('confirmed_projects'),
+                    'observed_regions': payload.get('observed_regions'),
+                    'structural_similarity': payload.get('structural_similarity'),
+                    'stages': json.dumps(payload.get('stages', {}), ensure_ascii=False),
+                    'confidence': pattern['confidence'], 'status': pattern['status']})
             self.populate(self.pattern_table, pattern_rows,
-                          ['id', 'pattern_key', 'ecu_family', 'confirmed_projects', 'observed_regions',
-                           'structural_similarity', 'stages', 'confidence', 'status'])
-            self.populate(self.region_pair_table, [p for p in self.repo.pairs() if p['confirmed']],
+                          ['id', 'pattern_key', 'ecu_family', 'confirmed_projects',
+                           'observed_regions', 'structural_similarity', 'stages',
+                           'confidence', 'status'])
+            self.populate(self.region_pair_table,
+                          [pair for pair in snapshot['pairs'] if pair['confirmed']],
                           ['id', 'pair_name', 'confirmed'])
-            identity_rows = []
-            for identity in self.repo.calibration_identities():
-                identity_rows.append({
-                    'id': identity['id'], 'ecu_family': identity.get('ecu_family'),
-                    'structural_signature': identity['structural_signature'][:24],
-                    'software_variants': ', '.join(identity.get('software_variants', [])),
-                    'region_count': identity['region_count'], 'confidence': identity['confidence'],
-                    'status': identity['status']})
+            identities = snapshot['identities']
+            self._identity_rows = identities
+            identity_rows = [{
+                'id': identity['id'], 'ecu_family': identity.get('ecu_family'),
+                'structural_signature': (identity.get('structural_signature') or '')[:24],
+                'software_variants': ', '.join(identity.get('software_variants', [])),
+                'region_count': identity['region_count'], 'confidence': identity['confidence'],
+                'status': identity['status']} for identity in identities]
             self.populate(self.identity_table, identity_rows,
                           ['id', 'ecu_family', 'structural_signature', 'software_variants',
                            'region_count', 'confidence', 'status'])
-            self.populate(self.explorer_table, self.repo.projects(),
+            self.populate(self.explorer_table, snapshot['explorer_projects'],
                           ['id', 'filename', 'file_size', 'sha256'])
-            self.refresh_alignment_table()
-            library_rows = []
-            for root in self.service.library.roots():
-                library_rows.append({'id': root['id'], 'name': root['name'], 'path': root['path'],
-                                     'status': root['status'], 'file_count': root['file_count'],
-                                     'content_count': root['content_count'],
-                                     'last_scan_at': root['last_scan_at'] or 'nooit',
-                                     'health': root['health']})
+            self.populate(self.alignment_table, identity_rows,
+                          ['id', 'ecu_family', 'status', 'region_count', 'confidence'])
+            library_rows = [{
+                'id': root['id'], 'name': root['name'], 'path': root['path'],
+                'status': root['status'], 'file_count': root['file_count'],
+                'content_count': root['content_count'],
+                'last_scan_at': root['last_scan_at'] or 'nooit', 'health': root['health']}
+                for root in snapshot['library_roots']]
             self.populate(self.library_root_table, library_rows,
                           ['id', 'name', 'path', 'status', 'file_count', 'content_count',
                            'last_scan_at', 'health'])
-            storage = self.service.library.storage_summary()
+            storage = snapshot['storage']
             self.library_storage.setText(
                 f"Opslag: {storage['locations']} locaties · {storage['unique_contents']} unieke "
                 f"contents · {storage['indexed_bytes'] / 1e9:.2f} GB geïndexeerd · "
                 f"{storage['duplicate_bytes'] / 1e9:.2f} GB duplicaten · database "
                 f"{storage['database_bytes'] / 1e6:.1f} MB")
             self.populate(self.map_file_table,
-                          [{'id': row['id'], 'filename': row['filename'], 'file_type': row['file_type'],
-                            'file_size': row['file_size']} for row in self.repo.files(limit=200)],
+                          [{'id': row['id'], 'filename': row['filename'],
+                            'file_type': row['file_type'], 'file_size': row['file_size']}
+                           for row in snapshot['map_files']],
                           ['id', 'filename', 'file_type', 'file_size'])
-        except AttributeError:
-            pass  # pagina's zijn tijdens tests niet altijd gebouwd
-        for combo, kind in [(self.original_combo, 'original'), (self.tuned_combo, 'tuned')]:
-            previous = combo.currentData()
-            combo.clear()
-            # V8.8.1: geïndexeerde query met limiet (was: ALLE files laden en
-            # in Python filteren — 450k rijen × 2 per refresh = opstart-hang)
-            for row in self.repo.files_by_kind(kind, limit=500):
-                combo.addItem(f"{row['id']} · {row['filename']}", row['id'])
-            index = combo.findData(previous)
-            if index >= 0:
-                combo.setCurrentIndex(index)
+            for combo, rows in ((self.original_combo, snapshot['original_files']),
+                                (self.tuned_combo, snapshot['tuned_files'])):
+                previous = combo.currentData()
+                combo.clear()
+                for row in rows:
+                    combo.addItem(f"{row['id']} · {row['filename']}", row['id'])
+                index = combo.findData(previous)
+                if index >= 0:
+                    combo.setCurrentIndex(index)
+        except Exception as exc:
+            logging.exception('Failed to apply refresh snapshot')
+            self.statusBar().showMessage(f'Gegevens deels bijgewerkt: {exc}', 10000)
+            return
+        if snapshot['errors']:
+            self.statusBar().showMessage(
+                f"Gedeeltelijk bijgewerkt: {snapshot['errors'][0]}", 10000)
+        else:
+            self.statusBar().showMessage('Gegevens bijgewerkt', 3000)
 
     def closeEvent(self, event):
-        if self.worker is not None:
-            QMessageBox.information(self, 'Taak actief', 'Wacht tot de lopende taak klaar is voordat je afsluit.')
+        advice_worker = getattr(self, '_advice_worker', None)
+        if (self.worker is not None or self.refresh_worker is not None
+                or advice_worker is not None):
+            QMessageBox.information(
+                self, 'Taak actief',
+                'Wacht tot de lopende taak, gegevensverversing of het dashboardadvies '
+                'klaar is voordat je afsluit.')
             event.ignore()
         else:
             event.accept()

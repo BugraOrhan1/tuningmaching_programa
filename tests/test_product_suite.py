@@ -12,6 +12,33 @@ import pytest
 from app.service import Service
 
 
+def _wait_for_gui_refresh(window, application):
+    from PySide6.QtCore import QEventLoop, QTimer
+
+    if (window.worker is None and window.refresh_worker is None
+            and getattr(window, '_advice_worker', None) is None
+            and not window._refresh_pending):
+        window.refresh()
+    loop = QEventLoop()
+    poll = QTimer()
+    poll.setInterval(10)
+    poll.timeout.connect(lambda: loop.quit()
+                         if window.worker is None and window.refresh_worker is None
+                         and getattr(window, '_advice_worker', None) is None
+                         and not window._refresh_pending else None)
+    timeout = QTimer()
+    timeout.setSingleShot(True)
+    timed_out = []
+    timeout.timeout.connect(lambda: (timed_out.append(True), loop.quit()))
+    poll.start()
+    timeout.start(5000)
+    loop.exec()
+    poll.stop()
+    timeout.stop()
+    application.processEvents()
+    assert not timed_out, 'GUI refresh did not finish before the test timeout'
+
+
 @pytest.fixture()
 def library(service, tmp_path):
     root = tmp_path / "Lib"
@@ -732,7 +759,7 @@ def test_refresh_does_not_call_assistant_synchronously(service, pair, monkeypatc
     application = QApplication.instance() or QApplication([])
     window = MainWindow(service)
     window.refresh()  # moest vroeger het advies sync berekenen
-    application.processEvents()
+    _wait_for_gui_refresh(window, application)
     window.close()
 
 
@@ -745,6 +772,7 @@ def test_pairs_page_combos_bounded(service, pair, monkeypatch):
     application = QApplication.instance() or QApplication([])
     window = MainWindow(service)
     window.refresh()
+    _wait_for_gui_refresh(window, application)
     assert window.original_combo.count() == 1
     assert window.tuned_combo.count() == 1
     assert window.pair_table.rowCount() == 1

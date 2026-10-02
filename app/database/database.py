@@ -1,7 +1,20 @@
 """SQLite schema; each operation owns its connection for worker safety."""
+import logging
+import os
 import sqlite3
+import threading
+import time
 from contextlib import contextmanager
 from pathlib import Path
+
+LOG = logging.getLogger(__name__)
+
+
+def _log_startup_phase(name: str, started: float) -> None:
+    LOG.info("database_startup phase=%s status=done elapsed_ms=%.1f thread=%s pid=%d",
+             name, (time.perf_counter() - started) * 1000,
+             threading.current_thread().name, os.getpid())
+
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS files (
@@ -168,6 +181,8 @@ HOT_INDEXES = '''
 CREATE INDEX IF NOT EXISTS idx_files_file_type ON files(file_type);
 CREATE INDEX IF NOT EXISTS idx_files_source_path ON files(source_path);
 CREATE INDEX IF NOT EXISTS idx_pairs_confirmed ON file_pairs(confirmed);
+CREATE INDEX IF NOT EXISTS idx_pairs_original_confirmed ON file_pairs(original_file_id, confirmed, id);
+CREATE INDEX IF NOT EXISTS idx_pairs_tuned_confirmed ON file_pairs(tuned_file_id, confirmed, id);
 CREATE INDEX IF NOT EXISTS idx_kc_status ON knowledge_candidates(status);
 CREATE INDEX IF NOT EXISTS idx_patterns_status ON tuning_patterns(status);
 CREATE INDEX IF NOT EXISTS idx_locations_state ON file_locations(analysis_state);
@@ -182,20 +197,30 @@ SCHEMA_VERSION = 13
 
 class Database:
     def __init__(self, path: Path):
+        startup_started = time.perf_counter()
+        LOG.info("database_startup phase=initialize status=started path=%s thread=%s pid=%d",
+                 path, threading.current_thread().name, os.getpid())
         self.path = path
+        phase_started = time.perf_counter()
         path.parent.mkdir(parents=True, exist_ok=True)
+        _log_startup_phase("data_directory", phase_started)
+        phase_started = time.perf_counter()
         with self.connect() as db:
             db.execute("PRAGMA journal_mode=WAL")
             db.executescript(SCHEMA)
             db.executescript(V3_SCHEMA)
             db.executescript(V6_SCHEMA)
             db.executescript(LIBRARY_SCHEMA)
+            _log_startup_phase("base_schema", phase_started)
+            phase_started = time.perf_counter()
             db.executescript(HOT_INDEXES)
             try:
                 db.executescript(FTS_DDL)
             except sqlite3.OperationalError:
                 pass  # geen FTS5 in deze SQLite-build: zoekfunctie gebruikt LIKE
+            _log_startup_phase("indexes_and_fts", phase_started)
             # additieve kolommigrale veiligheid voor reeds aangemaakte V3-tabellen
+            phase_started = time.perf_counter()
             expected = {
                 "tuning_regions": {"original_region_context_hash", "checksum_status"},
                 "ols_binaries": {"payload_offset", "payload_length", "end_boundary",
@@ -219,6 +244,8 @@ class Database:
                 # creates every missing V2/V3 table before recording success.
                 db.execute("INSERT OR IGNORE INTO schema_migrations(version) VALUES (?)", (SCHEMA_VERSION,))
                 db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        _log_startup_phase("compatibility_migrations", phase_started)
+        _log_startup_phase("initialize", startup_started)
 
     @contextmanager
     def connect(self):
@@ -462,4 +489,3 @@ V10_SCHEMA = """
 FTS_DDL = """
 CREATE VIRTUAL TABLE IF NOT EXISTS library_fts USING fts5(filename, path, sha256, content='');
 """
-

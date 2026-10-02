@@ -303,6 +303,11 @@ def create_api(service: Service, token: str) -> FastAPI:
     def export(pair_id: int):
         return export_report(service.diff(pair_id), Path(service.repo.root / 'reports'))
 
+    @api.post('/export/compare/{left_file_id}/{right_file_id}')
+    def export_comparison(left_file_id: int, right_file_id: int):
+        return service.export_comparison_workspace(
+            left_file_id, right_file_id, service.repo.root / 'reports')
+
     # ---------------- V3 Tuning Intelligence ----------------
     @api.get('/pairs/{pair_id}/regions')
     def pair_regions(pair_id: int):

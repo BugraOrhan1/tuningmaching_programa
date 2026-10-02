@@ -135,10 +135,9 @@ class Service(ServiceV3Mixin):
                 "note": "Uitlijning toont alleen exact gedeelde structuur en verandert geen BIN."}
 
     def diff(self, pair_id: int) -> dict:
-        pairs = [p for p in self.repo.pairs() if p['id'] == pair_id]
-        if not pairs:
+        pair = self.repo.pair_by_id(pair_id)
+        if pair is None:
             raise ValueError("Onbekend pair-ID")
-        pair = pairs[0]
         a, b = self.repo.data(pair['original_file_id']), self.repo.data(pair['tuned_file_id'])
         blocks = diff_blocks(a, b, self.repo.config['diff_merge_gap'])
         with self.repo.db.connect() as db:
@@ -158,7 +157,7 @@ class Service(ServiceV3Mixin):
                 "note": "Bekende wijzigingen uit dit paar; niet gevalideerd voor toepassing op een andere BIN."}
 
     def hex(self, pair_id: int, start: int = 0, count: int = 256) -> list[dict]:
-        pair = next((p for p in self.repo.pairs() if p['id'] == pair_id), None)
+        pair = self.repo.pair_by_id(pair_id)
         if pair is None or start < 0 or not 1 <= count <= 4096:
             raise ValueError("Ongeldige pair, offset of paginagrootte")
         return hex_rows(self.repo.data(pair['original_file_id']), self.repo.data(pair['tuned_file_id']), start, count)
@@ -181,7 +180,7 @@ class Service(ServiceV3Mixin):
 
     def generate_tuning_dna(self, pair_id: int) -> dict:
         """Create candidate, traceable change knowledge from a confirmed pair."""
-        pair = next((item for item in self.repo.pairs() if item['id'] == pair_id), None)
+        pair = self.repo.pair_by_id(pair_id)
         if pair is None:
             raise ValueError('Onbekend pair-ID')
         if not pair['confirmed']:
@@ -975,11 +974,9 @@ class Service(ServiceV3Mixin):
             row = self.repo.file(file_id)
             links = self.calibration_identity_links(file_id, [])
             regions = self.repo.map_regions_for_file(file_id)
-            pairs = [pair for pair in self.repo.pairs()
-                     if pair["confirmed"] and (pair["original_file_id"] == file_id
-                                               or pair["tuned_file_id"] == file_id)]
+            pairs = self.repo.confirmed_pairs_for_file(file_id, limit=5)
             chain = []
-            for pair in pairs[:5]:
+            for pair in pairs:
                 try:
                     diff_report = self.diff(pair["id"])
                     chain.append({"pair_id": pair["id"],
@@ -1027,6 +1024,28 @@ class Service(ServiceV3Mixin):
                           "review-only."),
             "provenance": self.km.provenance(),
         }
+
+    def export_comparison_workspace(self, left_file_id: int, right_file_id: int,
+                                    folder: str | Path) -> dict:
+        """Export A/B findings only after verifying both managed source copies."""
+        source_sides = {}
+        for side_name, file_id in (("left", left_file_id), ("right", right_file_id)):
+            row = self.repo.file(file_id)
+            self.repo.data(file_id)  # verifies the managed bytes against the stored SHA-256
+            source_sides[side_name] = {
+                "file_id": file_id,
+                "filename": row["filename"],
+                "size": row["file_size"],
+                "stored_file_type": row["file_type"],
+                "sha256": row["sha256"],
+                "sha256_verified": True,
+            }
+
+        report = self.compare_workspace(left_file_id, right_file_id)
+        for side_name, source in source_sides.items():
+            report[side_name].update(source)
+        from app.winols.project_export import export_comparison
+        return export_comparison(report, Path(folder))
 
     # ------------------------------------------------------------------
     # V6: bulk-operaties (§17) met veilige taakgrenzen

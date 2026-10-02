@@ -899,11 +899,30 @@ class Repository(RepositoryV3Mixin):
             self._candidate("software_signature", candidate["digest"], payload, candidate["confidence"])
         return {"software_family_id": software_family_id, "sample_count": len(data), "candidates": candidates}
 
-    def ecu_families(self) -> list[dict]:
-        return self.db.rows("SELECT e.*, COUNT(DISTINCT r.file_id) AS file_count, SUM(CASE WHEN f.file_type='original' THEN 1 ELSE 0 END) AS original_count, SUM(CASE WHEN f.file_type='tuned' THEN 1 ELSE 0 END) AS tuned_count FROM ecu_families e LEFT JOIN recognition_results r ON r.ecu_family_id=e.id LEFT JOIN files f ON f.id=r.file_id GROUP BY e.id ORDER BY e.family_name")
+    def ecu_families(self, limit: int = 0) -> list[dict]:
+        sql = ("SELECT e.*, COUNT(DISTINCT r.file_id) AS file_count, "
+               "SUM(CASE WHEN f.file_type='original' THEN 1 ELSE 0 END) AS original_count, "
+               "SUM(CASE WHEN f.file_type='tuned' THEN 1 ELSE 0 END) AS tuned_count "
+               "FROM ecu_families e "
+               "LEFT JOIN recognition_results r ON r.ecu_family_id=e.id "
+               "LEFT JOIN files f ON f.id=r.file_id "
+               "GROUP BY e.id ORDER BY e.family_name")
+        args: tuple = ()
+        if limit:
+            sql += " LIMIT ?"
+            args = (limit,)
+        return self.db.rows(sql, args)
 
-    def software_families(self) -> list[dict]:
-        return self.db.rows("SELECT s.*, COUNT(DISTINCT r.file_id) AS file_count FROM software_families s LEFT JOIN recognition_results r ON r.software_family_id=s.id GROUP BY s.id ORDER BY s.family_name")
+    def software_families(self, limit: int = 0) -> list[dict]:
+        sql = ("SELECT s.*, COUNT(DISTINCT r.file_id) AS file_count "
+               "FROM software_families s "
+               "LEFT JOIN recognition_results r ON r.software_family_id=s.id "
+               "GROUP BY s.id ORDER BY s.family_name")
+        args: tuple = ()
+        if limit:
+            sql += " LIMIT ?"
+            args = (limit,)
+        return self.db.rows(sql, args)
 
     def hierarchical_originals(self, recognition: dict) -> tuple[list[dict], dict]:
         """Use only verified family knowledge as an optional safe prefilter."""
@@ -1352,6 +1371,17 @@ class Repository(RepositoryV3Mixin):
             sql += " LIMIT ?"
             args = (limit,)
         return self.db.rows(sql, args)
+
+    def confirmed_pairs_for_file(self, file_id: int, limit: int = 5) -> list[dict]:
+        return self.db.rows(
+            """SELECT * FROM file_pairs WHERE confirmed=1
+               AND (original_file_id=? OR tuned_file_id=?)
+               ORDER BY id DESC LIMIT ?""",
+            (file_id, file_id, limit))
+
+    def pair_by_id(self, pair_id: int) -> dict | None:
+        rows = self.db.rows("SELECT * FROM file_pairs WHERE id=?", (pair_id,))
+        return rows[0] if rows else None
 
     def confirm_pair(self, pair_id: int) -> None:
         with self.db.connect() as db:
